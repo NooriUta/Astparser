@@ -1,0 +1,24 @@
+hound:
+  parser:
+    max-file-size: 104857600  # 100 MB
+    supported-languages:
+      - PLSQL
+      - SQL
+
+  database:
+    pool-size: 20
+    retry-attempts: 3
+    retry-delay-ms: 1000
+
+  cache:
+    enabled: true
+    max-entries: 10000
+    ttl-hours: 24
+
+  metrics:
+    enabled: true
+    report-interval-seconds: 60
+
+  logging:
+    level: INFO
+    file: logs/hound.log
