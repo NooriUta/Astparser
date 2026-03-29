@@ -15,9 +15,7 @@ java {
 
 repositories {
     mavenCentral()
-    maven {
-        url 'https://maven.aliyun.com/repository/public'
-    }
+    maven { url 'https://maven.aliyun.com/repository/public' }
 }
 
 // ==================== ЗАВИСИМОСТИ ====================
@@ -25,8 +23,10 @@ repositories {
 dependencies {
     implementation 'org.antlr:antlr4-runtime:4.13.1'
 
+    // FalkorDB официальный клиент
+    implementation 'com.falkordb:jfalkordb:0.7.0'
+
     implementation 'org.neo4j.driver:neo4j-java-driver:5.26.0'
-    implementation 'redis.clients:jedis:5.1.0'
     implementation 'io.lettuce:lettuce-core:6.4.0.RELEASE'
     implementation 'commons-cli:commons-cli:1.6.0'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.17.2'
@@ -41,10 +41,197 @@ dependencies {
     testImplementation 'org.mockito:mockito-core:5.12.0'
 }
 
+// ==================== SOURCE SETS ====================
+
+sourceSets {
+    main {
+        java {
+            srcDir 'src/main/java'
+            // Включаем все сгенерированные парсеры и Base-классы
+            srcDir 'src/main/java/com/hound/parser/base/grammars'
+        }
+        resources {
+            srcDir 'src/main/resources'
+            exclude '**/*.g4'
+        }
+    }
+}
+
+// ==================== ИСПРАВЛЕНИЕ ДУБЛИКАТА application.yml ====================
+
+tasks.processResources {
+    // Исключаем папку с грамматиками — она не нужна в финальном JAR
+    exclude 'grammars/**'
+    exclude 'build/**'
+    exclude 'out/**'
+
+    // Разрешаем дубликаты (главное лекарство от ошибки)
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+}
+
 // Отключаем встроенную генерацию ANTLR
 generateGrammarSource {
     enabled = false
 }
+
+// ==================== ANTLR COMPLETE JAR ====================
+
+def antlrCompleteJar = file("${rootDir}/lib/antlr-4.13.1-complete.jar")
+
+// ==================== ЗАДАЧА ГЕНЕРАЦИИ ГРАММАТИК ====================
+
+task generateGrammars {
+    description = 'Генерация ANTLR грамматик (пересобирает только при необходимости)'
+    group = 'antlr'
+
+    // Флаг принудительной пересборки: gradlew build -PforceGenerate=true
+    def forceGenerate = project.hasProperty('forceGenerate') &&
+            project.property('forceGenerate').toString() == 'true'
+
+    doLast {
+        def grammarRoot = file('src/main/resources/grammars')
+        def baseOutputDir = file('src/main/java/com/hound/parser/base/grammars')
+
+        if (!grammarRoot.exists()) {
+            throw new GradleException("Папка грамматик не найдена: ${grammarRoot}")
+        }
+
+        // Проверяем, нужно ли пересобирать
+        boolean shouldGenerate = forceGenerate ||
+                !baseOutputDir.exists() ||
+                baseOutputDir.listFiles({ it.name.endsWith('.java') } as FileFilter)?.length == 0
+
+        if (!shouldGenerate) {
+            println "Грамматики уже сгенерированы. Пропускаем."
+            println "Для принудительной пересборки используйте: -PforceGenerate=true"
+            return
+        }
+
+        if (!antlrCompleteJar.exists()) {
+            println "Скачиваем ANTLR complete JAR..."
+            antlrCompleteJar.parentFile.mkdirs()
+            def downloadUrl = 'https://www.antlr.org/download/antlr-4.13.1-complete.jar'
+            antlrCompleteJar.withOutputStream { out ->
+                new URL(downloadUrl).withInputStream { from -> out << from }
+            }
+            println "ANTLR скачан."
+        }
+
+        baseOutputDir.mkdirs()
+
+        println "========================================"
+        println "Генерация ANTLR грамматик + Base-классы"
+        println "========================================"
+
+        int success = 0
+        int failed = 0
+
+        def excluded = ['teradata', 'examples', 'knowage_base', 'generated', 'generated_code'] as Set
+
+        grammarRoot.eachFileRecurse { grammarFile ->
+            if (!grammarFile.name.endsWith('.g4')) return
+            if (excluded.any { grammarFile.path.contains(it) }) return
+
+            def grammarDir = grammarFile.parentFile
+            def relativePath = grammarRoot.relativePath(grammarDir)
+            def packageName = "com.hound.parser.base.grammars.${relativePath.replace('\\','.').replace('/','.')}".replace("..", ".")
+            def outputDir = file("${baseOutputDir}/${relativePath}")
+
+            outputDir.mkdirs()
+
+            println "\n[${relativePath}] Обработка: ${grammarFile.name}"
+
+            // Генерация парсера
+            def command = [
+                    'java', '-Xmx2g',
+                    '-jar', antlrCompleteJar.absolutePath,
+                    '-visitor', '-listener',
+                    '-package', packageName,
+                    '-o', outputDir.absolutePath,
+                    '-Xexact-output-dir',
+                    '-Xforce-atn',
+                    grammarFile.absolutePath
+            ]
+
+            def process = command.execute(null, grammarDir)
+            def exitCode = process.waitFor(300, java.util.concurrent.TimeUnit.SECONDS) ? process.exitValue() : -1
+
+            if (exitCode == 0) {
+                success++
+                println "  ✓ Генерация успешна"
+            } else {
+                failed++
+                println "  ✗ Ошибка генерации"
+                return
+            }
+
+            // Копирование и исправление Base-классов из папки Java
+            def javaBaseDir = new File(grammarDir, "Java")
+            if (!javaBaseDir.exists() || !javaBaseDir.isDirectory()) {
+                javaBaseDir = new File(grammarDir, "java")
+            }
+
+            if (javaBaseDir.exists() && javaBaseDir.isDirectory()) {
+                println "  → Копируем Base-классы из папки ${javaBaseDir.name}"
+
+                javaBaseDir.eachFileMatch(~/.*\.java$/) { baseFile ->
+                    def targetFile = new File(outputDir, baseFile.name)
+                    String content = baseFile.text
+
+                    // Добавляем package, если его нет
+                    if (!content.trim().startsWith("package ")) {
+                        content = "package " + packageName + ";\n\n" + content
+                    }
+
+                    targetFile.text = content
+                    println "    Скопирован и исправлен: ${baseFile.name}"
+                }
+            }
+        }
+
+        def generatedCount = fileTree(dir: baseOutputDir, include: '**/*.java').files.size()
+
+        println "\n========================================"
+        println "ГЕНЕРАЦИЯ ЗАВЕРШЕНА"
+        println "Успешно     : ${success}"
+        println "Ошибок      : ${failed}"
+        println "Всего .java : ${generatedCount}"
+        println "========================================"
+    }
+}
+
+// ==================== ВСПОМОГАТЕЛЬНЫЕ ЗАДАЧИ ====================
+
+task cleanGenerated(type: Delete) {
+    delete 'src/main/java/com/hound/parser/base/grammars'
+    description = 'Удаление всех сгенерированных парсеров'
+    group = 'build'
+}
+
+task listGrammars {
+    description = 'Список всех .g4 файлов'
+    group = 'antlr'
+
+    doLast {
+        def root = file('src/main/resources/grammars')
+        if (!root.exists()) {
+            println "Папка грамматик не найдена"
+            return
+        }
+        def files = []
+        root.eachFileRecurse { f ->
+            if (f.name.endsWith('.g4') && !f.path.contains('examples')) files << f
+        }
+        println "Найдено ${files.size()} грамматик"
+    }
+}
+
+// ==================== ЗАВИСИМОСТИ ЗАДАЧ ====================
+
+compileJava.dependsOn generateGrammars
+clean.dependsOn cleanGenerated
+
+// ==================== APPLICATION ====================
 
 application {
     mainClass = 'com.hound.HoundApplication'
@@ -53,193 +240,6 @@ application {
 test {
     useJUnitPlatform()
 }
-
-// ==================== ПУТЬ К ANTLR COMPLETE JAR ====================
-
-def antlrCompleteJar = file("${rootDir}/lib/antlr-4.13.1-complete.jar")
-
-// ==================== УНИВЕРСАЛЬНАЯ ЗАДАЧА ГЕНЕРАЦИИ ВСЕХ ГРАММАТИК ====================
-
-task generateGrammars {
-    description = 'Generate all ANTLR grammars preserving folder structure under parser.base.grammars'
-    group = 'antlr'
-
-    doLast {
-        def grammarRoot = file('src/main/resources/grammars')
-        def baseOutputDir = file('src/main/java/com/hound/parser/base/grammars')
-
-        if (!grammarRoot.exists()) {
-            throw new GradleException("Grammar root not found: ${grammarRoot}")
-        }
-
-        // Скачиваем ANTLR, если нужно
-        if (!antlrCompleteJar.exists()) {
-            println "Downloading ANTLR complete JAR..."
-            antlrCompleteJar.parentFile.mkdirs()
-            def downloadUrl = 'https://www.antlr.org/download/antlr-4.13.1-complete.jar'
-            antlrCompleteJar.withOutputStream { out ->
-                new URL(downloadUrl).withInputStream { from -> out << from }
-            }
-            println "Downloaded to: ${antlrCompleteJar}"
-        }
-
-        baseOutputDir.mkdirs()
-
-        println "========================================"
-        println "ANTLR Grammar Generation"
-        println "Source root : ${grammarRoot}"
-        println "Target root : ${baseOutputDir}"
-        println "Base package: com.hound.parser.base.grammars"
-        println "Excluded    : teradata, examples"
-        println "========================================"
-
-        int totalSuccess = 0
-        int totalFailed = 0
-        int totalFiles = 0
-
-        def excludedFolders = ['teradata', 'examples', 'knowage_base', 'generated', 'generated_code'] as Set
-
-        grammarRoot.eachFileRecurse { grammarFile ->
-            if (!grammarFile.name.endsWith('.g4')) return
-
-            def relativePath = grammarRoot.relativePath(grammarFile.parentFile)
-            if (excludedFolders.any { relativePath.contains(it) || grammarFile.path.contains(it) }) {
-                return
-            }
-
-            totalFiles++
-
-            // Формируем правильный пакет на основе относительного пути
-            def packageSuffix = relativePath.replace('\\', '.').replace('/', '.')
-            def fullPackage = packageSuffix.isEmpty() ?
-                    "com.hound.parser.base.grammars" :
-                    "com.hound.parser.base.grammars.${packageSuffix}"
-
-            // Создаём соответствующую папку для вывода
-            def outputDir = file("${baseOutputDir}/${relativePath}")
-
-            outputDir.mkdirs()
-
-            println "\n[${relativePath ?: 'root'}] Processing: ${grammarFile.name}"
-
-            def command = [
-                    'java',
-                    '-Xmx2g',
-                    '-jar', antlrCompleteJar.absolutePath,
-                    '-visitor',
-                    '-listener',
-                    '-package', fullPackage,
-                    '-o', outputDir.absolutePath,
-                    '-Xexact-output-dir',
-                    '-Xforce-atn',
-                    grammarFile.absolutePath
-            ]
-
-            def process = command.execute(null, grammarFile.parentFile)
-            def output = new StringBuilder()
-            def error = new StringBuilder()
-
-            def readerThread = Thread.start {
-                new BufferedReader(new InputStreamReader(process.inputStream)).eachLine { line ->
-                    println "     ${line}"
-                    output.append(line).append('\n')
-                }
-            }
-
-            def errorThread = Thread.start {
-                new BufferedReader(new InputStreamReader(process.errorStream)).eachLine { line ->
-                    println "  !  ${line}"
-                    error.append(line).append('\n')
-                }
-            }
-
-            def exitCode = process.waitFor(300, java.util.concurrent.TimeUnit.SECONDS) ? process.exitValue() : -1
-
-            readerThread.join(1000)
-            errorThread.join(1000)
-
-            if (exitCode == 0) {
-                totalSuccess++
-                println "  ✓ Success"
-            } else if (exitCode == -1) {
-                totalFailed++
-                println "  ✗ TIMEOUT (5 min)"
-                process.destroyForcibly()
-            } else {
-                totalFailed++
-                println "  ✗ Failed (exit: ${exitCode})"
-                if (error.toString().trim()) println "     ${error.toString().trim()}"
-            }
-        }
-
-        def totalGenerated = fileTree(dir: baseOutputDir, include: '**/*.java').files.size()
-
-        println "\n========================================"
-        println "GENERATION FINISHED"
-        println "========================================"
-        println "Grammar files processed : ${totalFiles}"
-        println "Successfully generated  : ${totalSuccess}"
-        println "Failed / Timeout        : ${totalFailed}"
-        println "Total .java files       : ${totalGenerated}"
-        println "Output location         : ${baseOutputDir}"
-        println "========================================"
-    }
-}
-// ==================== ВСПОМОГАТЕЛЬНЫЕ ЗАДАЧИ ====================
-
-task listGrammars {
-    description = 'List all grammar files'
-    group = 'antlr'
-
-    doLast {
-        def grammarRoot = file('src/main/resources/grammars')
-        if (!grammarRoot.exists()) {
-            println "Grammar root not found!"
-            return
-        }
-
-        def files = []
-        grammarRoot.eachFileRecurse { f ->
-            if (f.name.endsWith('.g4') && !f.path.contains('examples')) files << f
-        }
-
-        println "========================================"
-        println "Found ${files.size()} grammar files"
-        println "========================================"
-
-        def byLang = files.groupBy { it.parentFile.name }
-        byLang.each { lang, fs ->
-            println "\n${lang.toUpperCase()}:"
-            fs.each { println "  - ${it.name}" }
-        }
-    }
-}
-
-task cleanGenerated(type: Delete) {
-    delete 'src/main/java/com/hound/parser/generated'
-    description = 'Delete all generated parser files'
-    group = 'build'
-}
-
-task checkGenerated {
-    description = 'Check generated parser files'
-    group = 'antlr'
-
-    doLast {
-        def root = file('src/main/java/com/hound/parser/generated')
-        if (!root.exists()) {
-            println "No generated files found. Run: gradlew generateGrammars"
-            return
-        }
-        def count = fileTree(dir: root, include: '**/*.java').files.size()
-        println "Found ${count} generated Java files in total."
-    }
-}
-
-// ==================== ЗАВИСИМОСТИ ЗАДАЧ ====================
-
-compileJava.dependsOn generateGrammars
-clean.dependsOn cleanGenerated
 
 // ==================== FAT JAR ====================
 

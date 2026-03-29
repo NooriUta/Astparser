@@ -107,6 +107,8 @@ public class HoundApplication {
         config.setBatchSize(Integer.parseInt(cmd.getOptionValue("batch-size", "1000")));
         config.setCachePath(cmd.getOptionValue("cache", ".hound-cache"));
         config.setFileExtensions(List.of(".sql", ".plsql"));
+        config.setIncrementalMode(false);
+        config.setMaxFileSizeMB(100); // 100 МБ по умолчанию
 
         return config;
     }

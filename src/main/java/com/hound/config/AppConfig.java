@@ -4,20 +4,20 @@ import java.util.List;
 
 public class AppConfig {
     private String inputPath;
-    private String dbType;
-    private String dbHost;
-    private int dbPort;
-    private String dbName;
+    private String dbType = "neo4j";
+    private String dbHost = "localhost";
+    private int dbPort = 7687;
+    private String dbName = "hound";
     private String dbUser;
     private String dbPassword;
-    private int threads;
-    private int batchSize;
-    private String cachePath;
-    private List<String> fileExtensions;
-    private boolean incrementalMode;
-    private int maxFileSizeMB;
+    private int threads = Runtime.getRuntime().availableProcessors();
+    private int batchSize = 1000;
+    private String cachePath = ".hound-cache";
+    private List<String> fileExtensions = List.of(".sql", ".plsql");
+    private boolean incrementalMode = false;
+    private int maxFileSizeMB = 100;
 
-    // Getters and setters
+    // Getters and Setters
     public String getInputPath() { return inputPath; }
     public void setInputPath(String inputPath) { this.inputPath = inputPath; }
 

@@ -12,52 +12,38 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Кэш для отслеживания обработанных файлов.
- * Использует файловое хранилище для сохранения состояния между запусками.
+ * Кэш обработанных файлов с сохранением состояния между запусками.
  */
 public class FileCache {
+
     private static final Logger logger = LoggerFactory.getLogger(FileCache.class);
     private static final String CACHE_FILE = "cache.json";
 
-    private final Path cachePath;
-    private final ConcurrentHashMap<String, CacheEntry> cache;
+    private final Path cacheDir;
+    private final ConcurrentHashMap<String, CacheEntry> cacheMap;
     private final ReentrantReadWriteLock lock;
     private final ObjectMapper objectMapper;
 
-    public FileCache(String cacheDir) throws IOException {
-        this.cachePath = Paths.get(cacheDir);
-        this.cache = new ConcurrentHashMap<>();
+    public FileCache(String cacheDirPath) throws IOException {
+        this.cacheDir = Paths.get(cacheDirPath);
+        this.cacheMap = new ConcurrentHashMap<>();
         this.lock = new ReentrantReadWriteLock();
         this.objectMapper = new ObjectMapper();
         this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
 
-        // Создаем директорию для кэша если не существует
-        Files.createDirectories(cachePath);
-
-        // Загружаем существующий кэш
+        Files.createDirectories(this.cacheDir);
         loadCache();
+        logger.info("Кэш инициализирован. Загружено записей: {}", cacheMap.size());
     }
 
-    /**
-     * Проверяет, был ли файл уже обработан
-     */
     public boolean isProcessed(String filePath, String fileHash) {
         lock.readLock().lock();
         try {
-            CacheEntry entry = cache.get(filePath);
-            if (entry == null) {
-                return false;
-            }
+            CacheEntry entry = cacheMap.get(filePath);
+            if (entry == null) return false;
 
-            // Проверяем хеш файла
-            if (!entry.getFileHash().equals(fileHash)) {
-                return false;
-            }
-
-            // Проверяем TTL
-            if (entry.isExpired()) {
-                return false;
-            }
+            if (!entry.getFileHash().equals(fileHash)) return false;
+            if (entry.isExpired()) return false;
 
             return true;
         } finally {
@@ -65,87 +51,74 @@ public class FileCache {
         }
     }
 
-    /**
-     * Отмечает файл как обработанный
-     */
     public void markProcessed(String filePath, String fileHash) {
         lock.writeLock().lock();
         try {
             CacheEntry entry = new CacheEntry(filePath, fileHash);
-            cache.put(filePath, entry);
+            cacheMap.put(filePath, entry);
             saveCache();
         } finally {
             lock.writeLock().unlock();
         }
     }
 
-    /**
-     * Удаляет файл из кэша
-     */
     public void invalidate(String filePath) {
         lock.writeLock().lock();
         try {
-            cache.remove(filePath);
+            cacheMap.remove(filePath);
             saveCache();
         } finally {
             lock.writeLock().unlock();
         }
     }
 
-    /**
-     * Очищает устаревшие записи
-     */
     public void cleanup() {
         lock.writeLock().lock();
         try {
-            cache.entrySet().removeIf(entry -> entry.getValue().isExpired());
+            cacheMap.entrySet().removeIf(entry -> entry.getValue().isExpired());
             saveCache();
+            logger.debug("Очистка кэша завершена");
         } finally {
             lock.writeLock().unlock();
         }
     }
 
-    /**
-     * Получает статистику кэша
-     */
-    public CacheStats getStats() {
+    public FileCache.CacheStats getStats() {
         lock.readLock().lock();
         try {
-            long active = cache.values().stream().filter(e -> !e.isExpired()).count();
-            long expired = cache.values().stream().filter(CacheEntry::isExpired).count();
-            return new CacheStats(cache.size(), active, expired);
+            long active = cacheMap.values().stream().filter(e -> !e.isExpired()).count();
+            long expired = cacheMap.values().stream().filter(CacheEntry::isExpired).count();
+            return new FileCache.CacheStats(cacheMap.size(), active, expired);
         } finally {
             lock.readLock().unlock();
         }
     }
 
     private void loadCache() {
-        Path cacheFile = cachePath.resolve(CACHE_FILE);
+        Path cacheFile = cacheDir.resolve(CACHE_FILE);
         if (Files.exists(cacheFile)) {
             try {
                 CacheEntry[] entries = objectMapper.readValue(cacheFile.toFile(), CacheEntry[].class);
                 for (CacheEntry entry : entries) {
-                    cache.put(entry.getFilePath(), entry);
+                    cacheMap.put(entry.getFilePath(), entry);
                 }
-                logger.info("Loaded {} entries from cache", cache.size());
+                logger.info("Загружено {} записей из кэша", cacheMap.size());
             } catch (IOException e) {
-                logger.warn("Failed to load cache: {}", e.getMessage());
+                logger.warn("Не удалось загрузить кэш из файла", e);
             }
         }
     }
 
     private void saveCache() {
-        Path cacheFile = cachePath.resolve(CACHE_FILE);
+        Path cacheFile = cacheDir.resolve(CACHE_FILE);
         try {
-            objectMapper.writeValue(cacheFile.toFile(), cache.values().toArray());
+            objectMapper.writeValue(cacheFile.toFile(), cacheMap.values().toArray());
         } catch (IOException e) {
-            logger.error("Failed to save cache: {}", e.getMessage());
+            logger.error("Не удалось сохранить кэш", e);
         }
     }
 
-    /**
-     * Статистика кэша
-     */
+    // ====================== Внутренний класс статистики ======================
     public static class CacheStats {
         private final long total;
         private final long active;
@@ -163,7 +136,7 @@ public class FileCache {
 
         @Override
         public String toString() {
-            return String.format("CacheStats{total=%d, active=%d, expired=%d}", total, active, expired);
+            return String.format("CacheStats{всего=%d, активных=%d, устаревших=%d}", total, active, expired);
         }
     }
 }

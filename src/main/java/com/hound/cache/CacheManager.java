@@ -29,12 +29,14 @@ public class CacheManager {
      */
     public void cleanup() {
         try {
-            logger.debug("Running cache cleanup");
+            logger.debug("Выполняется очистка кэша");
             fileCache.cleanup();
-            CacheStats stats = fileCache.getStats();
-            logger.info("Cache stats after cleanup: {}", stats);
+
+            // Явно указываем, какой CacheStats мы имеем в виду
+            FileCache.CacheStats stats = fileCache.getStats();
+            logger.info("Статистика кэша после очистки: {}", stats);
         } catch (Exception e) {
-            logger.error("Error during cache cleanup", e);
+            logger.error("Ошибка при очистке кэша", e);
         }
     }
 
@@ -51,9 +53,8 @@ public class CacheManager {
             scheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
+        logger.info("Менеджер кэша остановлен");
     }
 
-    private static class CacheStats {
-        // Вспомогательный класс для статистики
-    }
+    // Удаляем пустой внутренний класс CacheStats, он больше не нужен
 }

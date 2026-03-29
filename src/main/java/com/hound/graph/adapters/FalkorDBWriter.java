@@ -3,112 +3,115 @@ package com.hound.graph.adapters;
 import com.hound.graph.GraphDatabaseWriter;
 import com.hound.graph.GraphNode;
 import com.hound.graph.GraphRelationship;
-import redis.clients.jedis.*;
+import com.falkordb.FalkorDB;
+import com.falkordb.Driver;          // ← required
+import com.falkordb.Graph;
+import com.falkordb.ResultSet;       // can stay (unused now) or be removed
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 
+/**
+ * Адаптер для FalkorDB с использованием официального Java клиента (jfalkordb) v0.7.0+
+ */
 public class FalkorDBWriter implements GraphDatabaseWriter {
+
     private static final Logger logger = LoggerFactory.getLogger(FalkorDBWriter.class);
-    private JedisPool jedisPool;
-    private Jedis jedis;
-    private String graphName;
-    private Transaction transaction;
+
+    private Driver driver;
+    private Graph graph;
 
     @Override
     public void connect(String host, int port, String database, String username, String password) {
-        this.graphName = database;
-        JedisPoolConfig poolConfig = new JedisPoolConfig();
-        poolConfig.setMaxTotal(20);
-        poolConfig.setMaxIdle(10);
+        this.driver = FalkorDB.driver(host, port);
+        this.graph = this.driver.graph(database);
 
-        if (username != null && !username.isEmpty()) {
-            jedisPool = new JedisPool(poolConfig, host, port, 2000, username, password);
-        } else {
-            jedisPool = new JedisPool(poolConfig, host, port);
-        }
-
-        jedis = jedisPool.getResource();
-        logger.info("Connected to FalkorDB at {}:{}/{}", host, port, database);
+        logger.info("Успешно подключено к FalkorDB: {}:{}/граф:{}", host, port, database);
     }
 
     @Override
     public void writeNode(GraphNode node) {
-        String query = String.format("GRAPH.QUERY %s \"CREATE (:%s %s)\"",
-                graphName, node.getLabel(), propertiesToRedis(node.getProperties()));
+        String label = node.getLabel();
+        String props = propertiesToCypher(node.getProperties());
+
+        String query = String.format("CREATE (n:%s %s)", label, props);
         executeQuery(query);
     }
 
     @Override
-    public void writeRelationship(GraphRelationship relationship) {
+    public void writeRelationship(GraphRelationship rel) {
         String query = String.format(
-                "GRAPH.QUERY %s \"MATCH (a), (b) WHERE id(a) = '%s' AND id(b) = '%s' CREATE (a)-[:%s %s]->(b)\"",
-                graphName, relationship.getFromNodeId(), relationship.getToNodeId(),
-                relationship.getType(), propertiesToRedis(relationship.getProperties())
+                "MATCH (a), (b) WHERE a.id = '%s' AND b.id = '%s' " +
+                        "CREATE (a)-[r:%s %s]->(b)",
+                rel.getFromNodeId(),
+                rel.getToNodeId(),
+                rel.getType(),
+                propertiesToCypher(rel.getProperties())
         );
         executeQuery(query);
     }
 
     @Override
-    public void executeQuery(String cypher) {
+    public void executeQuery(String query) {
         try {
-            jedis.sendCommand(Protocol.Command.valueOf("GRAPH.QUERY"), graphName, cypher);
+            // consume() больше не существует в текущей версии jfalkordb
+            graph.query(query);
+            logger.debug("Запрос к FalkorDB выполнен успешно");
         } catch (Exception e) {
-            logger.error("Error executing query: {}", cypher, e);
-            throw new RuntimeException("Query execution failed", e);
+            logger.error("Ошибка выполнения запроса в FalkorDB: {}", query, e);
+            throw new RuntimeException("FalkorDB query failed", e);
         }
     }
 
-    @Override
-    public void beginTransaction() {
-        transaction = jedis.multi();
-    }
+    private String propertiesToCypher(Map<String, Object> props) {
+        if (props.isEmpty()) return "{}";
 
-    @Override
-    public void commitTransaction() {
-        if (transaction != null) {
-            transaction.exec();
-            transaction = null;
-        }
-    }
-
-    @Override
-    public void rollbackTransaction() {
-        if (transaction != null) {
-            transaction.discard();
-            transaction = null;
-        }
-    }
-
-    @Override
-    public void close() {
-        if (jedis != null) jedis.close();
-        if (jedisPool != null) jedisPool.close();
-    }
-
-    @Override
-    public boolean isConnected() {
-        return jedis != null && jedis.isConnected();
-    }
-
-    private String propertiesToRedis(Map<String, Object> properties) {
-        if (properties.isEmpty()) return "";
         StringBuilder sb = new StringBuilder("{");
-        properties.forEach((key, value) -> {
-            if (sb.length() > 1) sb.append(", ");
-            sb.append(key).append(": ");
-            if (value instanceof String) {
-                sb.append("'").append(escapeString((String) value)).append("'");
+        boolean first = true;
+        for (var entry : props.entrySet()) {
+            if (!first) sb.append(", ");
+            sb.append(entry.getKey()).append(": ");
+            if (entry.getValue() instanceof String) {
+                sb.append("'").append(escape((String) entry.getValue())).append("'");
             } else {
-                sb.append(value);
+                sb.append(entry.getValue());
             }
-        });
+            first = false;
+        }
         sb.append("}");
         return sb.toString();
     }
 
-    private String escapeString(String str) {
+    private String escape(String str) {
         return str.replace("\\", "\\\\").replace("'", "\\'");
+    }
+
+    @Override
+    public void beginTransaction() {
+        logger.warn("Транзакции в FalkorDB пока не реализованы в этом адаптере");
+    }
+
+    @Override
+    public void commitTransaction() { }
+
+    @Override
+    public void rollbackTransaction() { }
+
+    @Override
+    public boolean isConnected() {
+        return driver != null && graph != null;
+    }
+
+    @Override
+    public void close() {
+        try {
+            if (driver != null) {
+                driver.close();
+            }
+            logger.info("Подключение к FalkorDB закрыто");
+        } catch (Exception e) {
+            logger.error("Ошибка при закрытии подключения к FalkorDB", e);
+        }
     }
 }

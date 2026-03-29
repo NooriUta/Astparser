@@ -49,12 +49,12 @@ public class MetricsCollector {
 
     public void recordFileSkipped(String language) {
         totalFilesSkipped.increment();
-        languageMetrics.computeIfAbsent(language, k -> new LanguageMetrics()).skipped.increment();
+        languageMetrics.computeIfAbsent(language, k -> new LanguageMetrics()).filesSkipped.increment();
     }
 
     public void recordFileFailed(String language, String error) {
         totalFilesFailed.increment();
-        languageMetrics.computeIfAbsent(language, k -> new LanguageMetrics()).failed.increment();
+        languageMetrics.computeIfAbsent(language, k -> new LanguageMetrics()).filesFailed.increment();
     }
 
     public void incrementErrors() {

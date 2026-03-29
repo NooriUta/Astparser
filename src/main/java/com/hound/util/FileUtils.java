@@ -11,21 +11,22 @@ import java.util.List;
 import java.util.stream.Stream;
 
 /**
- * Утилиты для работы с файлами
+ * Утилиты для работы с файлами — основной класс для сканирования и чтения.
  */
 public class FileUtils {
+
     private static final Logger logger = LoggerFactory.getLogger(FileUtils.class);
 
-    private static final long DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+    private static final long DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 МБ
 
     /**
-     * Рекурсивный поиск файлов по расширениям
+     * Рекурсивный поиск файлов по расширениям с ограничением размера
      */
     public static List<Path> findFiles(Path startPath, List<String> extensions, long maxSize) throws IOException {
         List<Path> files = new ArrayList<>();
 
         if (!Files.exists(startPath)) {
-            throw new IllegalArgumentException("Path does not exist: " + startPath);
+            throw new IllegalArgumentException("Путь не существует: " + startPath);
         }
 
         try (Stream<Path> stream = Files.walk(startPath)) {
@@ -36,8 +37,20 @@ public class FileUtils {
                     .forEach(files::add);
         }
 
-        logger.info("Found {} files in {}", files.size(), startPath);
+        logger.info("Найдено {} файлов в директории {}", files.size(), startPath);
         return files;
+    }
+
+    /**
+     * Проверка, соответствует ли файл одному из расширений
+     */
+    public static boolean matchesExtension(Path path, List<String> extensions) {
+        if (extensions == null || extensions.isEmpty()) {
+            return true;
+        }
+
+        String fileName = path.toString().toLowerCase();
+        return extensions.stream().anyMatch(ext -> fileName.endsWith(ext.toLowerCase()));
     }
 
     /**
@@ -47,47 +60,43 @@ public class FileUtils {
         try {
             long size = Files.size(path);
             if (size > maxSize) {
-                logger.warn("File {} exceeds size limit: {} > {}", path, size, maxSize);
+                logger.warn("Файл {} превышает ограничение размера: {} > {}", path, size, maxSize);
                 return false;
             }
             return true;
         } catch (IOException e) {
-            logger.error("Failed to get file size: {}", path, e);
+            logger.error("Не удалось получить размер файла: {}", path, e);
             return false;
         }
     }
 
     /**
-     * Проверка расширения файла
+     * Безопасное чтение файла с указанной кодировкой и проверкой размера
      */
-    public static boolean matchesExtension(Path path, List<String> extensions) {
-        String fileName = path.toString().toLowerCase();
-        return extensions.stream().anyMatch(fileName::endsWith);
+    public static String readFileSafe(Path path, String encoding, long maxSize) throws IOException {
+        long size = Files.size(path);
+        if (size > maxSize) {
+            throw new IOException(String.format("Файл слишком большой: %d байт (лимит %d байт)", size, maxSize));
+        }
+        return Files.readString(path, java.nio.charset.Charset.forName(encoding));
     }
 
     /**
-     * Чтение файла с обработкой кодировки
+     * Чтение файла (упрощённый вариант)
      */
     public static String readFile(Path path, String encoding) throws IOException {
         return Files.readString(path, java.nio.charset.Charset.forName(encoding));
     }
 
     /**
-     * Безопасное чтение файла с ограничением размера
+     * Получение относительного пути
      */
-    public static String readFileSafe(Path path, String encoding, long maxSize) throws IOException {
-        long size = Files.size(path);
-        if (size > maxSize) {
-            throw new IOException(String.format("File too large: %d > %d", size, maxSize));
+    public static String getRelativePath(Path file, Path baseDir) {
+        try {
+            return baseDir.relativize(file).toString();
+        } catch (IllegalArgumentException e) {
+            return file.toString();
         }
-        return readFile(path, encoding);
-    }
-
-    /**
-     * Создание временной директории
-     */
-    public static Path createTempDir(String prefix) throws IOException {
-        return Files.createTempDirectory(prefix);
     }
 
     /**
@@ -108,17 +117,6 @@ public class FileUtils {
                     return FileVisitResult.CONTINUE;
                 }
             });
-        }
-    }
-
-    /**
-     * Получение относительного пути
-     */
-    public static String getRelativePath(Path file, Path baseDir) {
-        try {
-            return baseDir.relativize(file).toString();
-        } catch (IllegalArgumentException e) {
-            return file.toString();
         }
     }
 }

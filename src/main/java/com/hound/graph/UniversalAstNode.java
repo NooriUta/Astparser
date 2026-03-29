@@ -2,6 +2,9 @@ package com.hound.graph;
 
 import java.util.*;
 
+/**
+ * Универсальный узел AST, совместимый с любой языковой парсерной моделью
+ */
 public class UniversalAstNode {
     private final String id;
     private final String type;
@@ -59,6 +62,27 @@ public class UniversalAstNode {
             relationships.addAll(child.toRelationships());
         }
         return relationships;
+    }
+
+    /**
+     * Возвращает ВСЕ узлы дерева (включая текущий корень и всех потомков)
+     * Используется в GraphWriter.writeTree()
+     */
+    public List<UniversalAstNode> getAllNodes() {
+        List<UniversalAstNode> allNodes = new ArrayList<>();
+        collectAllNodes(this, allNodes);
+        return allNodes;
+    }
+
+    /**
+     * Рекурсивный обход дерева для сбора всех узлов
+     */
+    private void collectAllNodes(UniversalAstNode node, List<UniversalAstNode> result) {
+        if (node == null) return;
+        result.add(node);                     // добавляем текущий узел
+        for (UniversalAstNode child : node.children) {
+            collectAllNodes(child, result);
+        }
     }
 
     // Getters

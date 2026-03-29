@@ -1,10 +1,15 @@
 package com.hound.parser;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * Фабрика парсеров.
  * Возвращает универсальный парсер, который умеет работать со всеми сгенерированными грамматиками.
  */
 public class ParserFactory {
+
+    private static final Logger logger = LoggerFactory.getLogger(ParserFactory.class);
 
     private static final LanguageParser universalParser = new com.hound.parser.UniversalParser();
 
