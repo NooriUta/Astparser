@@ -7,15 +7,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Выделенная ответственность: сбор всех узлов и связей из UniversalAstNode
+ * Собирает узлы и связи из AST-дерева.
+ * Гарантирует отсутствие дублирования связей.
  */
 public final class AstCollector {
 
-    private AstCollector() {} // утилитный класс
+    private AstCollector() {}
 
-    /**
-     * Собирает все узлы и связи из дерева
-     */
     public static CollectionResult collect(UniversalAstNode root) {
         List<UniversalAstNode> nodes = new ArrayList<>();
         List<GraphRelationship> relationships = new ArrayList<>();
@@ -31,8 +29,13 @@ public final class AstCollector {
         if (node == null) return;
 
         nodes.add(node);
-        relationships.addAll(node.toRelationships());
 
+        // Создаём связь только от текущего узла к прямым детям
+        for (UniversalAstNode child : node.getChildren()) {
+            relationships.add(new GraphRelationship(node.getId(), child.getId(), "CONTAINS"));
+        }
+
+        // Рекурсия по детям
         for (UniversalAstNode child : node.getChildren()) {
             collectRecursive(child, nodes, relationships);
         }

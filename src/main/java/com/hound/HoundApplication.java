@@ -2,7 +2,9 @@ package com.hound;
 
 import com.hound.config.AppConfig;
 import com.hound.graph.GraphDatabaseWriter;
-import com.hound.graph.adapters.*;
+import com.hound.graph.adapters.FalkorDBWriter;
+import com.hound.graph.adapters.MemgraphWriter;
+import com.hound.graph.adapters.Neo4jWriter;
 import com.hound.processor.DirectoryScanner;
 import com.hound.processor.FileProcessor;
 import com.hound.processor.ThreadPoolManager;
@@ -16,6 +18,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 public class HoundApplication {
+
     private static final Logger logger = LoggerFactory.getLogger(HoundApplication.class);
 
     public static void main(String[] args) {
@@ -30,7 +33,7 @@ public class HoundApplication {
     }
 
     public void run(AppConfig config) throws Exception {
-        logger.info("Starting HOUND AST Parser v{}", getClass().getPackage().getImplementationVersion());
+        logger.info("Starting HOUND AST Parser v1.0.0");
 
         // Initialize components
         GraphDatabaseWriter dbWriter = createDatabaseWriter(config);
@@ -45,11 +48,23 @@ public class HoundApplication {
         List<Path> files = scanner.scan(config.getInputPath(), config.getFileExtensions());
         logger.info("Found {} files to process", files.size());
 
+        if (files.isEmpty()) {
+            logger.warn("No files found to process. Check input path and file extensions.");
+            return;
+        }
+
         // Process files
         ThreadPoolManager threadPool = new ThreadPoolManager(config.getThreads());
 
         for (Path file : files) {
-            FileProcessor processor = new FileProcessor(file, dbWriter, cache, metrics, config.getBatchSize());
+            FileProcessor processor = new FileProcessor(
+                    file,
+                    dbWriter,
+                    cache,
+                    metrics,
+                    config.getBatchSize(),
+                    config.getForcedLanguage()   // ← передаём принудительный язык
+            );
             threadPool.submit(processor);
         }
 
@@ -65,18 +80,17 @@ public class HoundApplication {
     }
 
     private GraphDatabaseWriter createDatabaseWriter(AppConfig config) {
-        switch (config.getDbType().toLowerCase()) {
-            case "neo4j":
-                return new Neo4jWriter();
-            case "falkordb":
-                return new FalkorDBWriter();
-            case "memgraph":
-                return new MemgraphWriter();
-            default:
-                throw new IllegalArgumentException("Unsupported database type: " + config.getDbType());
-        }
+        return switch (config.getDbType().toLowerCase()) {
+            case "neo4j" -> new Neo4jWriter();
+            case "falkordb" -> new FalkorDBWriter();
+            case "memgraph" -> new MemgraphWriter();
+            default -> throw new IllegalArgumentException("Unsupported database type: " + config.getDbType());
+        };
     }
 
+    /**
+     * Парсинг аргументов командной строки с поддержкой --language / --dialect
+     */
     private static AppConfig parseArguments(String[] args) throws ParseException {
         Options options = new Options();
 
@@ -90,25 +104,37 @@ public class HoundApplication {
         options.addOption("th", "threads", true, "Number of threads");
         options.addOption("b", "batch-size", true, "Batch size");
         options.addOption("c", "cache", true, "Cache path");
+        options.addOption("l", "language", true, "Force SQL dialect (plsql, mysql, postgresql, etc.)");
+        options.addOption("d", "dialect", true, "Force SQL dialect (alias for --language)");
 
         CommandLineParser parser = new DefaultParser();
         CommandLine cmd = parser.parse(options, args);
 
         AppConfig config = new AppConfig();
+
         config.setInputPath(cmd.getOptionValue("input"));
-        config.setDbType(cmd.getOptionValue("db-type", "neo4j"));
+        config.setDbType(cmd.getOptionValue("db-type", "falkordb"));
         config.setDbHost(cmd.getOptionValue("db-host", "localhost"));
-        config.setDbPort(Integer.parseInt(cmd.getOptionValue("db-port", "7687")));
+        config.setDbPort(Integer.parseInt(cmd.getOptionValue("db-port", "6379")));
         config.setDbName(cmd.getOptionValue("db-name", "hound"));
-        config.setDbUser(cmd.getOptionValue("db-user"));
-        config.setDbPassword(cmd.getOptionValue("db-password"));
+        config.setDbUser(cmd.getOptionValue("db-user", ""));
+        config.setDbPassword(cmd.getOptionValue("db-password", ""));
+
         config.setThreads(Integer.parseInt(cmd.getOptionValue("threads",
                 String.valueOf(Runtime.getRuntime().availableProcessors()))));
-        config.setBatchSize(Integer.parseInt(cmd.getOptionValue("batch-size", "1000")));
+
+        config.setBatchSize(Integer.parseInt(cmd.getOptionValue("batch-size", "500")));
         config.setCachePath(cmd.getOptionValue("cache", ".hound-cache"));
-        config.setFileExtensions(List.of(".sql", ".plsql"));
+        config.setFileExtensions(List.of(".sql", ".plsql", ".pks", ".pkb"));
         config.setIncrementalMode(false);
-        config.setMaxFileSizeMB(100); // 100 МБ по умолчанию
+        config.setMaxFileSizeMB(100);
+
+        // Новый параметр — принудительный диалект
+        if (cmd.hasOption("language")) {
+            config.setForcedLanguage(cmd.getOptionValue("language"));
+        } else if (cmd.hasOption("dialect")) {
+            config.setForcedLanguage(cmd.getOptionValue("dialect"));
+        }
 
         return config;
     }

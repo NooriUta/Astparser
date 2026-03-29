@@ -16,6 +16,7 @@ public class AppConfig {
     private List<String> fileExtensions = List.of(".sql", ".plsql");
     private boolean incrementalMode = false;
     private int maxFileSizeMB = 100;
+    private String forcedLanguage = null;
 
     // Getters and Setters
     public String getInputPath() { return inputPath; }
@@ -56,4 +57,7 @@ public class AppConfig {
 
     public int getMaxFileSizeMB() { return maxFileSizeMB; }
     public void setMaxFileSizeMB(int maxFileSizeMB) { this.maxFileSizeMB = maxFileSizeMB; }
+
+    public String getForcedLanguage() { return forcedLanguage; }
+    public void setForcedLanguage(String forcedLanguage) { this.forcedLanguage = forcedLanguage; }
 }

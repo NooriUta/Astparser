@@ -1,6 +1,10 @@
-package com.hound.parser;
+package com.hound.parser.core;
 
 import com.hound.graph.UniversalAstNode;
+import com.hound.parser.AstListener;
+import com.hound.parser.LanguageParser;
+import com.hound.parser.UniversalTreeListener;
+import com.hound.parser.registry.ParserRegistry;
 import org.antlr.v4.runtime.*;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.ParseTreeWalker;
@@ -8,32 +12,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Method;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Универсальный парсер для всех сгенерированных ANTLR грамматик.
- * Строит единое универсальное AST-дерево (UniversalAstNode) независимо от языка.
+ * Универсальный парсер для всех SQL-диалектов.
+ * Теперь использует ParserRegistry вместо reflection.
  */
 public class UniversalParser implements LanguageParser {
 
     private static final Logger logger = LoggerFactory.getLogger(UniversalParser.class);
     private AstListener listener;
-
-    // Кэш загруженных парсеров для производительности
-    private final Map<String, ParserInfo> parserCache = new ConcurrentHashMap<>();
-
-    private static class ParserInfo {
-        final Class<?> lexerClass;
-        final Class<?> parserClass;
-        final String startRuleName;   // стартовое правило (stmt, sql_script и т.д.)
-
-        ParserInfo(Class<?> lexerClass, Class<?> parserClass, String startRuleName) {
-            this.lexerClass = lexerClass;
-            this.parserClass = parserClass;
-            this.startRuleName = startRuleName;
-        }
-    }
 
     @Override
     public UniversalAstNode parse(String code, String fileName) {
@@ -45,7 +32,8 @@ public class UniversalParser implements LanguageParser {
             String language = detectLanguage(fileName);
             logger.info("Начинаем парсинг файла: {} | Определён язык: {}", fileName, language.toUpperCase());
 
-            ParserInfo info = getParserForLanguage(language);
+            // Берём информацию о парсере из реестра
+            ParserRegistry.ParserInfo info = ParserRegistry.getParserInfo(language);
 
             if (info == null) {
                 logger.warn("Парсер для языка '{}' не найден. Используем сырой текст.", language);
@@ -54,14 +42,14 @@ public class UniversalParser implements LanguageParser {
 
             // Создаём lexer и parser
             CharStream input = CharStreams.fromString(code);
-            Lexer lexer = (Lexer) info.lexerClass.getConstructor(CharStream.class).newInstance(input);
-            Parser parser = (Parser) info.parserClass.getConstructor(TokenStream.class)
+            Lexer lexer = (Lexer) info.lexerClass().getConstructor(CharStream.class).newInstance(input);
+            Parser parser = (Parser) info.parserClass().getConstructor(TokenStream.class)
                     .newInstance(new CommonTokenStream(lexer));
 
-            logger.debug("Парсер {} успешно создан. Ищем стартовое правило...", info.parserClass.getSimpleName());
+            logger.debug("Парсер {} успешно создан. Ищем стартовое правило...", info.parserClass().getSimpleName());
 
             // Находим подходящее стартовое правило
-            Method startMethod = findStartRuleMethod(parser, info.startRuleName);
+            Method startMethod = findStartRuleMethod(parser, info.startRuleName());
             if (startMethod == null) {
                 logger.warn("Стартовое правило не найдено для {}. Используем сырой текст.", language);
                 return createRawNode(code, fileName, root);
@@ -70,13 +58,13 @@ public class UniversalParser implements LanguageParser {
             // Выполняем парсинг
             ParseTree tree = (ParseTree) startMethod.invoke(parser);
 
-            // Обходим дерево с помощью универсального слушателя
+            // Обходим дерево
             ParseTreeWalker walker = new ParseTreeWalker();
             walker.walk(new UniversalTreeListener(root, listener), tree);
 
             root.addProperty("parsed", true);
             root.addProperty("language", language.toUpperCase());
-            root.addProperty("parser", info.parserClass.getSimpleName());
+            root.addProperty("parser", info.parserClass().getSimpleName());
 
             logger.info("Файл {} успешно распарсен (язык: {}, узлов: {})",
                     fileName, language.toUpperCase(), root.getChildren().size());
@@ -107,51 +95,17 @@ public class UniversalParser implements LanguageParser {
         if (lower.contains("starrocks")) return "starrocks";
         if (lower.contains("trino")) return "trino";
         if (lower.contains("tsql") || lower.contains("sqlserver")) return "tsql";
+        if (lower.contains("clickhouse")) return "clickhouse";
+        if (lower.contains("databricks")) return "databricks";
+        if (lower.contains("snowflake")) return "snowflake";
+        if (lower.contains("mariadb")) return "mariadb";
+        if (lower.contains("db2")) return "db2";
+        if (lower.contains("derby")) return "derby";
+        if (lower.contains("drill")) return "drill";
+        if (lower.contains("phoenix")) return "phoenix";
+        if (lower.contains("sqlite")) return "sqlite";
 
         return "sql"; // по умолчанию
-    }
-
-    /**
-     * Возвращает информацию о парсере для указанного языка
-     */
-    private ParserInfo getParserForLanguage(String language) {
-        return parserCache.computeIfAbsent(language.toLowerCase(), lang -> {
-            try {
-                String base = "com.hound.parser.base.grammars.sql.";
-
-                return switch (lang) {
-                    case "athena" -> new ParserInfo(
-                            Class.forName(base + "athena.AthenaLexer"),
-                            Class.forName(base + "athena.AthenaParser"),
-                            "stmt"                    // стартовое правило для Athena
-                    );
-
-                    case "plsql" -> new ParserInfo(
-                            Class.forName("com.hound.parser.base.grammars.plsql.PlSqlLexer"),
-                            Class.forName("com.hound.parser.base.grammars.plsql.PlSqlParser"),
-                            "sql_script"              // наиболее частое стартовое правило для PL/SQL
-                    );
-
-                    // Добавляй сюда другие языки по мере генерации
-                    case "hive" -> new ParserInfo(
-                            Class.forName(base + "hive.v4.HiveLexer"),
-                            Class.forName(base + "hive.v4.HiveParser"),
-                            "statement"
-                    );
-
-                    default -> {
-                        logger.warn("Неизвестный язык: {}", lang);
-                        yield null;
-                    }
-                };
-            } catch (ClassNotFoundException e) {
-                logger.error("Не удалось загрузить классы парсера для языка: {}", lang, e);
-                return null;
-            } catch (Exception e) {
-                logger.error("Ошибка при инициализации парсера для языка: {}", lang, e);
-                return null;
-            }
-        });
     }
 
     /**
