@@ -9,56 +9,65 @@ import org.slf4j.LoggerFactory;
 import java.util.*;
 
 /**
- * Универсальный слушатель для обхода AST дерева
- * Записывает все узлы в универсальную структуру
+ * Универсальный слушатель ANTLR с правильной классификацией терминалов
+ * на основе типа токена из лексера (рекомендуемый подход).
  */
 public class UniversalTreeListener implements ParseTreeListener {
+
     private static final Logger logger = LoggerFactory.getLogger(UniversalTreeListener.class);
+
+    private static final int MAX_SNIPPET_LENGTH = 500;
 
     private final Deque<UniversalAstNode> nodeStack = new ArrayDeque<>();
     private final AstListener listener;
+    private final TokenStream tokenStream;
 
-    public UniversalTreeListener(UniversalAstNode root, AstListener listener) {
+    public UniversalTreeListener(UniversalAstNode root, AstListener listener, TokenStream tokenStream) {
         this.nodeStack.push(root);
         this.listener = listener;
+        this.tokenStream = tokenStream;
+    }
+
+    public UniversalTreeListener(UniversalAstNode root, AstListener listener) {
+        this(root, listener, null);
     }
 
     @Override
     public void enterEveryRule(ParserRuleContext ctx) {
         try {
-            // Получаем имя правила
             String ruleName = getRuleName(ctx);
+            UniversalAstNode node = new UniversalAstNode(ruleName, "RULE");
 
-            // Создаем узел для этого правила
-            UniversalAstNode node = new UniversalAstNode("AstNode", ruleName);
+            Token start = ctx.getStart();
+            Token stop = ctx.getStop();
 
-            // Добавляем позицию в исходном коде
-            Token startToken = ctx.getStart();
-            if (startToken != null) {
-                node.addProperty("line", startToken.getLine());
-                node.addProperty("column", startToken.getCharPositionInLine());
-                node.addProperty("startIndex", startToken.getStartIndex());
+            int startIdx = start != null ? start.getStartIndex() : -1;
+            int stopIdx = stop != null ? stop.getStopIndex() : -1;
 
-                Token stopToken = ctx.getStop();
-                if (stopToken != null) {
-                    node.addProperty("stopIndex", stopToken.getStopIndex());
-                }
-
-                // Добавляем текст узла (первые 100 символов)
-                String text = ctx.getText();
-                if (text != null && !text.isEmpty()) {
-                    if (text.length() > 100) {
-                        node.addProperty("snippet", text.substring(0, 100) + "...");
-                    } else {
-                        node.addProperty("snippet", text);
-                    }
-                }
+            if (start != null) {
+                node.addProperty("line", start.getLine());
+                node.addProperty("column", start.getCharPositionInLine());
+                node.addProperty("startIndex", startIdx);
+            }
+            if (stop != null) {
+                node.addProperty("stopIndex", stopIdx);
+                node.addProperty("endLine", stop.getLine());
+                node.addProperty("endColumn", stop.getCharPositionInLine());
             }
 
-            // Добавляем количество детей
+            node.addProperty("qualifiedName", buildQualifiedName(startIdx, stopIdx, ruleName));
             node.addProperty("childCount", ctx.getChildCount());
+            node.addProperty("depth", nodeStack.size());
+            node.addProperty("ruleIndex", ctx.getRuleIndex());
 
-            // Добавляем в дерево
+            String snippet = extractSnippet(ctx);
+            if (snippet != null && !snippet.isBlank()) {
+                node.addProperty("snippet",
+                        snippet.length() > MAX_SNIPPET_LENGTH
+                                ? snippet.substring(0, MAX_SNIPPET_LENGTH) + "..."
+                                : snippet);
+            }
+
             UniversalAstNode parent = nodeStack.peek();
             if (parent != null) {
                 parent.addChild(node);
@@ -66,103 +75,152 @@ public class UniversalTreeListener implements ParseTreeListener {
 
             nodeStack.push(node);
 
-            // Уведомляем слушателя
-            if (listener != null) {
-                listener.onNodeEnter(node);
-            }
+            if (listener != null) listener.onNodeEnter(node);
 
         } catch (Exception e) {
-            logger.debug("Error in enterEveryRule: {}", e.getMessage());
+            logger.debug("Error in enterEveryRule", e);
         }
     }
 
     @Override
     public void exitEveryRule(ParserRuleContext ctx) {
-        try {
-            if (!nodeStack.isEmpty()) {
-                UniversalAstNode node = nodeStack.pop();
-                if (listener != null) {
-                    listener.onNodeExit(node);
-                }
-            }
-        } catch (Exception e) {
-            logger.debug("Error in exitEveryRule: {}", e.getMessage());
+        if (!nodeStack.isEmpty()) {
+            UniversalAstNode node = nodeStack.pop();
+            if (listener != null) listener.onNodeExit(node);
         }
     }
 
     @Override
-    public void visitTerminal(TerminalNode node) {
+    public void visitTerminal(TerminalNode terminalNode) {
         try {
-            // Получаем текст терминала
-            String text = node.getText();
-            if (text == null || text.trim().isEmpty()) {
+            Token symbol = terminalNode.getSymbol();
+            if (symbol == null || symbol.getType() == Token.EOF) return;
+
+            String text = symbol.getText();
+            if (text == null || text.isBlank()) return;
+
+            // === ФИЛЬТРАЦИЯ HIDDEN CHANNEL (whitespace, comments) ===
+            if (symbol.getChannel() != Token.DEFAULT_CHANNEL) {
                 return;
             }
 
-            // Создаем узел для терминала
-            UniversalAstNode terminalNode = new UniversalAstNode("Terminal", "TOKEN");
-            terminalNode.addProperty("text", text);
+            // Классифицируем по типу токена из лексера — это правильный способ
+            String terminalType = classifyByTokenType(symbol.getType(), text);
 
-            // Добавляем позицию
-            Token symbol = node.getSymbol();
-            if (symbol != null) {
-                terminalNode.addProperty("line", symbol.getLine());
-                terminalNode.addProperty("column", symbol.getCharPositionInLine());
-                terminalNode.addProperty("startIndex", symbol.getStartIndex());
-                terminalNode.addProperty("stopIndex", symbol.getStopIndex());
-                terminalNode.addProperty("tokenType", symbol.getType());
-            }
+            UniversalAstNode node = new UniversalAstNode(terminalType, "TERMINAL");
 
-            // Добавляем в дерево
+            node.addProperty("text", text);
+            node.addProperty("line", symbol.getLine());
+            node.addProperty("column", symbol.getCharPositionInLine());
+            node.addProperty("startIndex", symbol.getStartIndex());
+            node.addProperty("stopIndex", symbol.getStopIndex());
+            node.addProperty("tokenType", symbol.getType());
+            node.addProperty("qualifiedName", buildQualifiedName(
+                    symbol.getStartIndex(), symbol.getStopIndex(), terminalType));
+
             UniversalAstNode parent = nodeStack.peek();
             if (parent != null) {
-                parent.addChild(terminalNode);
+                parent.addChild(node);
             }
 
-            // Уведомляем слушателя
             if (listener != null) {
-                listener.onNodeEnter(terminalNode);
-                listener.onNodeExit(terminalNode);
+                listener.onNodeEnter(node);
+                listener.onNodeExit(node);
             }
 
         } catch (Exception e) {
-            logger.debug("Error in visitTerminal: {}", e.getMessage());
+            logger.debug("Error in visitTerminal", e);
         }
     }
 
     @Override
     public void visitErrorNode(ErrorNode node) {
         try {
-            String errorText = node.getText();
             Token symbol = node.getSymbol();
+            int line = symbol != null ? symbol.getLine() : 0;
+            int column = symbol != null ? symbol.getCharPositionInLine() : 0;
+
+            UniversalAstNode errorNode = new UniversalAstNode("error_node", "ERROR");
+            errorNode.addProperty("text", node.getText());
+            errorNode.addProperty("line", line);
+            errorNode.addProperty("column", column);
+
+            UniversalAstNode parent = nodeStack.peek();
+            if (parent != null) parent.addChild(errorNode);
 
             if (listener != null) {
-                int line = symbol != null ? symbol.getLine() : 0;
-                int column = symbol != null ? symbol.getCharPositionInLine() : 0;
-                listener.onError("Parse error: " + errorText, line, column, "unknown");
+                listener.onError("Parse error", line, column, "unknown");
             }
-
-            logger.error("Parse error: {} at line {}", errorText,
-                    symbol != null ? symbol.getLine() : 0);
-
         } catch (Exception e) {
-            logger.debug("Error in visitErrorNode: {}", e.getMessage());
+            logger.debug("Error in visitErrorNode", e);
         }
     }
 
+    // ====================== Вспомогательные методы ======================
+
     /**
-     * Получает имя правила из контекста
+     * Классифицирует терминал по типу токена из лексера + тексту как fallback.
      */
+    private String classifyByTokenType(int tokenType, String text) {
+        // Здесь можно добавить маппинг конкретных типов токенов под разные диалекты,
+        // но для универсальности используем общие правила:
+
+        if (text.matches("-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?")) {
+            return "numeric_literal";
+        }
+        if ((text.startsWith("'") && text.endsWith("'")) ||
+                (text.startsWith("\"") && text.endsWith("\""))) {
+            return "string_literal";
+        }
+        if (text.matches("[+\\-*/<>=!|&^~%]+") || "||".equals(text) || "<>".equals(text)) {
+            return "operator";
+        }
+        if (text.length() == 1 && "(),;.[]{}:".indexOf(text.charAt(0)) >= 0) {
+            return "punctuation";
+        }
+
+        // По умолчанию — identifier (таблицы, колонки, переменные и т.д.)
+        return "identifier";
+    }
+
+    private String extractSnippet(ParserRuleContext ctx) {
+        if (tokenStream != null && ctx.getStart() != null && ctx.getStop() != null) {
+            try {
+                return tokenStream.getText(ctx.getStart(), ctx.getStop());
+            } catch (Exception ignored) {}
+        }
+        return ctx.getText();
+    }
+
+    private String buildQualifiedName(int start, int stop, String name) {
+        if (start >= 0 && stop >= 0) return start + ":" + stop + ":" + name;
+        if (start >= 0) return start + ":" + name;
+        return name;
+    }
+
     private String getRuleName(ParserRuleContext ctx) {
         try {
-            // Пробуем получить через имя класса
             String className = ctx.getClass().getSimpleName();
             if (className.endsWith("Context")) {
-                return className.substring(0, className.length() - 7);
+                String name = className.substring(0, className.length() - 7);
+                return toSnakeCase(name);
             }
-            return className;
+            return className.toLowerCase();
         } catch (Exception e) {
-            return "UnknownRule";
+            return "unknown_rule";
         }
+    }
+
+    private String toSnakeCase(String input) {
+        if (input == null || input.isEmpty()) return input;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (Character.isUpperCase(c) && i > 0) {
+                sb.append('_');
+            }
+            sb.append(Character.toLowerCase(c));
+        }
+        return sb.toString();
     }
 }
