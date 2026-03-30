@@ -11,6 +11,7 @@ import java.util.Map;
 
 /**
  * Адаптер для Memgraph (совместим с Neo4j Driver 5.x)
+ * Поддерживает switchGraph для Варианта A.
  */
 public class MemgraphWriter implements GraphDatabaseWriter {
 
@@ -26,6 +27,14 @@ public class MemgraphWriter implements GraphDatabaseWriter {
         this.session = driver.session(SessionConfig.forDatabase(database));
 
         logger.info("Успешно подключено к Memgraph: {}:{}/{}", host, port, database);
+    }
+
+    @Override
+    public void switchGraph(String graphName) {
+        // Для Memgraph/Neo4j смена графа = смена database
+        if (session != null) session.close();
+        this.session = driver.session(SessionConfig.forDatabase(graphName));
+        logger.debug("Memgraph: переключён на граф/database '{}'", graphName);
     }
 
     @Override
@@ -52,7 +61,6 @@ public class MemgraphWriter implements GraphDatabaseWriter {
 
     private void executeCypher(String cypher, Map<String, Object> params) {
         try {
-            // В Neo4j Driver 5.x Result больше не AutoCloseable
             Result result = session.run(cypher, params);
             result.consume();
         } catch (Exception e) {
@@ -67,17 +75,14 @@ public class MemgraphWriter implements GraphDatabaseWriter {
     }
 
     @Override
-    public void beginTransaction() { }
-
+    public void beginTransaction() {}
     @Override
-    public void commitTransaction() { }
-
+    public void commitTransaction() {}
     @Override
-    public void rollbackTransaction() { }
+    public void rollbackTransaction() {}
 
     @Override
     public boolean isConnected() {
-        // isClosed() удалён в 5.x → простой и надёжный чек (как в FalkorDBWriter)
         return driver != null && session != null;
     }
 

@@ -12,7 +12,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Map;
 
 /**
- * Адаптер для FalkorDB с поддержкой отдельного графа на каждый файл.
+ * Адаптер для FalkorDB с поддержкой отдельного графа на каждый файл (Вариант A).
  */
 public class FalkorDBWriter implements GraphDatabaseWriter {
 
@@ -24,16 +24,20 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
 
     @Override
     public void connect(String host, int port, String database, String username, String password) {
-        this.driver = FalkorDB.driver(host, port);
-        this.graph = this.driver.graph(database);   // начальный граф
-        this.currentGraphName = database;
-        logger.info("Успешно подключено к FalkorDB: {}:{}/граф:{}", host, port, database);
+        try {
+            this.driver = FalkorDB.driver(host, port);
+            this.graph = this.driver.graph(database);
+            this.currentGraphName = database;
+            logger.info("Успешно подключено к FalkorDB: {}:{}/граф:{}", host, port, database);
+        } catch (Exception e) {
+            logger.error("Ошибка подключения к FalkorDB", e);
+            throw new RuntimeException("Failed to connect to FalkorDB", e);
+        }
     }
 
     @Override
     public void switchGraph(String graphName) {
         if (graphName == null || graphName.equals(currentGraphName)) return;
-
         this.graph = this.driver.graph(graphName);
         this.currentGraphName = graphName;
         logger.debug("Переключён на граф: {}", graphName);
@@ -57,28 +61,33 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
         executeQuery(query);
     }
 
-    @Override
-    public void executeQuery(String query) {
-        try {
-            graph.query(query);
-        } catch (Exception e) {
-            logger.error("Ошибка выполнения запроса в FalkorDB: {}", query, e);
-            throw new RuntimeException("FalkorDB query failed", e);
-        }
-    }
-
+    /**
+     * Критически важная функция — генерирует корректный Cypher для FalkorDB
+     */
     private String propertiesToCypher(Map<String, Object> props) {
         if (props.isEmpty()) return "{}";
+
         StringBuilder sb = new StringBuilder("{");
         boolean first = true;
+
         for (var entry : props.entrySet()) {
             if (!first) sb.append(", ");
             sb.append(entry.getKey()).append(": ");
-            if (entry.getValue() instanceof String str) {
-                String escaped = str.replace("\\", "\\\\").replace("'", "\\'");
+
+            Object value = entry.getValue();
+
+            if (value instanceof String str) {
+                // Экранируем специальные символы
+                String escaped = str
+                        .replace("\\", "\\\\")
+                        .replace("'", "\\'")
+                        .replace("\"", "\\\"");
                 sb.append("'").append(escaped).append("'");
+            } else if (value instanceof Map) {
+                // Вложенные map преобразуем в строку
+                sb.append("\"").append(value.toString().replace("\"", "\\\"")).append("\"");
             } else {
-                sb.append(entry.getValue());
+                sb.append(value);
             }
             first = false;
         }
@@ -87,7 +96,21 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
     }
 
     @Override
-    public void beginTransaction() { logger.warn("Транзакции в FalkorDB пока не реализованы"); }
+    public void executeQuery(String query) {
+        try {
+            graph.query(query);
+            logger.debug("Запрос выполнен успешно");
+        } catch (Exception e) {
+            logger.error("Ошибка выполнения запроса в FalkorDB: {}", query, e);
+            throw new RuntimeException("FalkorDB query failed", e);
+        }
+    }
+
+    @Override
+    public void beginTransaction() {
+        logger.warn("Транзакции в FalkorDB пока не реализованы");
+    }
+
     @Override
     public void commitTransaction() {}
     @Override
@@ -100,6 +123,11 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
 
     @Override
     public void close() {
-        if (driver != null) driver.close();
+        try {
+            if (driver != null) driver.close();
+            logger.info("Подключение к FalkorDB закрыто");
+        } catch (Exception e) {
+            logger.error("Ошибка закрытия подключения к FalkorDB", e);
+        }
     }
 }

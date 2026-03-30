@@ -7,8 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Собирает узлы и связи из AST-дерева.
- * Гарантирует отсутствие дублирования связей.
+ * Собирает узлы и связи без дублирования (Вариант A).
  */
 public final class AstCollector {
 
@@ -30,12 +29,11 @@ public final class AstCollector {
 
         nodes.add(node);
 
-        // Создаём связь только от текущего узла к прямым детям
+        // Связь только от родителя к прямому ребёнку
         for (UniversalAstNode child : node.getChildren()) {
             relationships.add(new GraphRelationship(node.getId(), child.getId(), "CONTAINS"));
         }
 
-        // Рекурсия по детям
         for (UniversalAstNode child : node.getChildren()) {
             collectRecursive(child, nodes, relationships);
         }

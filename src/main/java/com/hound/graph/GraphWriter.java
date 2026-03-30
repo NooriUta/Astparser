@@ -5,24 +5,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Записывает AST-дерево в ОТДЕЛЬНЫЙ граф для каждого файла.
- * Вариант A — изоляция по файлам.
+ * Вариант A: Каждый файл записывается в свой собственный граф.
  */
 public class GraphWriter implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(GraphWriter.class);
 
     private final GraphDatabaseWriter dbWriter;
-    private final String graphName;        // уникальное имя графа для этого файла
+    private final String graphName;           // уникальное имя графа для этого файла
 
     public GraphWriter(GraphDatabaseWriter dbWriter, String graphName) {
         this.dbWriter = dbWriter;
         this.graphName = graphName;
     }
 
-    /**
-     * Основной метод записи дерева в свой собственный граф
-     */
     public void writeTree(UniversalAstNode root) {
         if (root == null) return;
 
@@ -31,17 +27,15 @@ public class GraphWriter implements AutoCloseable {
         try {
             AstCollector.CollectionResult result = AstCollector.collect(root);
 
-            // Переключаемся на отдельный граф для этого файла
+            // Переключаемся на отдельный граф этого файла
             dbWriter.switchGraph(graphName);
 
             dbWriter.beginTransaction();
 
-            // Записываем все узлы
             for (UniversalAstNode node : result.nodes()) {
                 dbWriter.writeNode(node.toGraphNode());
             }
 
-            // Записываем все связи
             for (GraphRelationship rel : result.relationships()) {
                 dbWriter.writeRelationship(rel);
             }
@@ -61,6 +55,6 @@ public class GraphWriter implements AutoCloseable {
 
     @Override
     public void close() {
-        // Граф не закрываем здесь, только соединение в dbWriter
+        // Граф не закрываем здесь
     }
 }

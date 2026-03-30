@@ -10,7 +10,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Map;
 
 /**
- * Адаптер для записи данных в Neo4j (Driver 5.x)
+ * Адаптер для Neo4j (Driver 5.x) с поддержкой switchGraph.
  */
 public class Neo4jWriter implements GraphDatabaseWriter {
 
@@ -29,10 +29,16 @@ public class Neo4jWriter implements GraphDatabaseWriter {
     }
 
     @Override
+    public void switchGraph(String graphName) {
+        if (session != null) session.close();
+        this.session = driver.session(SessionConfig.forDatabase(graphName));
+        logger.debug("Neo4j: переключён на граф/database '{}'", graphName);
+    }
+
+    @Override
     public void writeNode(GraphNode node) {
         String cypher = "CREATE (n:" + node.getLabel() + " $props)";
-        Map<String, Object> params = Map.of("props", node.getProperties());
-        executeCypher(cypher, params);
+        executeCypher(cypher, Map.of("props", node.getProperties()));
     }
 
     @Override
@@ -44,22 +50,19 @@ public class Neo4jWriter implements GraphDatabaseWriter {
             SET r += $props
             """.formatted(rel.getType());
 
-        Map<String, Object> params = Map.of(
+        executeCypher(cypher, Map.of(
                 "fromId", rel.getFromNodeId(),
                 "toId", rel.getToNodeId(),
                 "props", rel.getProperties()
-        );
-
-        executeCypher(cypher, params);
+        ));
     }
 
     private void executeCypher(String cypher, Map<String, Object> params) {
         try {
-            // В Neo4j Driver 5.x Result больше не AutoCloseable
             Result result = session.run(cypher, params);
-            result.consume(); // Освобождаем результат
+            result.consume();
         } catch (Exception e) {
-            logger.error("Ошибка выполнения Cypher-запроса", e);
+            logger.error("Ошибка выполнения запроса в Neo4j", e);
             throw new RuntimeException("Neo4j query failed", e);
         }
     }
@@ -70,23 +73,14 @@ public class Neo4jWriter implements GraphDatabaseWriter {
     }
 
     @Override
-    public void beginTransaction() {
-        // Для простоты пока не используем явные транзакции
-    }
-
+    public void beginTransaction() {}
     @Override
-    public void commitTransaction() {
-        // Реализовано через executeWrite при необходимости
-    }
-
+    public void commitTransaction() {}
     @Override
-    public void rollbackTransaction() {
-        // Реализовано через executeWrite при необходимости
-    }
+    public void rollbackTransaction() {}
 
     @Override
     public boolean isConnected() {
-        // isClosed() удалён в 5.x → используем простой и надёжный чек
         return driver != null && session != null;
     }
 
