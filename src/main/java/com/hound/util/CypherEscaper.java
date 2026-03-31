@@ -9,9 +9,14 @@ public final class CypherEscaper {
 
     public static Object escape(Object value) {
         if (value instanceof String str) {
-            return str.replace("\\", "\\\\")
+            return str
+                    .replace("\\", "\\\\")
                     .replace("'", "\\'")
-                    .replace("\"", "\\\"");
+                    .replace("\"", "\\\"")
+                    .replace("\r", "\\r")
+                    .replace("\n", "\\n")
+                    .replace("\t", "\\t")
+                    .replace("\0", "");
         }
         return value;
     }
