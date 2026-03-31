@@ -7,10 +7,11 @@ import org.neo4j.driver.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 
 /**
- * Адаптер для Neo4j (Driver 5.x) с поддержкой switchGraph.
+ * Адаптер для Neo4j (Driver 5.x) с поддержкой switchGraph и batch-методов.
  */
 public class Neo4jWriter implements GraphDatabaseWriter {
 
@@ -25,15 +26,17 @@ public class Neo4jWriter implements GraphDatabaseWriter {
         this.driver = GraphDatabase.driver(uri, AuthTokens.basic(username, password));
         this.session = driver.session(SessionConfig.forDatabase(database));
 
-        logger.info("Успешно подключено к Neo4j: {}:{}/{}", host, port, database);
+        logger.info("Successfully connected to Neo4j: {}:{}/{}", host, port, database);
     }
 
     @Override
     public void switchGraph(String graphName) {
         if (session != null) session.close();
         this.session = driver.session(SessionConfig.forDatabase(graphName));
-        logger.debug("Neo4j: переключён на граф/database '{}'", graphName);
+        logger.debug("Neo4j: switched to database/graph '{}'", graphName);
     }
+
+    // ====================== Одиночные методы ======================
 
     @Override
     public void writeNode(GraphNode node) {
@@ -57,12 +60,34 @@ public class Neo4jWriter implements GraphDatabaseWriter {
         ));
     }
 
+    // ====================== Batch методы ======================
+
+    @Override
+    public void writeNodes(List<GraphNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) return;
+
+        for (GraphNode node : nodes) {
+            writeNode(node);   // Neo4j хорошо справляется с пакетными одиночными запросами
+        }
+    }
+
+    @Override
+    public void writeRelationships(List<GraphRelationship> rels) {
+        if (rels == null || rels.isEmpty()) return;
+
+        for (GraphRelationship rel : rels) {
+            writeRelationship(rel);
+        }
+    }
+
+    // ====================== Вспомогательные методы ======================
+
     private void executeCypher(String cypher, Map<String, Object> params) {
         try {
             Result result = session.run(cypher, params);
             result.consume();
         } catch (Exception e) {
-            logger.error("Ошибка выполнения запроса в Neo4j", e);
+            logger.error("Error executing query in Neo4j", e);
             throw new RuntimeException("Neo4j query failed", e);
         }
     }
@@ -89,9 +114,9 @@ public class Neo4jWriter implements GraphDatabaseWriter {
         try {
             if (session != null) session.close();
             if (driver != null) driver.close();
-            logger.info("Подключение к Neo4j закрыто");
+            logger.info("Neo4j connection closed");
         } catch (Exception e) {
-            logger.error("Ошибка закрытия подключения к Neo4j", e);
+            logger.error("Error closing Neo4j connection", e);
         }
     }
 }

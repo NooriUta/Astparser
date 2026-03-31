@@ -9,10 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
-/**
- * Сборщик метрик производительности HOUND
- * Исправлена поддержка Instant и улучшена читаемость отчёта
- */
+
 public class MetricsCollector {
 
     private static final Logger logger = LoggerFactory.getLogger(MetricsCollector.class);
@@ -33,11 +30,7 @@ public class MetricsCollector {
     // Метрики по языкам
     private final ConcurrentHashMap<String, LanguageMetrics> languageMetrics = new ConcurrentHashMap<>();
 
-    private final Instant startTime;
-
-    public MetricsCollector() {
-        this.startTime = Instant.now();
-    }
+    private final Instant startTime = Instant.now();
 
     public void recordFileProcessed(long durationMs, int nodes, int relationships) {
         totalFilesProcessed.increment();
@@ -49,94 +42,54 @@ public class MetricsCollector {
         maxProcessingTime.updateAndGet(max -> Math.max(max, durationMs));
     }
 
-    public void recordFileSkipped(String language) {
+    public void incrementSkipped() {
         totalFilesSkipped.increment();
-        languageMetrics.computeIfAbsent(language, k -> new LanguageMetrics()).filesSkipped.increment();
-    }
-
-    public void recordFileFailed(String language, String error) {
-        totalFilesFailed.increment();
-        languageMetrics.computeIfAbsent(language, k -> new LanguageMetrics()).filesFailed.increment();
     }
 
     public void incrementErrors() {
         totalErrors.increment();
     }
 
-    public void recordLanguageMetrics(String language, int nodes, int relationships, long durationMs) {
-        LanguageMetrics metrics = languageMetrics.computeIfAbsent(language, k -> new LanguageMetrics());
-        metrics.filesProcessed.increment();
-        metrics.nodesCreated.add(nodes);
-        metrics.relationshipsCreated.add(relationships);
-        metrics.processingTime.addAndGet(durationMs);
-    }
-
     public void printReport() {
         long elapsedSeconds = Duration.between(startTime, Instant.now()).getSeconds();
+        long totalFiles = totalFilesProcessed.sum();
+        double avgTime = totalFiles == 0 ? 0.0 : (double) totalProcessingTime.get() / totalFiles;
+        double throughput = totalFiles == 0 ? 0.0 : totalFiles / (double) Math.max(1, elapsedSeconds);
 
         logger.info("========================================");
         logger.info("HOUND Processing Report");
         logger.info("========================================");
-        logger.info("Total files processed : {}", totalFilesProcessed.sum());
+        logger.info("Total files processed : {}", totalFiles);
         logger.info("Total files skipped   : {}", totalFilesSkipped.sum());
         logger.info("Total files failed    : {}", totalFilesFailed.sum());
         logger.info("Total nodes created   : {}", totalNodesCreated.sum());
         logger.info("Total relationships   : {}", totalRelationshipsCreated.sum());
         logger.info("Total errors          : {}", totalErrors.sum());
         logger.info("Total processing time : {} ms", totalProcessingTime.get());
-        logger.info("Average time per file : {:.1f} ms", getAverageProcessingTime());
+        logger.info("Average time per file : {} ms", String.format("%.1f", avgTime));
         logger.info("Min processing time   : {} ms", minProcessingTime.get() == Long.MAX_VALUE ? 0 : minProcessingTime.get());
         logger.info("Max processing time   : {} ms", maxProcessingTime.get());
         logger.info("Elapsed time          : {} seconds", elapsedSeconds);
-        logger.info("Throughput            : {:.2f} files/sec",
-                totalFilesProcessed.sum() / (double) Math.max(1, elapsedSeconds));
+        logger.info("Throughput            : {} files/sec", String.format("%.2f", throughput));
 
         if (!languageMetrics.isEmpty()) {
             logger.info("----------------------------------------");
             logger.info("Language Breakdown:");
             for (var entry : languageMetrics.entrySet()) {
                 LanguageMetrics m = entry.getValue();
-                logger.info("  {} → processed={}, nodes={}, rels={}, avgTime={:.1f}ms",
+                logger.info("  {} → processed={}, nodes={}, rels={}, avgTime={} ms",
                         entry.getKey(),
                         m.filesProcessed.sum(),
                         m.nodesCreated.sum(),
                         m.relationshipsCreated.sum(),
-                        m.getAverageTime());
+                        String.format("%.1f", m.getAverageTime()));
             }
         }
         logger.info("========================================");
     }
 
-    private double getAverageProcessingTime() {
-        long total = totalProcessingTime.get();
-        long count = totalFilesProcessed.sum();
-        return count == 0 ? 0.0 : (double) total / count;
-    }
-
-    public ProcessingMetrics snapshot() {
-        return new ProcessingMetrics(
-                totalFilesProcessed.sum(),
-                totalFilesSkipped.sum(),
-                totalFilesFailed.sum(),
-                totalNodesCreated.sum(),
-                totalRelationshipsCreated.sum(),
-                totalErrors.sum(),
-                totalProcessingTime.get(),
-                getAverageProcessingTime(),
-                minProcessingTime.get() == Long.MAX_VALUE ? 0 : minProcessingTime.get(),
-                maxProcessingTime.get(),
-                Duration.between(startTime, Instant.now()).toMillis()
-        );
-    }
-
-    public void incrementSkipped() {
-        totalFilesSkipped.increment();
-    }
-
     private static class LanguageMetrics {
         final LongAdder filesProcessed = new LongAdder();
-        final LongAdder filesSkipped = new LongAdder();
-        final LongAdder filesFailed = new LongAdder();
         final LongAdder nodesCreated = new LongAdder();
         final LongAdder relationshipsCreated = new LongAdder();
         final AtomicLong processingTime = new AtomicLong();

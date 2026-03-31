@@ -9,22 +9,24 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * Периодический отчет по метрикам
+ * Периодический отчёт по метрикам.
+ * Исправлено: теперь использует printReport() вместо удалённого snapshot().
  */
 public class MetricsReporter {
+
     private static final Logger logger = LoggerFactory.getLogger(MetricsReporter.class);
 
     private final MetricsCollector metricsCollector;
     private final ScheduledExecutorService scheduler;
     private final long reportIntervalSeconds;
-    private final Consumer<ProcessingMetrics> customReporter;
+    private final Consumer<String> customReporter;   // изменено на String для простоты
 
     public MetricsReporter(MetricsCollector metricsCollector, long reportIntervalSeconds) {
         this(metricsCollector, reportIntervalSeconds, null);
     }
 
     public MetricsReporter(MetricsCollector metricsCollector, long reportIntervalSeconds,
-                           Consumer<ProcessingMetrics> customReporter) {
+                           Consumer<String> customReporter) {
         this.metricsCollector = metricsCollector;
         this.reportIntervalSeconds = reportIntervalSeconds;
         this.customReporter = customReporter;
@@ -51,17 +53,14 @@ public class MetricsReporter {
 
     private void report() {
         try {
-            ProcessingMetrics metrics = metricsCollector.snapshot();
-            logger.info("Progress: processed={}, nodes={}, rels={}, errors={}",
-                    metrics.getFilesProcessed(),
-                    metrics.getNodesCreated(),
-                    metrics.getRelationshipsCreated(),
-                    metrics.getErrors()
-            );
+            // Основной способ вывода метрик
+            metricsCollector.printReport();
 
+            // Если нужен кастомный обработчик (например, отправка в Prometheus или файл)
             if (customReporter != null) {
-                customReporter.accept(metrics);
+                customReporter.accept("Metrics reported at " + java.time.Instant.now());
             }
+
         } catch (Exception e) {
             logger.error("Error during metrics reporting", e);
         }

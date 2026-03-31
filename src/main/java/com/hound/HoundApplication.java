@@ -17,6 +17,10 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.util.List;
 
+/**
+ * Главный класс приложения HOUND.
+ * Исправлена ошибка конструктора FileProcessor (убран batchSize).
+ */
 public class HoundApplication {
 
     private static final Logger logger = LoggerFactory.getLogger(HoundApplication.class);
@@ -35,7 +39,7 @@ public class HoundApplication {
     public void run(AppConfig config) throws Exception {
         logger.info("Starting HOUND AST Parser v1.0.0");
 
-        // Initialize components
+        // Инициализация компонентов
         GraphDatabaseWriter dbWriter = createDatabaseWriter(config);
         dbWriter.connect(config.getDbHost(), config.getDbPort(),
                 config.getDbName(), config.getDbUser(), config.getDbPassword());
@@ -43,17 +47,18 @@ public class HoundApplication {
         FileCache cache = new FileCache(config.getCachePath());
         MetricsCollector metrics = new MetricsCollector();
 
-        // Scan for files
+        // Сканирование файлов
         DirectoryScanner scanner = new DirectoryScanner();
         List<Path> files = scanner.scan(config.getInputPath(), config.getFileExtensions());
         logger.info("Found {} files to process", files.size());
 
         if (files.isEmpty()) {
             logger.warn("No files found to process. Check input path and file extensions.");
+            dbWriter.close();
             return;
         }
 
-        // Process files
+        // Обработка файлов
         ThreadPoolManager threadPool = new ThreadPoolManager(config.getThreads());
 
         for (Path file : files) {
@@ -62,21 +67,20 @@ public class HoundApplication {
                     dbWriter,
                     cache,
                     metrics,
-                    config.getBatchSize(),
-                    config.getForcedLanguage()   // ← передаём принудительный язык
+                    config.getForcedLanguage()   // ← только 5 параметров!
             );
             threadPool.submit(processor);
         }
 
-        // Wait for completion
+        // Ожидание завершения всех задач
         threadPool.shutdownAndWait();
 
-        // Output metrics
+        // Вывод отчёта
         metrics.printReport();
 
-        // Cleanup
+        // Очистка ресурсов
         dbWriter.close();
-        logger.info("HOUND processing completed");
+        logger.info("HOUND processing completed successfully");
     }
 
     private GraphDatabaseWriter createDatabaseWriter(AppConfig config) {
@@ -89,7 +93,7 @@ public class HoundApplication {
     }
 
     /**
-     * Парсинг аргументов командной строки с поддержкой --language / --dialect
+     * Парсинг аргументов командной строки
      */
     private static AppConfig parseArguments(String[] args) throws ParseException {
         Options options = new Options();
@@ -102,7 +106,6 @@ public class HoundApplication {
         options.addOption("u", "db-user", true, "Database user");
         options.addOption("pw", "db-password", true, "Database password");
         options.addOption("th", "threads", true, "Number of threads");
-        options.addOption("b", "batch-size", true, "Batch size");
         options.addOption("c", "cache", true, "Cache path");
         options.addOption("l", "language", true, "Force SQL dialect (plsql, mysql, postgresql, etc.)");
         options.addOption("d", "dialect", true, "Force SQL dialect (alias for --language)");
@@ -123,13 +126,12 @@ public class HoundApplication {
         config.setThreads(Integer.parseInt(cmd.getOptionValue("threads",
                 String.valueOf(Runtime.getRuntime().availableProcessors()))));
 
-        config.setBatchSize(Integer.parseInt(cmd.getOptionValue("batch-size", "500")));
         config.setCachePath(cmd.getOptionValue("cache", ".hound-cache"));
         config.setFileExtensions(List.of(".sql", ".plsql", ".pks", ".pkb"));
         config.setIncrementalMode(false);
         config.setMaxFileSizeMB(100);
 
-        // Новый параметр — принудительный диалект
+        // Принудительный язык/диалект
         if (cmd.hasOption("language")) {
             config.setForcedLanguage(cmd.getOptionValue("language"));
         } else if (cmd.hasOption("dialect")) {

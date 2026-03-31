@@ -7,11 +7,12 @@ import org.neo4j.driver.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 
 /**
- * Адаптер для Memgraph (совместим с Neo4j Driver 5.x)
- * Поддерживает switchGraph для Варианта A.
+ * Адаптер для Memgraph (совместим с Neo4j Driver 5.x).
+ * Добавлена поддержка batch-методов writeNodes / writeRelationships.
  */
 public class MemgraphWriter implements GraphDatabaseWriter {
 
@@ -26,16 +27,17 @@ public class MemgraphWriter implements GraphDatabaseWriter {
         this.driver = GraphDatabase.driver(uri, AuthTokens.basic(username, password));
         this.session = driver.session(SessionConfig.forDatabase(database));
 
-        logger.info("Успешно подключено к Memgraph: {}:{}/{}", host, port, database);
+        logger.info("Successfully connected to Memgraph: {}:{}/{}", host, port, database);
     }
 
     @Override
     public void switchGraph(String graphName) {
-        // Для Memgraph/Neo4j смена графа = смена database
         if (session != null) session.close();
         this.session = driver.session(SessionConfig.forDatabase(graphName));
-        logger.debug("Memgraph: переключён на граф/database '{}'", graphName);
+        logger.debug("Memgraph: switched to database/graph '{}'", graphName);
     }
+
+    // ====================== Одиночные методы ======================
 
     @Override
     public void writeNode(GraphNode node) {
@@ -59,12 +61,34 @@ public class MemgraphWriter implements GraphDatabaseWriter {
         ));
     }
 
+    // ====================== Batch методы ======================
+
+    @Override
+    public void writeNodes(List<GraphNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) return;
+
+        for (GraphNode node : nodes) {
+            writeNode(node);        // Memgraph хорошо работает с одиночными запросами
+        }
+    }
+
+    @Override
+    public void writeRelationships(List<GraphRelationship> rels) {
+        if (rels == null || rels.isEmpty()) return;
+
+        for (GraphRelationship rel : rels) {
+            writeRelationship(rel);
+        }
+    }
+
+    // ====================== Вспомогательные методы ======================
+
     private void executeCypher(String cypher, Map<String, Object> params) {
         try {
             Result result = session.run(cypher, params);
             result.consume();
         } catch (Exception e) {
-            logger.error("Ошибка выполнения запроса в Memgraph", e);
+            logger.error("Error executing query in Memgraph", e);
             throw new RuntimeException("Memgraph query failed", e);
         }
     }
@@ -91,9 +115,9 @@ public class MemgraphWriter implements GraphDatabaseWriter {
         try {
             if (session != null) session.close();
             if (driver != null) driver.close();
-            logger.info("Подключение к Memgraph закрыто");
+            logger.info("Memgraph connection closed");
         } catch (Exception e) {
-            logger.error("Ошибка закрытия подключения к Memgraph", e);
+            logger.error("Error closing Memgraph connection", e);
         }
     }
 }

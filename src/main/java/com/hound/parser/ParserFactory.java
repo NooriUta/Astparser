@@ -13,15 +13,14 @@ public class ParserFactory {
 
     /**
      * Основной метод получения парсера.
-     * Поддерживает принудительное указание языка через аргумент --language=plsql
      */
     public static LanguageParser getParser(String fileName, String forcedLanguage) {
         String language = (forcedLanguage != null && !forcedLanguage.isBlank())
                 ? forcedLanguage.trim().toLowerCase()
                 : detectLanguage(fileName);
 
-        logger.debug("Файл '{}' → язык: {} (forced: {})",
-                fileName, language.toUpperCase(), forcedLanguage != null);
+        logger.debug("File '{}' → language: {} (forced: {})",
+                fileName, language.toUpperCase(), forcedLanguage);
 
         return ParserRegistry.getParser(language);
     }
@@ -33,41 +32,50 @@ public class ParserFactory {
         return getParser(fileName, null);
     }
 
-    public static LanguageParser getParserForLanguage(String language) {
-        return ParserRegistry.getParser(language);
-    }
-
     /**
-     * Определение языка по имени файла (fallback)
+     * Публичный метод определения языка по имени файла.
+     * Используется из FileProcessor и других классов.
      */
-    private static String detectLanguage(String fileName) {
-        if (fileName == null || fileName.isBlank()) return "sql";
+    public static String detectLanguage(String fileName) {
+        if (fileName == null || fileName.isBlank()) {
+            return "sql";
+        }
 
         String lower = fileName.toLowerCase();
 
+        // По расширению
         if (lower.endsWith(".plsql") || lower.endsWith(".pks") || lower.endsWith(".pkb")) {
             return "plsql";
         }
-        if (lower.endsWith(".sql")) {
-            if (lower.contains("plsql") || lower.contains("oracle") || lower.contains("package")) return "plsql";
-            if (lower.contains("athena")) return "athena";
-            if (lower.contains("hive")) return "hive";
-            if (lower.contains("postgres") || lower.contains("postgresql")) return "postgresql";
-            if (lower.contains("tsql") || lower.contains("mssql")) return "tsql";
-            if (lower.contains("snowflake")) return "snowflake";
-            if (lower.contains("starrocks")) return "starrocks";
-            if (lower.contains("trino")) return "trino";
-            if (lower.contains("clickhouse")) return "clickhouse";
-            if (lower.contains("databricks")) return "databricks";
-        }
 
-        if (lower.contains("plsql") || lower.contains("oracle") || lower.contains("package")) return "plsql";
+        // По содержимому имени файла
+        if (lower.contains("plsql") || lower.contains("oracle") || lower.contains("package")) {
+            return "plsql";
+        }
+        if (lower.contains("athena")) return "athena";
+        if (lower.contains("hive")) return "hive";
+        if (lower.contains("postgresql") || lower.contains("postgres")) return "postgresql";
+        if (lower.contains("tsql") || lower.contains("mssql") || lower.contains("sqlserver")) return "tsql";
+        if (lower.contains("starrocks")) return "starrocks";
+        if (lower.contains("trino")) return "trino";
+        if (lower.contains("clickhouse")) return "clickhouse";
+        if (lower.contains("databricks")) return "databricks";
+        if (lower.contains("snowflake")) return "snowflake";
+        if (lower.contains("mariadb")) return "mariadb";
+        if (lower.contains("db2")) return "db2";
 
         return "sql";
     }
 
+    /**
+     * Получить парсер по имени языка напрямую
+     */
+    public static LanguageParser getParserForLanguage(String language) {
+        return ParserRegistry.getParser(language);
+    }
+
     public static void registerParser(String language, LanguageParser parser) {
         ParserRegistry.register(language, parser);
-        logger.info("Зарегистрирован парсер для языка: {}", language.toUpperCase());
+        logger.info("Registered parser for language: {}", language.toUpperCase());
     }
 }

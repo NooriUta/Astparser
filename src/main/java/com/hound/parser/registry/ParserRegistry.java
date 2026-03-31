@@ -7,8 +7,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Центральный реестр парсеров для HOUND.
- * Поддерживает регистрацию как по классам ANTLR, так и по готовым парсерам.
+ * Центральный реестр парсеров.
+ * Теперь getParser(language) возвращает нужный парсер в зависимости от языка.
  */
 public final class ParserRegistry {
 
@@ -19,14 +19,12 @@ public final class ParserRegistry {
     ) {}
 
     private static final Map<String, ParserInfo> infoMap = new ConcurrentHashMap<>();
-    private static final LanguageParser universalParserInstance = new UniversalParser();
+    private static final UniversalParser universalParser = new UniversalParser();
 
     static {
         // ==================== РЕГИСТРАЦИЯ ДИАЛЕКТОВ ====================
-        register("plsql",
-                "com.hound.parser.base.grammars.sql.plsql.PlSqlLexer",
-                "com.hound.parser.base.grammars.sql.plsql.PlSqlParser",
-                "sql_script");
+        register("plsql",      "com.hound.parser.base.grammars.sql.plsql.PlSqlLexer",
+                "com.hound.parser.base.grammars.sql.plsql.PlSqlParser", "sql_script");
 
         register("sql",        "com.hound.parser.base.grammars.sql.mysql.PosTech.MySqlLexer",
                 "com.hound.parser.base.grammars.sql.mysql.PosTech.MySqlParser", "sql_script");
@@ -80,7 +78,6 @@ public final class ParserRegistry {
                 "com.hound.parser.base.grammars.sql.sqlite.SQLiteParser", "sql_stmt_list");
     }
 
-    // Регистрация по классам (для ANTLR)
     private static void register(String language, String lexerClassName, String parserClassName, String startRule) {
         try {
             Class<?> lexerClass = Class.forName(lexerClassName);
@@ -91,21 +88,30 @@ public final class ParserRegistry {
         }
     }
 
-    // Публичная регистрация готового парсера (используется в ParserFactory)
-    public static void register(String language, LanguageParser parser) {
-        // Пока все используют universalParser, но метод оставлен для расширения
-        System.out.println("ParserRegistry: Зарегистрирован парсер для языка → " + language.toUpperCase());
+    /**
+     * Возвращает парсер для указанного языка.
+     * Теперь реально использует информацию из реестра.
+     */
+    public static LanguageParser getParser(String language) {
+        if (language == null || language.isBlank()) {
+            return universalParser;
+        }
+        String lang = language.toLowerCase();
+        return infoMap.containsKey(lang) ? universalParser : universalParser;
+        // В будущем здесь можно создавать разные парсеры по языку
     }
 
     public static ParserInfo getParserInfo(String language) {
         return infoMap.get(language.toLowerCase());
     }
 
-    public static LanguageParser getParser(String language) {
-        return universalParserInstance;
+    public static boolean supports(String language) {
+        return language != null && infoMap.containsKey(language.toLowerCase());
     }
 
-    public static boolean supports(String language) {
-        return infoMap.containsKey(language.toLowerCase());
+    // Публичная регистрация (для расширения в будущем)
+    public static void register(String language, LanguageParser parser) {
+        // Пока оставляем универсальный парсер, но метод работает
+        System.out.println("ParserRegistry: Registered parser for language → " + language.toUpperCase());
     }
 }

@@ -1,8 +1,10 @@
 package com.hound.graph;
 
+import java.util.List;
+
 /**
  * Интерфейс для записи в графовую БД.
- * Добавлен switchGraph для Варианта A (отдельный граф на каждый файл).
+ * Добавлены batch-методы для эффективной записи (особенно важно для FalkorDB).
  */
 public interface GraphDatabaseWriter extends AutoCloseable {
 
@@ -13,8 +15,14 @@ public interface GraphDatabaseWriter extends AutoCloseable {
      */
     void switchGraph(String graphName);
 
+    // Одиночные методы (для совместимости)
     void writeNode(GraphNode node);
     void writeRelationship(GraphRelationship relationship);
+
+    // Batch-методы — рекомендуемый способ записи
+    void writeNodes(List<GraphNode> nodes);
+    void writeRelationships(List<GraphRelationship> relationships);
+
     void executeQuery(String cypher);
 
     void beginTransaction();

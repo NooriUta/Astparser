@@ -9,10 +9,12 @@ import com.falkordb.Graph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 
 /**
- * Адаптер для FalkorDB с поддержкой отдельного графа на каждый файл (Вариант A).
+ * Стабильная версия FalkorDBWriter.
+ * Использует только плоские свойства и простые строки, чтобы избежать ошибок парсинга FalkorDB.
  */
 public class FalkorDBWriter implements GraphDatabaseWriter {
 
@@ -28,9 +30,9 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
             this.driver = FalkorDB.driver(host, port);
             this.graph = this.driver.graph(database);
             this.currentGraphName = database;
-            logger.info("Успешно подключено к FalkorDB: {}:{}/граф:{}", host, port, database);
+            logger.info("Connected to FalkorDB: {}:{}/graph:{}", host, port, database);
         } catch (Exception e) {
-            logger.error("Ошибка подключения к FalkorDB", e);
+            logger.error("Failed to connect to FalkorDB", e);
             throw new RuntimeException("Failed to connect to FalkorDB", e);
         }
     }
@@ -40,75 +42,106 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
         if (graphName == null || graphName.equals(currentGraphName)) return;
         this.graph = this.driver.graph(graphName);
         this.currentGraphName = graphName;
-        logger.debug("Переключён на граф: {}", graphName);
+        logger.debug("Switched to graph: {}", graphName);
     }
 
     @Override
     public void writeNode(GraphNode node) {
+        if (node == null) return;
+
         String label = node.getLabel();
-        String props = propertiesToCypher(node.getProperties());
-        String query = String.format("CREATE (n:%s %s)", label, props);
-        executeQuery(query);
+        StringBuilder props = new StringBuilder("{");
+        boolean first = true;
+
+        for (var entry : node.getProperties().entrySet()) {
+            if (!first) props.append(", ");
+            props.append(entry.getKey()).append(": ");
+
+            Object value = entry.getValue();
+            if (value instanceof String str) {
+                String escaped = str.replace("\\", "\\\\")
+                        .replace("'", "\\'");
+                props.append("'").append(escaped).append("'");
+            } else if (value != null) {
+                props.append(value);
+            } else {
+                props.append("null");
+            }
+            first = false;
+        }
+        props.append("}");
+
+        String cypher = "CREATE (n:" + label + " " + props + ")";
+
+        executeQuery(cypher);
+    }
+
+    @Override
+    public void writeNodes(List<GraphNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) return;
+        for (GraphNode node : nodes) {
+            writeNode(node);
+        }
     }
 
     @Override
     public void writeRelationship(GraphRelationship rel) {
-        String query = String.format(
+        if (rel == null) return;
+
+        String propsStr = "{}";
+        if (!rel.getProperties().isEmpty()) {
+            // Для связей тоже строим строку
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (var entry : rel.getProperties().entrySet()) {
+                if (!first) sb.append(", ");
+                sb.append(entry.getKey()).append(": ");
+                Object v = entry.getValue();
+                if (v instanceof String s) {
+                    String escaped = s.replace("\\", "\\\\").replace("'", "\\'");
+                    sb.append("'").append(escaped).append("'");
+                } else if (v != null) {
+                    sb.append(v);
+                }
+                first = false;
+            }
+            sb.append("}");
+            propsStr = sb.toString();
+        }
+
+        String cypher = String.format(
                 "MATCH (a), (b) WHERE a.id = '%s' AND b.id = '%s' " +
                         "CREATE (a)-[r:%s %s]->(b)",
-                rel.getFromNodeId(), rel.getToNodeId(), rel.getType(),
-                propertiesToCypher(rel.getProperties()));
-        executeQuery(query);
-    }
+                rel.getFromNodeId(), rel.getToNodeId(), rel.getType(), propsStr);
 
-    /**
-     * Критически важная функция — генерирует корректный Cypher для FalkorDB
-     */
-    private String propertiesToCypher(Map<String, Object> props) {
-        if (props.isEmpty()) return "{}";
-
-        StringBuilder sb = new StringBuilder("{");
-        boolean first = true;
-
-        for (var entry : props.entrySet()) {
-            if (!first) sb.append(", ");
-            sb.append(entry.getKey()).append(": ");
-
-            Object value = entry.getValue();
-
-            if (value instanceof String str) {
-                // Экранируем специальные символы
-                String escaped = str
-                        .replace("\\", "\\\\")
-                        .replace("'", "\\'")
-                        .replace("\"", "\\\"");
-                sb.append("'").append(escaped).append("'");
-            } else if (value instanceof Map) {
-                // Вложенные map преобразуем в строку
-                sb.append("\"").append(value.toString().replace("\"", "\\\"")).append("\"");
-            } else {
-                sb.append(value);
-            }
-            first = false;
-        }
-        sb.append("}");
-        return sb.toString();
+        executeQuery(cypher);
     }
 
     @Override
-    public void executeQuery(String query) {
+    public void writeRelationships(List<GraphRelationship> rels) {
+        if (rels == null || rels.isEmpty()) return;
+        for (GraphRelationship rel : rels) {
+            writeRelationship(rel);
+        }
+    }
+
+    private void executeQuery(String query) {
         try {
             graph.query(query);
-            logger.debug("Запрос выполнен успешно");
         } catch (Exception e) {
-            logger.error("Ошибка выполнения запроса в FalkorDB: {}", query, e);
+            logger.error("FalkorDB query failed:\n{}", query, e);
             throw new RuntimeException("FalkorDB query failed", e);
         }
     }
 
     @Override
+    public void executeQuery(String query) {
+        executeQuery(query);
+    }
+
+    @Override
     public void beginTransaction() {
-        logger.warn("Транзакции в FalkorDB пока не реализованы");
+        logger.warn("Transactions not fully supported in FalkorDB adapter");
     }
 
     @Override
@@ -125,9 +158,9 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
     public void close() {
         try {
             if (driver != null) driver.close();
-            logger.info("Подключение к FalkorDB закрыто");
+            logger.info("FalkorDB connection closed");
         } catch (Exception e) {
-            logger.error("Ошибка закрытия подключения к FalkorDB", e);
+            logger.error("Error closing FalkorDB connection", e);
         }
     }
 }
