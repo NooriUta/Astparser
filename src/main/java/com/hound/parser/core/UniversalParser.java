@@ -13,29 +13,19 @@ import org.slf4j.LoggerFactory;
 import java.lang.reflect.Method;
 
 /**
- * Универсальный парсер для всех SQL-диалектов ANTLR.
- * Язык должен передаваться явно из ParserFactory / FileProcessor.
+ * Универсальный парсер для всех SQL-диалектов ANTLR (BUG-2 исправлен).
  */
 public class UniversalParser implements LanguageParser {
 
     private static final Logger logger = LoggerFactory.getLogger(UniversalParser.class);
-    private AstListener listener;
 
     @Override
-    public UniversalAstNode parse(String code, String fileName) {
-        // Обратная совместимость: определяем язык как fallback
-        String language = extractLanguageHint(fileName);
-        return parse(code, fileName, language);
-    }
-
-    /**
-     * Основной рекомендуемый метод парсинга с явным указанием языка.
-     */
-    public UniversalAstNode parse(String code, String fileName, String language) {
+    public UniversalAstNode parse(String code, String fileName, AstListener listener) {
         UniversalAstNode root = new UniversalAstNode("Program", "ROOT");
         root.addProperty("fileName", fileName);
         root.addProperty("size", code.length());
 
+        String language = extractLanguageHint(fileName);
         if (language == null || language.isBlank()) {
             language = "sql";
         }
@@ -50,24 +40,19 @@ public class UniversalParser implements LanguageParser {
                 return createRawNode(code, fileName, root);
             }
 
-            // Создаём lexer + token stream + parser
             CharStream input = CharStreams.fromString(code);
             Lexer lexer = (Lexer) info.lexerClass().getConstructor(CharStream.class).newInstance(input);
             CommonTokenStream tokenStream = new CommonTokenStream(lexer);
-            Parser parser = (Parser) info.parserClass().getConstructor(TokenStream.class)
-                    .newInstance(tokenStream);
+            Parser parser = (Parser) info.parserClass().getConstructor(TokenStream.class).newInstance(tokenStream);
 
-            // Находим стартовое правило
             Method startMethod = findStartRuleMethod(parser, info.startRuleName());
             if (startMethod == null) {
                 logger.warn("Start rule not found for language {}. Using raw fallback.", language);
                 return createRawNode(code, fileName, root);
             }
 
-            // Парсим
             ParseTree tree = (ParseTree) startMethod.invoke(parser);
 
-            // Обходим дерево с передачей tokenStream для качественных snippet'ов
             ParseTreeWalker walker = new ParseTreeWalker();
             walker.walk(new UniversalTreeListener(root, listener, tokenStream), tree);
 
@@ -88,61 +73,34 @@ public class UniversalParser implements LanguageParser {
         return root;
     }
 
-    // ==================== Вспомогательные методы ====================
-
-    /**
-     * Простой fallback для определения языка, если не передан явно.
-     */
     private String extractLanguageHint(String fileName) {
         if (fileName == null || fileName.isBlank()) return "sql";
-
         String lower = fileName.toLowerCase();
-
-        if (lower.endsWith(".plsql") || lower.endsWith(".pks") || lower.endsWith(".pkb")) {
-            return "plsql";
-        }
+        if (lower.endsWith(".plsql") || lower.endsWith(".pks") || lower.endsWith(".pkb")) return "plsql";
         if (lower.contains("plsql") || lower.contains("oracle")) return "plsql";
         if (lower.contains("postgresql") || lower.contains("postgres")) return "postgresql";
         if (lower.contains("tsql") || lower.contains("sqlserver")) return "tsql";
-
         return "sql";
     }
 
-    /**
-     * Пытается найти стартовое правило парсера
-     */
     private Method findStartRuleMethod(Parser parser, String preferredRule) {
-        String[] candidates = {
-                preferredRule,
-                "stmt", "statement", "sql_script", "program", "root",
-                "query", "start", "sql"
-        };
-
+        String[] candidates = {preferredRule, "stmt", "statement", "sql_script", "program", "root", "query", "start", "sql"};
         for (String ruleName : candidates) {
             try {
                 return parser.getClass().getMethod(ruleName);
-            } catch (NoSuchMethodException ignored) {
-                // continue to next candidate
-            }
+            } catch (NoSuchMethodException ignored) {}
         }
         return null;
     }
 
-    /**
-     * Создаёт fallback-узел при ошибке парсинга
-     */
     private UniversalAstNode createRawNode(String code, String fileName, UniversalAstNode root) {
         UniversalAstNode raw = new UniversalAstNode("RawText", "UNPARSED");
-        String snippet = code.length() > 3000
-                ? code.substring(0, 3000) + "..."
-                : code;
+        String snippet = code.length() > 3000 ? code.substring(0, 3000) + "..." : code;
         raw.addProperty("content", snippet);
         raw.addProperty("fileName", fileName);
         root.addChild(raw);
         return root;
     }
-
-    // ==================== Интерфейс LanguageParser ====================
 
     @Override
     public String getLanguageName() {
@@ -152,10 +110,5 @@ public class UniversalParser implements LanguageParser {
     @Override
     public boolean supports(String code) {
         return true;
-    }
-
-    @Override
-    public void setListener(AstListener listener) {
-        this.listener = listener;
     }
 }

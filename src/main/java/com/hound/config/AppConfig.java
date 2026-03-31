@@ -2,6 +2,9 @@ package com.hound.config;
 
 import java.util.List;
 
+/**
+ * Конфигурация приложения (IMP-5: добавлена валидация).
+ */
 public class AppConfig {
     private String inputPath;
     private String dbType = "neo4j";
@@ -18,7 +21,18 @@ public class AppConfig {
     private int maxFileSizeMB = 100;
     private String forcedLanguage = null;
 
-    // Getters and Setters
+    public void validate() {
+        if (inputPath == null || inputPath.isBlank())
+            throw new IllegalArgumentException("Input path is required");
+        if (dbPort < 1 || dbPort > 65535)
+            throw new IllegalArgumentException("Invalid port: " + dbPort);
+        if (threads <= 0)
+            throw new IllegalArgumentException("Threads must be > 0");
+        if (batchSize <= 0)
+            throw new IllegalArgumentException("Batch size must be > 0");
+    }
+
+    // Getters and Setters (без изменений)
     public String getInputPath() { return inputPath; }
     public void setInputPath(String inputPath) { this.inputPath = inputPath; }
 

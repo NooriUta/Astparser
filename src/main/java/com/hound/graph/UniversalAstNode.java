@@ -3,8 +3,7 @@ package com.hound.graph;
 import java.util.*;
 
 /**
- * Универсальный узел AST.
- * Root-узел содержит информацию о файле (для Варианта A — отдельный граф на файл).
+ * Универсальный узел AST (полностью восстановлен + BUG-1 исправлен).
  */
 public class UniversalAstNode {
 
@@ -42,15 +41,12 @@ public class UniversalAstNode {
     }
 
     /**
-     * Преобразование в GraphNode.
-     * Root-узел явно содержит информацию о файле.
+     * BUG-1: передаём внешний id из UniversalAstNode
      */
     public GraphNode toGraphNode() {
-        GraphNode node = new GraphNode(type);
-        node.addProperty("id", id);
+        GraphNode node = new GraphNode(this.id, type);   // ← внешний id
         node.addProperty("nodeType", nodeType);
 
-        // Для корневого узла добавляем метаданные файла
         if ("Program".equals(type) || "ROOT".equals(nodeType)) {
             node.addProperty("fileName", properties.get("fileName"));
             node.addProperty("filePath", properties.get("fileName"));
@@ -69,9 +65,6 @@ public class UniversalAstNode {
         return node;
     }
 
-    /**
-     * Генерирует связи только к прямым детям.
-     */
     public List<GraphRelationship> toRelationships() {
         List<GraphRelationship> list = new ArrayList<>();
         for (UniversalAstNode child : children) {
@@ -80,9 +73,6 @@ public class UniversalAstNode {
         return list;
     }
 
-    /**
-     * Возвращает все узлы дерева (включая текущий)
-     */
     public List<UniversalAstNode> getAllNodes() {
         List<UniversalAstNode> allNodes = new ArrayList<>();
         collectAllNodes(this, allNodes);
@@ -98,7 +88,6 @@ public class UniversalAstNode {
     }
 
     // ==================== Getters & Setters ====================
-
     public String getId() { return id; }
     public String getType() { return type; }
     public String getNodeType() { return nodeType; }
@@ -111,12 +100,8 @@ public class UniversalAstNode {
         return Optional.ofNullable(position);
     }
 
-    /**
-     * Внутренний класс позиции
-     */
     private static class Position {
         final int line, column, startIndex, stopIndex;
-
         Position(int line, int column, int startIndex, int stopIndex) {
             this.line = line;
             this.column = column;

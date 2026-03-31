@@ -5,9 +5,10 @@ import com.hound.graph.GraphDatabaseWriter;
 import com.hound.graph.GraphWriter;
 import com.hound.graph.UniversalAstNode;
 import com.hound.metrics.MetricsCollector;
+import com.hound.parser.AstListener;
 import com.hound.parser.LanguageParser;
 import com.hound.parser.ParserFactory;
-import com.hound.parser.core.UniversalParser;        // ← правильный импорт (core)
+import com.hound.parser.core.UniversalParser;
 import com.hound.parser.core.AstCollector;
 import com.hound.util.FileUtils;
 import com.hound.util.HashUtils;
@@ -17,12 +18,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 
 /**
- * Обработчик одного файла.
- * Исправлены все ошибки компиляции:
- *  - правильный импорт UniversalParser
- *  - вызов публичного detectLanguage()
- *  - проверка instanceof с правильным пакетом
- *  - вызов writeTree с двумя параметрами
+ * Обработчик одного файла (DEF-1: batchSize удалён).
  */
 public class FileProcessor implements Runnable {
 
@@ -71,26 +67,23 @@ public class FileProcessor implements Runnable {
                 return;
             }
 
-            // Определяем язык один раз
             String language = (forcedLanguage != null && !forcedLanguage.isBlank())
                     ? forcedLanguage.trim().toLowerCase()
                     : ParserFactory.detectLanguage(filePath.toString());
 
-            // Получаем парсер
             LanguageParser parser = ParserFactory.getParser(filePath.toString(), forcedLanguage);
 
-            // Парсим с явной передачей языка
             UniversalAstNode ast;
+            AstListener listener = null; // listener не используется в текущей реализации
+
             if (parser instanceof UniversalParser universalParser) {
-                ast = universalParser.parse(content, filePath.toString(), language);
+                ast = universalParser.parse(content, filePath.toString(), listener);
             } else {
-                ast = parser.parse(content, filePath.toString());
+                ast = parser.parse(content, filePath.toString(), listener);
             }
 
-            // Собираем результат один раз
             AstCollector.CollectionResult result = AstCollector.collect(ast);
 
-            // Записываем в граф (два параметра!)
             graphWriter.writeTree(ast, result);
 
             cache.markProcessed(filePath.toString(), fileHash);
@@ -100,11 +93,8 @@ public class FileProcessor implements Runnable {
             metrics.recordFileProcessed(duration, result.nodes().size(), result.relationships().size());
 
             logger.info("File processed successfully: {} | Language: {} | Nodes: {} | Relationships: {} | Time: {} ms",
-                    filePath.getFileName(),
-                    language.toUpperCase(),
-                    result.nodes().size(),
-                    result.relationships().size(),
-                    duration);
+                    filePath.getFileName(), language.toUpperCase(),
+                    result.nodes().size(), result.relationships().size(), duration);
 
         } catch (Exception e) {
             logger.error("Error processing file: {}", filePath, e);

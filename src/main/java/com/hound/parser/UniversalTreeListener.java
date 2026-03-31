@@ -7,29 +7,28 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.regex.Pattern;
 
 /**
- * Универсальный слушатель ANTLR с правильной классификацией терминалов
- * на основе типа токена из лексера (рекомендуемый подход).
+ * Универсальный слушатель ANTLR (IMP-2 + IMP-4: предкомпилированные regex + фильтр шумовых терминалов).
  */
 public class UniversalTreeListener implements ParseTreeListener {
 
     private static final Logger logger = LoggerFactory.getLogger(UniversalTreeListener.class);
 
     private static final int MAX_SNIPPET_LENGTH = 500;
+    private static final Pattern NUMERIC = Pattern.compile("-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?");
+    private static final Set<String> SKIP_TERMINAL_TYPES = Set.of("punctuation", "keyword");
 
     private final Deque<UniversalAstNode> nodeStack = new ArrayDeque<>();
     private final AstListener listener;
     private final TokenStream tokenStream;
+    private final boolean filterNoiseTerminals = true; // можно вынести в конфиг позже
 
     public UniversalTreeListener(UniversalAstNode root, AstListener listener, TokenStream tokenStream) {
         this.nodeStack.push(root);
         this.listener = listener;
         this.tokenStream = tokenStream;
-    }
-
-    public UniversalTreeListener(UniversalAstNode root, AstListener listener) {
-        this(root, listener, null);
     }
 
     @Override
@@ -41,21 +40,19 @@ public class UniversalTreeListener implements ParseTreeListener {
             Token start = ctx.getStart();
             Token stop = ctx.getStop();
 
-            int startIdx = start != null ? start.getStartIndex() : -1;
-            int stopIdx = stop != null ? stop.getStopIndex() : -1;
-
             if (start != null) {
                 node.addProperty("line", start.getLine());
                 node.addProperty("column", start.getCharPositionInLine());
-                node.addProperty("startIndex", startIdx);
+                node.addProperty("startIndex", start.getStartIndex());
             }
             if (stop != null) {
-                node.addProperty("stopIndex", stopIdx);
+                node.addProperty("stopIndex", stop.getStopIndex());
                 node.addProperty("endLine", stop.getLine());
                 node.addProperty("endColumn", stop.getCharPositionInLine());
             }
 
-            node.addProperty("qualifiedName", buildQualifiedName(startIdx, stopIdx, ruleName));
+            node.addProperty("qualifiedName", buildQualifiedName(start != null ? start.getStartIndex() : -1,
+                    stop != null ? stop.getStopIndex() : -1, ruleName));
             node.addProperty("childCount", ctx.getChildCount());
             node.addProperty("depth", nodeStack.size());
             node.addProperty("ruleIndex", ctx.getRuleIndex());
@@ -99,13 +96,13 @@ public class UniversalTreeListener implements ParseTreeListener {
             String text = symbol.getText();
             if (text == null || text.isBlank()) return;
 
-            // === ФИЛЬТРАЦИЯ HIDDEN CHANNEL (whitespace, comments) ===
-            if (symbol.getChannel() != Token.DEFAULT_CHANNEL) {
+            if (symbol.getChannel() != Token.DEFAULT_CHANNEL) return;
+
+            String terminalType = classifyByTokenType(symbol.getType(), text);
+
+            if (filterNoiseTerminals && SKIP_TERMINAL_TYPES.contains(terminalType)) {
                 return;
             }
-
-            // Классифицируем по типу токена из лексера — это правильный способ
-            String terminalType = classifyByTokenType(symbol.getType(), text);
 
             UniversalAstNode node = new UniversalAstNode(terminalType, "TERMINAL");
 
@@ -156,16 +153,8 @@ public class UniversalTreeListener implements ParseTreeListener {
         }
     }
 
-    // ====================== Вспомогательные методы ======================
-
-    /**
-     * Классифицирует терминал по типу токена из лексера + тексту как fallback.
-     */
     private String classifyByTokenType(int tokenType, String text) {
-        // Здесь можно добавить маппинг конкретных типов токенов под разные диалекты,
-        // но для универсальности используем общие правила:
-
-        if (text.matches("-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?")) {
+        if (NUMERIC.matcher(text).matches()) {
             return "numeric_literal";
         }
         if ((text.startsWith("'") && text.endsWith("'")) ||
@@ -178,8 +167,6 @@ public class UniversalTreeListener implements ParseTreeListener {
         if (text.length() == 1 && "(),;.[]{}:".indexOf(text.charAt(0)) >= 0) {
             return "punctuation";
         }
-
-        // По умолчанию — identifier (таблицы, колонки, переменные и т.д.)
         return "identifier";
     }
 

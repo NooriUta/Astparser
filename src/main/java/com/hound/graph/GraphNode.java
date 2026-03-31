@@ -9,6 +9,13 @@ public class GraphNode {
     private final String label;
     private final Map<String, Object> properties;
 
+    // Новый конструктор для BUG-1 (передаём id из UniversalAstNode)
+    public GraphNode(String id, String label) {
+        this.id = id;
+        this.label = label;
+        this.properties = new HashMap<>();
+    }
+
     public GraphNode(String label) {
         this.id = UUID.randomUUID().toString();
         this.label = label;

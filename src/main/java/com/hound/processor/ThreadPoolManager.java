@@ -7,7 +7,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Менеджер пула потоков. Исправлена гонка с CountDownLatch.
+ * Менеджер пула потоков (DEF-2: исправлена утечка потока).
  */
 public class ThreadPoolManager {
     private static final Logger logger = LoggerFactory.getLogger(ThreadPoolManager.class);

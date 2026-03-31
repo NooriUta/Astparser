@@ -5,8 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Вариант A: Каждый файл записывается в свой собственный граф.
- * Принимает готовый CollectionResult, чтобы избежать двойного collect.
+ * Вариант A: Каждый файл — свой граф. switchGraph вызывается один раз.
  */
 public class GraphWriter implements AutoCloseable {
 
@@ -18,36 +17,25 @@ public class GraphWriter implements AutoCloseable {
     public GraphWriter(GraphDatabaseWriter dbWriter, String graphName) {
         this.dbWriter = dbWriter;
         this.graphName = graphName;
+        this.dbWriter.switchGraph(graphName);   // ← только один раз
     }
 
-    /**
-     * Основной метод записи AST в граф.
-     * Использует batch-методы, если база их поддерживает (FalkorDB).
-     */
     public void writeTree(UniversalAstNode root, AstCollector.CollectionResult result) {
         if (root == null || result == null) return;
 
         long startTime = System.currentTimeMillis();
-
         try {
-            // Переключаемся на граф текущего файла
-            dbWriter.switchGraph(graphName);
             dbWriter.beginTransaction();
 
-            // === Batch-оптимизированная запись для FalkorDB ===
             if (dbWriter instanceof com.hound.graph.adapters.FalkorDBWriter falkor) {
                 falkor.writeNodes(result.nodes().stream()
                         .map(UniversalAstNode::toGraphNode)
                         .toList());
-
                 falkor.writeRelationships(result.relationships());
-            }
-            // === Обычная запись для Neo4j и Memgraph ===
-            else {
+            } else {
                 for (UniversalAstNode node : result.nodes()) {
                     dbWriter.writeNode(node.toGraphNode());
                 }
-
                 for (GraphRelationship rel : result.relationships()) {
                     dbWriter.writeRelationship(rel);
                 }
@@ -67,7 +55,5 @@ public class GraphWriter implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-        // Граф не закрывается здесь — закрытие происходит в HoundApplication
-    }
+    public void close() {}
 }

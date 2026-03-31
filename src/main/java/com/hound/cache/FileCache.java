@@ -9,20 +9,23 @@ import java.io.IOException;
 import java.nio.file.*;
 import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Кэш обработанных файлов с сохранением состояния между запусками.
+ * Кэш обработанных файлов (IMP-3: буферизация saveCache).
  */
 public class FileCache {
 
     private static final Logger logger = LoggerFactory.getLogger(FileCache.class);
     private static final String CACHE_FILE = "cache.json";
+    private static final int SAVE_EVERY = 50;
 
     private final Path cacheDir;
     private final ConcurrentHashMap<String, CacheEntry> cacheMap;
     private final ReentrantReadWriteLock lock;
     private final ObjectMapper objectMapper;
+    private final AtomicInteger dirtyCount = new AtomicInteger(0);
 
     public FileCache(String cacheDirPath) throws IOException {
         this.cacheDir = Paths.get(cacheDirPath);
@@ -41,10 +44,8 @@ public class FileCache {
         try {
             CacheEntry entry = cacheMap.get(filePath);
             if (entry == null) return false;
-
             if (!entry.getFileHash().equals(fileHash)) return false;
             if (entry.isExpired()) return false;
-
             return true;
         } finally {
             lock.readLock().unlock();
@@ -54,9 +55,11 @@ public class FileCache {
     public void markProcessed(String filePath, String fileHash) {
         lock.writeLock().lock();
         try {
-            CacheEntry entry = new CacheEntry(filePath, fileHash);
-            cacheMap.put(filePath, entry);
-            saveCache();
+            cacheMap.put(filePath, new CacheEntry(filePath, fileHash));
+            if (dirtyCount.incrementAndGet() >= SAVE_EVERY) {
+                saveCache();
+                dirtyCount.set(0);
+            }
         } finally {
             lock.writeLock().unlock();
         }
@@ -118,7 +121,6 @@ public class FileCache {
         }
     }
 
-    // ====================== Внутренний класс статистики ======================
     public static class CacheStats {
         private final long total;
         private final long active;
