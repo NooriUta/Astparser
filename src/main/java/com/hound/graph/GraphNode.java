@@ -9,22 +9,24 @@ public class GraphNode {
     private final String label;
     private final Map<String, Object> properties;
 
-    // Новый конструктор для BUG-1 (передаём id из UniversalAstNode)
+    /**
+     * BUG-1 FIX: принимаем внешний id из UniversalAstNode
+     */
     public GraphNode(String id, String label) {
-        this.id = id;
+        this.id = id != null ? id : UUID.randomUUID().toString();
         this.label = label;
         this.properties = new HashMap<>();
     }
 
     public GraphNode(String label) {
-        this.id = UUID.randomUUID().toString();
-        this.label = label;
-        this.properties = new HashMap<>();
+        this(UUID.randomUUID().toString(), label);
     }
 
     public GraphNode(String label, Map<String, Object> properties) {
         this(label);
-        this.properties.putAll(properties);
+        if (properties != null) {
+            this.properties.putAll(properties);
+        }
     }
 
     public GraphNode addProperty(String key, Object value) {
@@ -35,8 +37,8 @@ public class GraphNode {
     }
 
     private Object escapeValue(Object value) {
-        if (value instanceof String) {
-            return ((String) value).replace("\\", "\\\\")
+        if (value instanceof String str) {
+            return str.replace("\\", "\\\\")
                     .replace("\"", "\\\"")
                     .replace("'", "\\'");
         }
