@@ -5,7 +5,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Вариант A: Каждый файл — свой граф. switchGraph вызывается один раз.
+ * Записывает AST-дерево в отдельный граф для каждого файла.
+ *
+ * Порядок записи критически важен:
+ * 1. Все узлы записываются ПЕРВЫМИ (writeNode вызывается для каждого)
+ * 2. Только после этого записываются связи (writeRelationship для каждой)
+ *
+ * Это гарантирует что MATCH в writeRelationship найдёт узлы,
+ * т.к. writeNode() в FalkorDB/Neo4j выполняется немедленно.
+ *
+ * Индексы создаются внутри каждого адаптера (FalkorDBWriter.ensureIndex).
  */
 public class GraphWriter implements AutoCloseable {
 
@@ -17,43 +26,55 @@ public class GraphWriter implements AutoCloseable {
     public GraphWriter(GraphDatabaseWriter dbWriter, String graphName) {
         this.dbWriter = dbWriter;
         this.graphName = graphName;
-        this.dbWriter.switchGraph(graphName);   // ← только один раз
+        this.dbWriter.switchGraph(graphName);
     }
 
-    public void writeTree(UniversalAstNode root, AstCollector.CollectionResult result) {
-        if (root == null || result == null) return;
+    /**
+     * Записывает узлы и связи в граф.
+     *
+     * Порядок:
+     * 1. writeNode() для каждого узла — узлы сразу в БД
+     *    (FalkorDBWriter: executeQuery немедленно, + запоминает id→label)
+     * 2. writeRelationship() для каждой связи — MATCH найдёт узлы
+     *    (FalkorDBWriter: использует label из маппинга id→label)
+     */
+    public void writeResult(AstCollector.CollectionResult result) {
+        if (result == null || result.nodes().isEmpty()) return;
 
         long startTime = System.currentTimeMillis();
-        try {
-            dbWriter.beginTransaction();
 
-            if (dbWriter instanceof com.hound.graph.adapters.FalkorDBWriter falkor) {
-                falkor.writeNodes(result.nodes().stream()
-                        .map(UniversalAstNode::toGraphNode)
-                        .toList());
-                falkor.writeRelationships(result.relationships());
-            } else {
-                for (UniversalAstNode node : result.nodes()) {
-                    dbWriter.writeNode(node.toGraphNode());
-                }
-                for (GraphRelationship rel : result.relationships()) {
-                    dbWriter.writeRelationship(rel);
-                }
+        try {
+            // ===== Фаза 1: записываем ВСЕ узлы =====
+            for (UniversalAstNode node : result.nodes()) {
+                dbWriter.writeNode(node.toGraphNode());
             }
 
-            dbWriter.commitTransaction();
+            // ===== Фаза 2: записываем связи (узлы уже в БД) =====
+            for (GraphRelationship rel : result.relationships()) {
+                dbWriter.writeRelationship(rel);
+            }
 
             long duration = System.currentTimeMillis() - startTime;
-            logger.info("Written to graph '{}' → {} nodes, {} relationships in {} ms",
+            logger.info("Written to graph '{}': {} nodes, {} rels in {} ms",
                     graphName, result.nodes().size(), result.relationships().size(), duration);
 
         } catch (Exception e) {
-            dbWriter.rollbackTransaction();
-            logger.error("Error writing to graph '{}'", graphName, e);
-            throw new RuntimeException("Failed to write AST tree to graph " + graphName, e);
+            logger.error("Error writing to graph '{}': {}", graphName, e.getMessage(), e);
+            throw new RuntimeException("Failed to write AST to graph " + graphName, e);
         }
     }
 
+    /**
+     * Для обратной совместимости.
+     */
+    public void writeTree(UniversalAstNode root) {
+        if (root == null) return;
+        AstCollector.CollectionResult result = AstCollector.collect(root);
+        writeResult(result);
+    }
+
     @Override
-    public void close() {}
+    public void close() {
+        // Graph connection managed by dbWriter
+    }
 }

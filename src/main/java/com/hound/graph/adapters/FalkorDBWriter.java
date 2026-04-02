@@ -9,19 +9,25 @@ import com.falkordb.Graph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * Адаптер FalkorDB для HOUND.
  *
- * Исправления:
- * 1. "Invalid input at end of input: expected '" — посимвольное экранирование
- *    \r, \n, \t, ', \ и прочих управляющих символов в Cypher string literal.
- * 2. Двойное экранирование для вложенных Map/List — toJson теперь НЕ экранирует
- *    управляющие символы; всё экранирование делается единожды в escapeCypherString.
- * 3. executeQuery больше не разбивает по ";", т.к. точка с запятой может быть
- *    внутри строковых литералов (например, в PL/SQL snippet).
+ * FIX: Edges теряются при записи.
+ *
+ * Корневые причины:
+ * 1. MATCH (a), (b) WHERE a.id = '...' — Cartesian product всех узлов.
+ *    При 1000 узлов = 1M пар → timeout/0 результатов.
+ * 2. Нет label в MATCH → индекс не используется → full scan.
+ * 3. Синтаксис индекса Neo4j-формата → FalkorDB отвергает → индекс не создаётся.
+ *
+ * Решение:
+ * - Храним маппинг nodeId → label (заполняется при writeNode)
+ * - В writeRelationship подставляем label в MATCH:
+ *   MATCH (a:select_statement {id: '...'}), (b:identifier {id: '...'})
+ *   Это даёт: 1) индекс используется, 2) нет Cartesian product
+ * - Индекс создаётся с FalkorDB-синтаксисом: CREATE INDEX ON :Label(id)
  */
 public class FalkorDBWriter implements GraphDatabaseWriter {
 
@@ -30,6 +36,18 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
     private Driver driver;
     private Graph graph;
     private String currentGraphName;
+
+    /**
+     * Маппинг nodeId → sanitized label.
+     * Заполняется при writeNode(), используется при writeRelationship()
+     * для подстановки label в MATCH-клауз.
+     */
+    private final Map<String, String> nodeIdToLabel = new HashMap<>();
+
+    /**
+     * Множество label-ов, для которых уже создан индекс на id.
+     */
+    private final Set<String> indexedLabels = new HashSet<>();
 
     // ========================= Подключение =========================
 
@@ -51,6 +69,9 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
         if (graphName == null || graphName.equals(currentGraphName)) return;
         this.graph = this.driver.graph(graphName);
         this.currentGraphName = graphName;
+        // Сбрасываем маппинг — новый граф, новые узлы
+        nodeIdToLabel.clear();
+        indexedLabels.clear();
         logger.debug("Switched to graph: {}", graphName);
     }
 
@@ -61,10 +82,20 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
         if (node == null) return;
 
         String label = sanitizeLabel(node.getLabel());
+
+        // Создаём индекс на id для этого label (один раз)
+        ensureIndex(label);
+
         String propsStr = buildPropertiesString(node.getProperties());
         String cypher = "CREATE (n:" + label + " " + propsStr + ")";
 
         executeQuery(cypher);
+
+        // Запоминаем id → label для использования в writeRelationship
+        String nodeId = node.getId();
+        if (nodeId != null) {
+            nodeIdToLabel.put(nodeId, label);
+        }
     }
 
     @Override
@@ -77,19 +108,46 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
 
     // ========================= Запись связей =========================
 
+    /**
+     * Записывает связь между двумя узлами.
+     *
+     * КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: MATCH использует label из nodeIdToLabel.
+     *
+     * Было (Cartesian product, без индекса):
+     *   MATCH (a), (b) WHERE a.id = '...' AND b.id = '...'
+     *
+     * Стало (с label, с индексом):
+     *   MATCH (a:select_statement {id: '...'}), (b:identifier {id: '...'})
+     *
+     * Разница в производительности: O(N²) → O(1) с индексом.
+     */
     @Override
     public void writeRelationship(GraphRelationship rel) {
         if (rel == null) return;
 
+        String fromId = rel.getFromNodeId();
+        String toId = rel.getToNodeId();
+
+        // Получаем label из маппинга — заполнен при writeNode()
+        String fromLabel = nodeIdToLabel.get(fromId);
+        String toLabel = nodeIdToLabel.get(toId);
+
         String propsStr = buildPropertiesString(rel.getProperties());
 
-        // fromNodeId и toNodeId — это UUID, безопасны для вставки,
-        // но на всякий случай экранируем
-        String cypher = "MATCH (a), (b) WHERE a.id = "
-                + escapeCypherString(rel.getFromNodeId())
-                + " AND b.id = "
-                + escapeCypherString(rel.getToNodeId())
-                + " CREATE (a)-[r:" + sanitizeLabel(rel.getType()) + " " + propsStr + "]->(b)";
+        String cypher;
+        if (fromLabel != null && toLabel != null) {
+            // Оптимальный путь: MATCH с label → индекс используется, нет Cartesian product
+            cypher = "MATCH (a:" + fromLabel + " {id: " + escapeCypherString(fromId)
+                    + "}), (b:" + toLabel + " {id: " + escapeCypherString(toId)
+                    + "}) CREATE (a)-[r:" + sanitizeLabel(rel.getType()) + " " + propsStr + "]->(b)";
+        } else {
+            // Fallback: без label (если writeNode не был вызван или id не найден)
+            logger.warn("Label not found for relationship {}->{}, falling back to label-less MATCH",
+                    fromId, toId);
+            cypher = "MATCH (a {id: " + escapeCypherString(fromId)
+                    + "}), (b {id: " + escapeCypherString(toId)
+                    + "}) CREATE (a)-[r:" + sanitizeLabel(rel.getType()) + " " + propsStr + "]->(b)";
+        }
 
         executeQuery(cypher);
     }
@@ -99,6 +157,33 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
         if (rels == null || rels.isEmpty()) return;
         for (GraphRelationship rel : rels) {
             writeRelationship(rel);
+        }
+    }
+
+    // ========================= Индексы =========================
+
+    /**
+     * Создаёт индекс на property "id" для указанного label.
+     *
+     * FalkorDB синтаксис: CREATE INDEX ON :Label(property)
+     * (НЕ Neo4j-формат "CREATE INDEX FOR (n:Label) ON (n.property)")
+     *
+     * Без индекса MATCH (a:Label {id: ...}) делает full scan внутри label.
+     * С индексом — O(1) lookup.
+     */
+    private void ensureIndex(String label) {
+        if (label == null || label.isEmpty()) return;
+        if (!indexedLabels.add(label)) return; // уже создан
+
+        try {
+            // FalkorDB-совместимый синтаксис
+            String cypher = "CREATE INDEX ON :" + label + "(id)";
+            graph.query(cypher);
+            logger.debug("Created index on :{}(id)", label);
+        } catch (Exception e) {
+            // Индекс уже существует — не ошибка
+            logger.debug("Index on :{}(id) already exists or not supported: {}",
+                    label, e.getMessage());
         }
     }
 
@@ -124,11 +209,6 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
 
     /**
      * Конвертирует Java-значение в Cypher literal.
-     * <p>
-     * Строка         → экранированный строковый литерал в одинарных кавычках
-     * Number/Boolean  → как есть
-     * Map/List        → сериализуется в плоскую JSON-строку, затем один раз экранируется
-     * null            → null
      */
     private String toCypherLiteral(Object value) {
         if (value == null) {
@@ -141,23 +221,17 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
             return value.toString();
         }
         if (value instanceof Map<?, ?> || value instanceof List<?>) {
-            // Сериализуем в «сырую» JSON-строку (без экранирования управляющих символов),
-            // затем один раз экранируем всё через escapeCypherString.
             String rawJson = toRawJson(value);
             return escapeCypherString(rawJson);
         }
-        // Fallback: toString → escape
         return escapeCypherString(value.toString());
     }
 
     // ========================= Экранирование для Cypher =========================
 
     /**
-     * Единственная точка экранирования для Cypher string literal (одинарные кавычки).
-     * Обрабатывает все управляющие символы посимвольно.
-     * <p>
-     * Вход: сырая Java-строка (НЕ пре-экранированная).
-     * Выход: '<escaped_content>'
+     * Единственная точка экранирования для Cypher string literal.
+     * Вход: сырая Java-строка. Выход: '&lt;escaped_content&gt;'
      */
     private String escapeCypherString(String value) {
         if (value == null) return "null";
@@ -186,23 +260,12 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
 
     /**
      * Сериализует Map/List/примитив в JSON-подобную строку.
-     * <p>
-     * КЛЮЧЕВОЕ ОТЛИЧИЕ от предыдущей версии:
-     * Строковые значения оборачиваются только в двойные кавычки JSON,
-     * но управляющие символы (\n, \r, \t и т.д.) НЕ экранируются —
-     * они остаются как сырые char. Экранирование происходит один раз,
-     * когда вся JSON-строка передаётся в escapeCypherString().
-     * <p>
-     * Единственное, что экранируется здесь — двойная кавычка внутри строки,
-     * чтобы не сломать JSON-структуру: " → \"
+     * Управляющие символы НЕ экранируются — это делает escapeCypherString().
      */
     private String toRawJson(Object obj) {
         if (obj == null) return "null";
 
         if (obj instanceof String str) {
-            // Экранируем только " и обратный слеш (для корректности JSON-структуры),
-            // но НЕ трогаем \n, \r, \t — они останутся сырыми байтами
-            // и будут обработаны единожды в escapeCypherString.
             StringBuilder sb = new StringBuilder(str.length() + 8);
             sb.append('"');
             for (int i = 0; i < str.length(); i++) {
@@ -249,24 +312,16 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
             return sb.toString();
         }
 
-        // Fallback
         return toRawJson(obj.toString());
     }
 
-    // ========================= Санитизация ключей и меток =========================
+    // ========================= Санитизация =========================
 
-    /**
-     * Очищает имя метки/типа связи — оставляет только допустимые символы для Cypher.
-     */
     private String sanitizeLabel(String label) {
         if (label == null || label.isEmpty()) return "Unknown";
-        // Допускаем буквы, цифры, _ ; убираем всё остальное
         return label.replaceAll("[^a-zA-Z0-9_]", "_");
     }
 
-    /**
-     * Очищает ключ свойства — оставляет только допустимые символы.
-     */
     private String sanitizeKey(String key) {
         if (key == null || key.isEmpty()) return "_unknown";
         return key.replaceAll("[^a-zA-Z0-9_]", "_");
@@ -274,12 +329,6 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
 
     // ========================= Выполнение запросов =========================
 
-    /**
-     * Выполняет один Cypher-запрос.
-     * <p>
-     * НЕ разбивает по ";", т.к. точка с запятой может встречаться внутри
-     * строковых литералов (PL/SQL snippet, комментарии и т.д.).
-     */
     @Override
     public void executeQuery(String query) {
         if (query == null || query.isBlank()) return;
@@ -288,7 +337,6 @@ public class FalkorDBWriter implements GraphDatabaseWriter {
             graph.query(query);
             logger.trace("Executed query successfully");
         } catch (Exception e) {
-            // Логируем первые 500 символов запроса для диагностики
             String preview = query.length() > 500
                     ? query.substring(0, 500) + "...(truncated)"
                     : query;

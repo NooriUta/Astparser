@@ -1,106 +1,90 @@
-package com.hound.processor;
+package com.hound.graph;
 
-import com.hound.cache.FileCache;
-import com.hound.graph.GraphDatabaseWriter;
-import com.hound.graph.GraphWriter;
-import com.hound.graph.UniversalAstNode;
-import com.hound.metrics.MetricsCollector;
-import com.hound.parser.AstListener;
-import com.hound.parser.LanguageParser;
-import com.hound.parser.ParserFactory;
-import com.hound.parser.core.UniversalParser;
 import com.hound.parser.core.AstCollector;
-import com.hound.util.FileUtils;
-import com.hound.util.HashUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Path;
-
 /**
- * Обработчик одного файла (DEF-1: batchSize удалён).
+ * Записывает AST-дерево в отдельный граф для каждого файла.
+ *
+ * Порядок записи критически важен:
+ * 1. Все узлы записываются ПЕРВЫМИ (writeNode вызывается для каждого)
+ * 2. Только после этого записываются связи (writeRelationship для каждой)
+ *
+ * Это гарантирует что MATCH в writeRelationship найдёт узлы,
+ * т.к. writeNode() в FalkorDB/Neo4j выполняется немедленно.
+ *
+ * Индексы создаются внутри каждого адаптера (FalkorDBWriter.ensureIndex).
  */
-public class FileProcessor implements Runnable {
+public class GraphWriter implements AutoCloseable {
 
-    private static final Logger logger = LoggerFactory.getLogger(FileProcessor.class);
+    private static final Logger logger = LoggerFactory.getLogger(GraphWriter.class);
 
-    private final Path filePath;
-    private final GraphWriter graphWriter;
-    private final FileCache cache;
-    private final MetricsCollector metrics;
-    private final String forcedLanguage;
+    private final GraphDatabaseWriter dbWriter;
+    private final String graphName;
 
-    public FileProcessor(Path filePath,
-                         GraphDatabaseWriter dbWriter,
-                         FileCache cache,
-                         MetricsCollector metrics,
-                         String forcedLanguage) {
-
-        this.filePath = filePath;
-        this.cache = cache;
-        this.metrics = metrics;
-        this.forcedLanguage = forcedLanguage;
-
-        String graphName = "hound_file_" + HashUtils.sha256(filePath.toString());
-        this.graphWriter = new GraphWriter(dbWriter, graphName);
+    public GraphWriter(GraphDatabaseWriter dbWriter, String graphName) {
+        this.dbWriter = dbWriter;
+        this.graphName = graphName;
+        this.dbWriter.switchGraph(graphName);
     }
 
-    @Override
-    public void run() {
+    /**
+     * Записывает узлы и связи в граф.
+     *
+     * Порядок:
+     * 1. writeNode() для каждого узла — узлы сразу в БД
+     *    (FalkorDBWriter: executeQuery немедленно, + запоминает id→label)
+     * 2. writeRelationship() для каждой связи — MATCH найдёт узлы
+     *    (FalkorDBWriter: использует label из маппинга id→label)
+     */
+    public void writeResult(AstCollector.CollectionResult result) {
+        if (result == null || result.nodes().isEmpty()) return;
+
         long startTime = System.currentTimeMillis();
 
         try {
-            logger.info("Processing file: {}", filePath.getFileName());
-
-            String content = FileUtils.readFileSafe(filePath, "UTF-8", 100 * 1024 * 1024);
-            if (content == null || content.isBlank()) {
-                logger.warn("File is empty or could not be read: {}", filePath);
-                metrics.incrementSkipped();
-                return;
+            // ===== Фаза 1: записываем ВСЕ узлы =====
+            for (UniversalAstNode node : result.nodes()) {
+                dbWriter.writeNode(node.toGraphNode());
             }
 
-            String fileHash = HashUtils.sha256(content);
-
-            if (cache.isProcessed(filePath.toString(), fileHash)) {
-                logger.info("File already processed, skipping: {}", filePath.getFileName());
-                metrics.incrementSkipped();
-                return;
+            // ===== Фаза 2: записываем связи (узлы уже в БД) =====
+            for (GraphRelationship rel : result.relationships()) {
+                dbWriter.writeRelationship(rel);
             }
-
-            String language = (forcedLanguage != null && !forcedLanguage.isBlank())
-                    ? forcedLanguage.trim().toLowerCase()
-                    : ParserFactory.detectLanguage(filePath.toString());
-
-            LanguageParser parser = ParserFactory.getParser(filePath.toString(), forcedLanguage);
-
-            UniversalAstNode ast;
-            AstListener listener = null; // listener не используется в текущей реализации
-
-            if (parser instanceof UniversalParser universalParser) {
-                ast = universalParser.parse(content, filePath.toString(), listener);
-            } else {
-                ast = parser.parse(content, filePath.toString(), listener);
-            }
-
-            AstCollector.CollectionResult result = AstCollector.collect(ast);
-
-            graphWriter.writeTree(ast, result);
-
-            cache.markProcessed(filePath.toString(), fileHash);
 
             long duration = System.currentTimeMillis() - startTime;
-
-            metrics.recordFileProcessed(duration, result.nodes().size(), result.relationships().size());
-
-            logger.info("File processed successfully: {} | Language: {} | Nodes: {} | Relationships: {} | Time: {} ms",
-                    filePath.getFileName(), language.toUpperCase(),
-                    result.nodes().size(), result.relationships().size(), duration);
+            logger.info("Written to graph '{}': {} nodes, {} rels in {} ms",
+                    graphName, result.nodes().size(), result.relationships().size(), duration);
 
         } catch (Exception e) {
-            logger.error("Error processing file: {}", filePath, e);
-            metrics.incrementErrors();
-        } finally {
-            graphWriter.close();
+            logger.error("Error writing to graph '{}': {}", graphName, e.getMessage(), e);
+            throw new RuntimeException("Failed to write AST to graph " + graphName, e);
         }
+    }
+
+    /**
+     * Для обратной совместимости (старая сигнатура с двумя аргументами).
+     * Вызывается из FileProcessor, который уже собрал CollectionResult.
+     */
+    public void writeTree(UniversalAstNode root, AstCollector.CollectionResult result) {
+        if (root == null || result == null) return;
+        writeResult(result);
+    }
+
+    /**
+     * Для обратной совместимости (одноаргументная версия).
+     * Сам собирает nodes/relationships из дерева.
+     */
+    public void writeTree(UniversalAstNode root) {
+        if (root == null) return;
+        AstCollector.CollectionResult result = AstCollector.collect(root);
+        writeResult(result);
+    }
+
+    @Override
+    public void close() {
+        // Graph connection managed by dbWriter
     }
 }
