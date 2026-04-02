@@ -1,9 +1,5 @@
-// File: src/main/java/com/hound/semantic/engine/ResolvedRef.java
 package com.hound.semantic.engine;
 
-/**
- * Результат разрешения имени.
- */
 public class ResolvedRef {
 
     private final String name;
@@ -14,6 +10,10 @@ public class ResolvedRef {
         this.name = name != null ? name : "";
         this.type = type != null ? type : "UNKNOWN";
         this.geoid = geoid;
+    }
+
+    public static ResolvedRef unresolved(String name) {
+        return new ResolvedRef(name, "UNKNOWN", null);
     }
 
     public String getName() { return name; }

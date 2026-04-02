@@ -1,115 +1,492 @@
 // File: src/main/java/com/hound/semantic/engine/NameResolver.java
 package com.hound.semantic.engine;
 
-import java.util.HashMap;
-import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.*;
 
 /**
- * NameResolver — переносит логику разрешения имён из Python BaseSQLListener.
- * Содержит 8 основных стратегий разрешения.
+ * NameResolver — портирование логики разрешения имён из Python BaseSQLListener.
+ *
+ * 8 стратегий разрешения (в порядке приоритета):
+ * 1. Таблица по точному geoid (schema.table)
+ * 2. Таблица по алиасу в текущем scope
+ * 3. CTE по имени в иерархии statements
+ * 4. Подзапрос по алиасу
+ * 5. Child subqueries
+ * 6. Source subqueries
+ * 7. Рекурсивный поиск по parent statements
+ * 8. Неявная таблица (единственная в FROM)
  */
 public class NameResolver {
 
+    private static final Logger logger = LoggerFactory.getLogger(NameResolver.class);
+
     private final Map<String, ResolvedRef> resolutionCache = new HashMap<>();
+    private int cacheHits = 0;
+    private int cacheMisses = 0;
+
+    // Внешние зависимости — устанавливаются через wire()
+    private StructureAndLineageBuilder builder;
+    private ScopeManager scopeManager;
 
     /**
-     * Основной метод разрешения имени (аналог _resolve_name_reference в Python)
+     * Подключает зависимости. Вызывается из UniversalSemanticEngine при инициализации.
+     */
+    public void wire(StructureAndLineageBuilder builder, ScopeManager scopeManager) {
+        this.builder = builder;
+        this.scopeManager = scopeManager;
+    }
+
+    /**
+     * Основной метод разрешения имени.
+     * Аналог Python: _resolve_name_reference(name, context_type, parent_stmt, table_alias, only_local_context)
+     *
+     * @param name               имя для разрешения (таблица, алиас, CTE, подзапрос)
+     * @param contextType        "any", "table", "subquery"
+     * @param currentStatementGeoid текущий statement
+     * @return ResolvedRef с geoid или isResolved()=false
      */
     public ResolvedRef resolve(String name, String contextType, String currentStatementGeoid) {
         if (name == null || name.isBlank()) {
-            return new ResolvedRef("", "UNKNOWN", null);
+            return ResolvedRef.unresolved("");
         }
 
         String cacheKey = name.toUpperCase() + "|" + contextType + "|" + currentStatementGeoid;
-        return resolutionCache.computeIfAbsent(cacheKey, k -> resolveInternal(name, contextType, currentStatementGeoid));
+        ResolvedRef cached = resolutionCache.get(cacheKey);
+        if (cached != null) {
+            cacheHits++;
+            return cached;
+        }
+        cacheMisses++;
+
+        ResolvedRef result = resolveInternal(name.toUpperCase(), contextType, currentStatementGeoid);
+
+        if (result.isResolved()) {
+            resolutionCache.put(cacheKey, result);
+        }
+
+        logger.debug("NameResolver: '{}' → {} (cache: {}/{})",
+                name, result.isResolved() ? result.getType() + ":" + result.getGeoid() : "NOT FOUND",
+                cacheHits, cacheHits + cacheMisses);
+
+        return result;
     }
 
     /**
-     * Внутренняя логика разрешения (8 стратегий)
+     * Разрешение неявной таблицы — когда колонка без префикса и в scope единственная таблица.
+     * Аналог Python: _resolve_implicit_table_reference(current_stmt)
      */
-    private ResolvedRef resolveInternal(String name, String contextType, String currentStatementGeoid) {
-        String upperName = name.toUpperCase();
-
-        // Стратегия 1: Таблица по точному имени
-        ResolvedRef tableByName = resolveTableByName(upperName);
-        if (tableByName.isResolved()) return tableByName;
-
-        // Стратегия 2: Таблица по алиасу в текущем scope
-        ResolvedRef tableByAlias = resolveTableByAlias(upperName, currentStatementGeoid);
-        if (tableByAlias.isResolved()) return tableByAlias;
-
-        // Стратегия 3: CTE по имени
-        ResolvedRef cte = resolveCTE(upperName, currentStatementGeoid);
-        if (cte.isResolved()) return cte;
-
-        // Стратегия 4: Подзапрос по алиасу
-        ResolvedRef subquery = resolveSubqueryByAlias(upperName, currentStatementGeoid);
-        if (subquery.isResolved()) return subquery;
-
-        // Стратегия 5: Child subqueries (вложенные подзапросы)
-        ResolvedRef childSubq = resolveChildSubqueries(upperName, currentStatementGeoid);
-        if (childSubq.isResolved()) return childSubq;
-
-        // Стратегия 6: Source subqueries
-        ResolvedRef sourceSubq = resolveSourceSubqueries(upperName, currentStatementGeoid);
-        if (sourceSubq.isResolved()) return sourceSubq;
-
-        // Стратегия 7: Рекурсивный поиск по родительским statement'ам
-        ResolvedRef parentRecursive = resolveParentRecursive(upperName, currentStatementGeoid);
-        if (parentRecursive.isResolved()) return parentRecursive;
-
-        // Стратегия 8: Неявная таблица (когда колонка без префикса и только одна таблица в FROM)
-        ResolvedRef implicit = resolveImplicitTable(currentStatementGeoid);
-        if (implicit.isResolved()) return implicit;
-
-        // Если ничего не нашли
-        return new ResolvedRef(name, "UNKNOWN", null);
+    public ResolvedRef resolveImplicitTable(String currentStatementGeoid) {
+        return resolveImplicitTableInternal(currentStatementGeoid);
     }
 
-    // ====================== Стратегии ======================
+    // ═══════════════════════════════════════════════════════════════
+    // Внутренняя логика: 8 стратегий
+    // ═══════════════════════════════════════════════════════════════
 
-    private ResolvedRef resolveTableByName(String name) {
-        // TODO: Здесь можно добавить поиск в StructureAndLineageBuilder.tables
-        // Пока возвращаем как таблицу
-        return new ResolvedRef(name, "TABLE", name);
+    private ResolvedRef resolveInternal(String upperName, String contextType, String currentStatementGeoid) {
+
+        // Стратегии для таблиц
+        if ("any".equals(contextType) || "table".equals(contextType)) {
+
+            // Стратегия 1: Таблица по точному geoid (schema.table или просто table)
+            ResolvedRef byName = resolveTableByExactGeoid(upperName);
+            if (byName.isResolved()) return byName;
+
+            // Стратегия 2: Таблица по алиасу в текущем scope
+            ResolvedRef byAlias = resolveTableByAliasInScope(upperName, currentStatementGeoid);
+            if (byAlias.isResolved()) return byAlias;
+
+            // Стратегия 2b: Поиск по имени таблицы (без учёта схемы)
+            ResolvedRef byTableName = resolveTableByNameOnly(upperName);
+            if (byTableName.isResolved()) return byTableName;
+        }
+
+        // Стратегии для подзапросов
+        if ("any".equals(contextType) || "subquery".equals(contextType)) {
+
+            // Стратегия 3: CTE по имени
+            ResolvedRef cte = resolveCTE(upperName, currentStatementGeoid);
+            if (cte.isResolved()) return cte;
+
+            // Стратегия 4: Подзапрос по алиасу в текущем statement
+            ResolvedRef subqAlias = resolveSubqueryByAlias(upperName, currentStatementGeoid);
+            if (subqAlias.isResolved()) return subqAlias;
+
+            // Стратегия 5: Child subqueries текущего statement
+            ResolvedRef childSubq = resolveChildSubqueries(upperName, currentStatementGeoid);
+            if (childSubq.isResolved()) return childSubq;
+
+            // Стратегия 6: Source subqueries текущего statement
+            ResolvedRef srcSubq = resolveSourceSubqueries(upperName, currentStatementGeoid);
+            if (srcSubq.isResolved()) return srcSubq;
+        }
+
+        // Стратегия 7: Рекурсивный поиск по parent statements
+        ResolvedRef parentRec = resolveParentRecursive(upperName, contextType, currentStatementGeoid, 0);
+        if (parentRec.isResolved()) return parentRec;
+
+        return ResolvedRef.unresolved(upperName);
     }
 
-    private ResolvedRef resolveTableByAlias(String alias, String currentStatementGeoid) {
-        // TODO: Поиск алиаса в текущем scope через ScopeManager
-        return new ResolvedRef(alias, "ALIAS", null);
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 1: Таблица по точному geoid
+    // Аналог Python: if full_geoid in self.tables
+    // ═══════════════════════════════════════════════════════════════
+
+    private ResolvedRef resolveTableByExactGeoid(String name) {
+        if (builder == null) return ResolvedRef.unresolved(name);
+
+        // Проверяем полный geoid (schema.table или table)
+        var tables = builder.getTables();
+        if (tables.containsKey(name)) {
+            var t = tables.get(name);
+            return new ResolvedRef(t.tableName(), "TABLE", name);
+        }
+
+        // Если имя содержит точку — пробуем schema.table
+        if (name.contains(".")) {
+            String[] parts = name.split("\\.", 2);
+            String schemaName = parts[0];
+            String tableName = parts[1];
+
+            // Поиск по данным таблицы (schema_geoid + table_name)
+            for (var entry : tables.entrySet()) {
+                var t = entry.getValue();
+                String tSchema = t.schemaGeoid() != null ? t.schemaGeoid().toUpperCase() : "";
+                String tName = t.tableName() != null ? t.tableName().toUpperCase() : "";
+                if (tSchema.equals(schemaName) && tName.equals(tableName)) {
+                    return new ResolvedRef(t.tableName(), "TABLE", entry.getKey());
+                }
+            }
+        }
+
+        return ResolvedRef.unresolved(name);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 2: Таблица по алиасу в текущем scope
+    // Аналог Python: поиск по aliases в source_tables/target_tables statement
+    // ═══════════════════════════════════════════════════════════════
+
+    private ResolvedRef resolveTableByAliasInScope(String alias, String currentStatementGeoid) {
+        // a) Проверяем ScopeManager (текущий контекст)
+        if (scopeManager != null) {
+            String geoid = scopeManager.resolveAlias(alias);
+            if (geoid != null) {
+                return new ResolvedRef(alias, "TABLE", geoid);
+            }
+        }
+
+        // b) Проверяем aliases в зарегистрированных таблицах
+        if (builder != null) {
+            for (var entry : builder.getTables().entrySet()) {
+                var t = entry.getValue();
+                if (t.aliases() != null && t.aliases().contains(alias)) {
+                    return new ResolvedRef(alias, "TABLE", entry.getKey());
+                }
+            }
+        }
+
+        return ResolvedRef.unresolved(alias);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 2b: Таблица по имени (без схемы) — одно совпадение
+    // Аналог Python: matching_tables = [t for t in self.tables if t.table_name == name]
+    // ═══════════════════════════════════════════════════════════════
+
+    private ResolvedRef resolveTableByNameOnly(String name) {
+        if (builder == null) return ResolvedRef.unresolved(name);
+
+        List<Map.Entry<String, com.hound.semantic.model.TableInfo>> matches = new ArrayList<>();
+        for (var entry : builder.getTables().entrySet()) {
+            var t = entry.getValue();
+            if (t.tableName() != null && t.tableName().toUpperCase().equals(name)) {
+                matches.add(entry);
+            }
+        }
+
+        if (matches.size() == 1) {
+            var match = matches.get(0);
+            return new ResolvedRef(match.getValue().tableName(), "TABLE", match.getKey());
+        }
+
+        return ResolvedRef.unresolved(name);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 3: CTE по имени
+    // Аналог Python: has_cte_with_name(parent_stmt, clean_name)
+    // ═══════════════════════════════════════════════════════════════
 
     private ResolvedRef resolveCTE(String name, String currentStatementGeoid) {
-        // TODO: Поиск среди CTE в текущем и родительских statement'ах
-        return new ResolvedRef(name, "CTE", "cte:" + name);
+        if (builder == null) return ResolvedRef.unresolved(name);
+
+        // Ищем root statement
+        String rootStmt = findRootStatement(currentStatementGeoid);
+
+        var statements = builder.getStatements();
+        for (var entry : statements.entrySet()) {
+            var stmt = entry.getValue();
+            if (!"CTE".equals(stmt.getType())) continue;
+
+            // CTE должен принадлежать текущей иерархии
+            if (rootStmt != null && !entry.getKey().startsWith(rootStmt)) continue;
+
+            // Проверяем по alias или short_name
+            String stmtAlias = stmt.getAlias();
+            String stmtShortName = stmt.getShortName();
+            if (name.equals(toUpper(stmtAlias)) || name.equals(toUpper(stmtShortName))
+                    || name.equals(entry.getKey().toUpperCase())) {
+                return new ResolvedRef(name, "CTE", entry.getKey());
+            }
+        }
+
+        return ResolvedRef.unresolved(name);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 4: Подзапрос по алиасу
+    // ═══════════════════════════════════════════════════════════════
 
     private ResolvedRef resolveSubqueryByAlias(String alias, String currentStatementGeoid) {
-        // TODO: Поиск подзапроса по алиасу
-        return new ResolvedRef(alias, "SUBQUERY", "subq:" + alias);
+        if (builder == null || currentStatementGeoid == null) return ResolvedRef.unresolved(alias);
+
+        var statements = builder.getStatements();
+        var parentStmt = statements.get(currentStatementGeoid);
+        if (parentStmt == null) return ResolvedRef.unresolved(alias);
+
+        // Проверяем child_statements
+        for (String childGeoid : parentStmt.getChildStatements()) {
+            var childStmt = statements.get(childGeoid);
+            if (childStmt == null) continue;
+
+            Set<String> childAliases = childStmt.getAliases();
+            String childShortName = childStmt.getShortName();
+            if (childAliases.contains(alias) || alias.equals(toUpper(childShortName))
+                    || alias.equals(childGeoid.toUpperCase())) {
+                return new ResolvedRef(alias, "SUBQUERY", childGeoid);
+            }
+        }
+
+        return ResolvedRef.unresolved(alias);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 5: Child subqueries
+    // ═══════════════════════════════════════════════════════════════
 
     private ResolvedRef resolveChildSubqueries(String name, String currentStatementGeoid) {
-        // TODO: Поиск среди child subqueries
-        return new ResolvedRef(name, "SUBQUERY", null);
+        // Аналогично стратегии 4, но проверяет по имени, а не только алиасу
+        if (builder == null || currentStatementGeoid == null) return ResolvedRef.unresolved(name);
+
+        var statements = builder.getStatements();
+        var parentStmt = statements.get(currentStatementGeoid);
+        if (parentStmt == null) return ResolvedRef.unresolved(name);
+
+        for (String childGeoid : parentStmt.getChildStatements()) {
+            if (childGeoid.toUpperCase().contains(name)) {
+                return new ResolvedRef(name, "SUBQUERY", childGeoid);
+            }
+        }
+
+        return ResolvedRef.unresolved(name);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 6: Source subqueries
+    // Аналог Python: self.statements[parent_stmt].get('source_subqueries', {})
+    // ═══════════════════════════════════════════════════════════════
 
     private ResolvedRef resolveSourceSubqueries(String name, String currentStatementGeoid) {
-        // TODO: Поиск среди source_subqueries
-        return new ResolvedRef(name, "SUBQUERY", null);
+        if (builder == null || currentStatementGeoid == null) return ResolvedRef.unresolved(name);
+
+        var statements = builder.getStatements();
+        var parentStmt = statements.get(currentStatementGeoid);
+        if (parentStmt == null) return ResolvedRef.unresolved(name);
+
+        for (var entry : parentStmt.getSourceSubqueries().entrySet()) {
+            String subqGeoid = entry.getKey();
+            var subqInfo = entry.getValue();
+
+            // Проверяем по алиасам
+            List<String> subqAliases = subqInfo.subqueryAliases();
+            if (subqAliases != null) {
+                for (String a : subqAliases) {
+                    if (name.equals(toUpper(a))) {
+                        // Resolve к реальному statement
+                        String resolvedGeoid = subqInfo.subqueryStmt() != null ? subqInfo.subqueryStmt() : subqGeoid;
+                        return new ResolvedRef(name, "SUBQUERY", resolvedGeoid);
+                    }
+                }
+            }
+
+            // Проверяем по geoid
+            if (name.equals(subqGeoid.toUpperCase())) {
+                return new ResolvedRef(name, "SUBQUERY", subqGeoid);
+            }
+        }
+
+        return ResolvedRef.unresolved(name);
     }
 
-    private ResolvedRef resolveParentRecursive(String name, String currentStatementGeoid) {
-        // TODO: Рекурсивный подъём по parent_statement
-        return new ResolvedRef(name, "UNKNOWN", null);
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 7: Рекурсивный поиск по parent statements
+    // Аналог Python: return self._resolve_subquery_reference(clean_name, parent_statement)
+    // ═══════════════════════════════════════════════════════════════
+
+    private static final int MAX_RECURSION_DEPTH = 20;
+
+    private ResolvedRef resolveParentRecursive(String name, String contextType,
+                                               String currentStatementGeoid, int depth) {
+        if (depth > MAX_RECURSION_DEPTH || currentStatementGeoid == null || builder == null) {
+            return ResolvedRef.unresolved(name);
+        }
+
+        var statements = builder.getStatements();
+        var stmt = statements.get(currentStatementGeoid);
+        if (stmt == null) return ResolvedRef.unresolved(name);
+
+        String parentGeoid = stmt.getParentStatementGeoid();
+        if (parentGeoid == null) return ResolvedRef.unresolved(name);
+
+        // Пробуем разрешить в контексте parent statement (без рекурсии стратегии 7)
+        // — стратегии 1-6
+        ResolvedRef result = resolveInParentContext(name, contextType, parentGeoid);
+        if (result.isResolved()) return result;
+
+        // Рекурсия вверх
+        return resolveParentRecursive(name, contextType, parentGeoid, depth + 1);
     }
 
-    private ResolvedRef resolveImplicitTable(String currentStatementGeoid) {
-        // TODO: Если в statement только одна таблица — используем её
-        return new ResolvedRef("implicit", "TABLE", null);
+    private ResolvedRef resolveInParentContext(String name, String contextType, String parentGeoid) {
+        if ("any".equals(contextType) || "table".equals(contextType)) {
+            // Проверяем source/target tables parent statement
+            var parentStmt = builder.getStatements().get(parentGeoid);
+            if (parentStmt != null) {
+                // Ищем в source_tables
+                for (String tableGeoid : parentStmt.getSourceTableGeoids()) {
+                    var t = builder.getTables().get(tableGeoid);
+                    if (t != null) {
+                        if (name.equals(toUpper(t.tableName())) || (t.aliases() != null && t.aliases().contains(name))) {
+                            return new ResolvedRef(name, "TABLE", tableGeoid);
+                        }
+                    }
+                }
+                // Ищем в target_tables
+                for (String tableGeoid : parentStmt.getTargetTableGeoids()) {
+                    var t = builder.getTables().get(tableGeoid);
+                    if (t != null) {
+                        if (name.equals(toUpper(t.tableName())) || (t.aliases() != null && t.aliases().contains(name))) {
+                            return new ResolvedRef(name, "TABLE", tableGeoid);
+                        }
+                    }
+                }
+            }
+        }
+
+        if ("any".equals(contextType) || "subquery".equals(contextType)) {
+            ResolvedRef cte = resolveCTE(name, parentGeoid);
+            if (cte.isResolved()) return cte;
+
+            ResolvedRef subq = resolveSubqueryByAlias(name, parentGeoid);
+            if (subq.isResolved()) return subq;
+
+            ResolvedRef srcSubq = resolveSourceSubqueries(name, parentGeoid);
+            if (srcSubq.isResolved()) return srcSubq;
+        }
+
+        return ResolvedRef.unresolved(name);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Стратегия 8: Неявная таблица
+    // Аналог Python: _resolve_implicit_table_reference(current_stmt)
+    // ═══════════════════════════════════════════════════════════════
+
+    private ResolvedRef resolveImplicitTableInternal(String currentStatementGeoid) {
+        if (builder == null || currentStatementGeoid == null) return ResolvedRef.unresolved("implicit");
+
+        var statements = builder.getStatements();
+        var stmt = statements.get(currentStatementGeoid);
+        if (stmt == null) return ResolvedRef.unresolved("implicit");
+
+        List<String> sourceTables = stmt.getSourceTableGeoids();
+        List<String> sourceSubqueries = new ArrayList<>(stmt.getSourceSubqueries().keySet());
+        List<String> targetTables = stmt.getTargetTableGeoids();
+
+        // Единственный source
+        if (sourceTables.size() == 1 && sourceSubqueries.isEmpty()) {
+            return new ResolvedRef("implicit", "TABLE", sourceTables.get(0));
+        }
+
+        // Единственный source subquery
+        if (sourceSubqueries.size() == 1 && sourceTables.isEmpty()) {
+            return new ResolvedRef("implicit", "SUBQUERY", sourceSubqueries.get(0));
+        }
+
+        // Единственный target (для UPDATE/DELETE)
+        if (targetTables.size() == 1 && sourceTables.isEmpty() && sourceSubqueries.isEmpty()) {
+            return new ResolvedRef("implicit", "TABLE", targetTables.get(0));
+        }
+
+        // Нет источников — пробуем parent statement
+        int totalSources = sourceTables.size() + sourceSubqueries.size() + targetTables.size();
+        if (totalSources == 0) {
+            String parentGeoid = stmt.getParentStatementGeoid();
+            if (parentGeoid != null) {
+                return resolveImplicitTableInternal(parentGeoid);
+            }
+        }
+
+        // Для UPDATE/DELETE — предпочитаем target
+        String stmtType = stmt.getType();
+        if (("UPDATE".equals(stmtType) || "DELETE".equals(stmtType)) && !targetTables.isEmpty()) {
+            return new ResolvedRef("implicit", "TABLE", targetTables.get(0));
+        }
+
+        return ResolvedRef.unresolved("implicit");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Helpers
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Находит root statement в иерархии (верхний parent).
+     * Аналог Python: _find_root_statement(statement_name)
+     */
+    private String findRootStatement(String statementGeoid) {
+        if (builder == null || statementGeoid == null) return statementGeoid;
+
+        var statements = builder.getStatements();
+        String current = statementGeoid;
+        int depth = 0;
+
+        while (depth < MAX_RECURSION_DEPTH) {
+            var stmt = statements.get(current);
+            if (stmt == null) return current;
+
+            String parent = stmt.getParentStatementGeoid();
+            if (parent == null) return current;
+
+            current = parent;
+            depth++;
+        }
+
+        return current;
+    }
+
+    private static String toUpper(String s) {
+        return s != null ? s.toUpperCase() : null;
     }
 
     public void clearCache() {
         resolutionCache.clear();
+        cacheHits = 0;
+        cacheMisses = 0;
     }
 }

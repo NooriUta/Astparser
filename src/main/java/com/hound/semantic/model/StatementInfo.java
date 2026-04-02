@@ -1,25 +1,44 @@
-// src/main/java/com/hound/semantic/model/StatementInfo.java
 package com.hound.semantic.model;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.*;
 
 /**
- * Информация об SQL statement
+ * Информация об SQL statement.
+ * Аналог Python: self.statements[geoid] dict.
  */
 public class StatementInfo {
 
     private final String geoid;
-    private final String type;           // SELECT, INSERT, UPDATE, DELETE, MERGE, CTE, SUBQUERY
+    private final String type;           // SELECT, INSERT, UPDATE, DELETE, MERGE, CTE, SUBQUERY, CURSOR, USUBQUERY
     private final String snippet;
     private final int lineStart;
     private final int lineEnd;
     private final String parentStatementGeoid;
     private final String routineGeoid;
 
-    private final Map<String, Object> sourceTables = new LinkedHashMap<>();
-    private final Map<String, Object> targetTables = new LinkedHashMap<>();
-    private final Map<String, Object> columnsOutput = new LinkedHashMap<>();
+    // Source / Target tables (geoid → usage info)
+    private final Map<String, Map<String, Object>> sourceTables = new LinkedHashMap<>();
+    private final Map<String, Map<String, Object>> targetTables = new LinkedHashMap<>();
+
+    // Source subqueries (geoid → SubqueryUsage)
+    private final Map<String, SubqueryUsage> sourceSubqueries = new LinkedHashMap<>();
+
+    // Child statements (subqueries, CTEs)
+    private final List<String> childStatements = new ArrayList<>();
+
+    // Output columns
+    private final LinkedHashMap<String, Map<String, Object>> columnsOutput = new LinkedHashMap<>();
+
+    // Atoms
+    private final Map<String, Map<String, Object>> atoms = new LinkedHashMap<>();
+
+    // Joins
+    private final List<JoinInfo> joins = new ArrayList<>();
+
+    // Aliases and naming
+    private final Set<String> aliases = new LinkedHashSet<>();
+    private String shortName;
+    private String alias;  // primary alias
 
     public StatementInfo(String geoid, String type, String snippet, int lineStart, int lineEnd,
                          String parentStatementGeoid, String routineGeoid) {
@@ -32,6 +51,8 @@ public class StatementInfo {
         this.routineGeoid = routineGeoid;
     }
 
+    // ═══════ Getters ═══════
+
     public String getGeoid() { return geoid; }
     public String getType() { return type; }
     public String getSnippet() { return snippet; }
@@ -39,12 +60,98 @@ public class StatementInfo {
     public int getLineEnd() { return lineEnd; }
     public String getParentStatementGeoid() { return parentStatementGeoid; }
     public String getRoutineGeoid() { return routineGeoid; }
+    public String getShortName() { return shortName; }
+    public String getAlias() { return alias; }
+    public Set<String> getAliases() { return aliases; }
+    public List<String> getChildStatements() { return childStatements; }
+    public Map<String, SubqueryUsage> getSourceSubqueries() { return sourceSubqueries; }
+    public LinkedHashMap<String, Map<String, Object>> getColumnsOutput() { return columnsOutput; }
+    public Map<String, Map<String, Object>> getAtoms() { return atoms; }
+    public List<JoinInfo> getJoins() { return joins; }
 
-    public void addSourceTable(String tableGeoid) {
-        sourceTables.put(tableGeoid, Map.of("geoid", tableGeoid));
+    // ═══════ Source / Target tables ═══════
+
+    public void addSourceTable(String tableGeoid, String tableAlias) {
+        Map<String, Object> entry = sourceTables.computeIfAbsent(tableGeoid,
+                k -> new LinkedHashMap<>(Map.of("geoid", tableGeoid, "aliases", new ArrayList<String>())));
+        if (tableAlias != null) {
+            @SuppressWarnings("unchecked")
+            List<String> aliasList = (List<String>) entry.computeIfAbsent("aliases", k -> new ArrayList<>());
+            if (!aliasList.contains(tableAlias.toUpperCase())) {
+                aliasList.add(tableAlias.toUpperCase());
+            }
+        }
     }
 
-    public void addTargetTable(String tableGeoid) {
-        targetTables.put(tableGeoid, Map.of("geoid", tableGeoid));
+    public void addTargetTable(String tableGeoid, String tableAlias) {
+        Map<String, Object> entry = targetTables.computeIfAbsent(tableGeoid,
+                k -> new LinkedHashMap<>(Map.of("geoid", tableGeoid, "aliases", new ArrayList<String>())));
+        if (tableAlias != null) {
+            @SuppressWarnings("unchecked")
+            List<String> aliasList = (List<String>) entry.computeIfAbsent("aliases", k -> new ArrayList<>());
+            if (!aliasList.contains(tableAlias.toUpperCase())) {
+                aliasList.add(tableAlias.toUpperCase());
+            }
+        }
+    }
+
+    /** Список geoid'ов source-таблиц (для NameResolver) */
+    public List<String> getSourceTableGeoids() {
+        return new ArrayList<>(sourceTables.keySet());
+    }
+
+    /** Список geoid'ов target-таблиц (для NameResolver) */
+    public List<String> getTargetTableGeoids() {
+        return new ArrayList<>(targetTables.keySet());
+    }
+
+    public Map<String, Map<String, Object>> getSourceTables() { return sourceTables; }
+    public Map<String, Map<String, Object>> getTargetTables() { return targetTables; }
+
+    // ═══════ Subqueries ═══════
+
+    public void addSourceSubquery(String subqueryGeoid, String alias, String subqueryStmt) {
+        SubqueryUsage existing = sourceSubqueries.get(subqueryGeoid);
+        if (existing != null) {
+            existing.addAlias(alias);
+        } else {
+            sourceSubqueries.put(subqueryGeoid, new SubqueryUsage(subqueryStmt, alias, "SUBQUERY"));
+        }
+    }
+
+    public void addChildStatement(String childGeoid) {
+        if (!childStatements.contains(childGeoid)) {
+            childStatements.add(childGeoid);
+        }
+    }
+
+    // ═══════ Aliases ═══════
+
+    public void setShortName(String shortName) { this.shortName = shortName; }
+    public void setAlias(String alias) {
+        this.alias = alias;
+        if (alias != null) this.aliases.add(alias.toUpperCase());
+    }
+    public void addAlias(String alias) {
+        if (alias != null) this.aliases.add(alias.toUpperCase());
+    }
+
+    // ═══════ Columns output ═══════
+
+    public void addColumnOutput(String name, Map<String, Object> columnInfo) {
+        columnsOutput.put(name, columnInfo);
+    }
+
+    // ═══════ Atoms ═══════
+
+    public void addAtom(String key, Map<String, Object> atomData) {
+        atoms.put(key, atomData);
+    }
+
+    // ═══════ Joins ═══════
+
+    public void addJoin(JoinInfo join) {
+        joins.add(join);
     }
 }
+ 
