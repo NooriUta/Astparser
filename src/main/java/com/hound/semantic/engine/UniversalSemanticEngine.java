@@ -46,19 +46,17 @@ public class UniversalSemanticEngine {
     // Statement lifecycle
     // ═══════════════════════════════════════════════════════════════
 
-    public void onStatementEnter(String type, String snippet, int lineStart, int lineEnd) {
+    public void onStatementEnter(String type, String snippet, int lineStart, int lineEnd, String alias) {
         String parentStmt = scopeManager.currentStatement();
         String routineGeoid = scopeManager.currentRoutine();
 
-        ScopeContext ctx = ScopeContext.forStatement(type, snippet, lineStart, lineEnd);
-        ctx.setParentStatement(parentStmt);
+        ScopeContext ctx = ScopeContext.forStatement(type, snippet, lineStart, lineEnd,
+                parentStmt, routineGeoid, alias);
         scopeManager.push(ctx);
 
-        // Register in builder
         builder.addStatement(ctx.getStatementGeoid(), type, snippet, lineStart, lineEnd,
                 parentStmt, routineGeoid);
 
-        // Register as child of parent
         if (parentStmt != null) {
             var parentInfo = builder.getStatements().get(parentStmt);
             if (parentInfo != null) {
@@ -218,14 +216,25 @@ public class UniversalSemanticEngine {
     // Routine lifecycle
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Вход в routine. Geoid формируется через цепочку:
+     *   Package (контейнер):   "PKG_NAME"
+     *   В пакете:              "PKG_NAME:PROCEDURE:HELLO"
+     *   Вложенная:             "PKG_NAME:PROCEDURE:OUTER:FUNCTION:INNER"
+     *   Без пакета:            "PROCEDURE:STANDALONE"
+     */
     public void onRoutineEnter(String name, String routineType, String schemaGeoid,
                                String packageGeoid, int lineStart) {
-        String geoid = builder.addRoutine(name, routineType, schemaGeoid, packageGeoid, lineStart);
+        // currentRoutine() = geoid parent routine (для вложенности)
+        String parentRoutine = scopeManager.currentRoutine();
+        String geoid = builder.addRoutine(name, routineType, schemaGeoid, packageGeoid,
+                lineStart, parentRoutine);
         ScopeContext ctx = scopeManager.peek();
         if (ctx != null) {
             ctx.setRoutineGeoid(geoid);
         }
-        logger.debug("Routine ENTER: {} {} [{}]", routineType, name, geoid);
+        logger.debug("Routine ENTER: {} {} [{}] parentRoutine={}",
+                routineType, name, geoid, parentRoutine);
     }
 
     public void onRoutineExit() {
@@ -240,8 +249,8 @@ public class UniversalSemanticEngine {
     // CTE
     // ═══════════════════════════════════════════════════════════════
 
-    public void onCTEStart(String cteText, int line, int endLine) {
-        onStatementEnter("CTE", cteText, line, endLine);
+    public void onCTEStart(String cteName, String cteText, int line, int endLine) {
+        onStatementEnter("CTE", cteText, line, endLine, cteName);
     }
 
     public void onCTEExit() {
@@ -252,8 +261,8 @@ public class UniversalSemanticEngine {
     // Subquery
     // ═══════════════════════════════════════════════════════════════
 
-    public void onSubqueryStart(String subqueryText, int line, int endLine) {
-        onStatementEnter("SUBQUERY", subqueryText, line, endLine);
+    public void onSubqueryStart(String subqueryAlias, String subqueryText, int line, int endLine) {
+        onStatementEnter("SUBQUERY", subqueryText, line, endLine, subqueryAlias);
     }
 
     public void onSubqueryExit() {

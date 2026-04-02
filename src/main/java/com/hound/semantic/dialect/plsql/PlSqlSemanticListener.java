@@ -31,10 +31,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // Процедуры и функции
     // =========================================================================
 
+    // ═══════ Create procedure (toplevel) ═══════
     @Override
     public void enterCreate_procedure_body(PlSqlParser.Create_procedure_bodyContext ctx) {
-        base.onRoutineEnter(extractRoutineName(ctx), "PROCEDURE",
-                base.currentSchema(), null, getStartLine(ctx));
+        // create_procedure_body: CREATE ... PROCEDURE procedure_name ...
+        String name = ctx.procedure_name() != null
+                ? BaseSemanticListener.cleanIdentifier(ctx.procedure_name().getText())
+                : "UNKNOWN";
+        base.onRoutineEnter(name, "PROCEDURE", base.currentSchema(), null, getStartLine(ctx));
     }
 
     @Override
@@ -42,10 +46,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         base.onRoutineExit();
     }
 
+    // ═══════ Procedure body (в package) ═══════
     @Override
     public void enterProcedure_body(PlSqlParser.Procedure_bodyContext ctx) {
-        base.onRoutineEnter(extractRoutineName(ctx), "PROCEDURE",
-                base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        // procedure_body: PROCEDURE identifier ...
+        String name = ctx.identifier() != null
+                ? BaseSemanticListener.cleanIdentifier(ctx.identifier().getText())
+                : "UNKNOWN";
+        base.onRoutineEnter(name, "PROCEDURE", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
     }
 
     @Override
@@ -53,10 +61,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         base.onRoutineExit();
     }
 
+    // ═══════ Create function (toplevel) ═══════
     @Override
     public void enterCreate_function_body(PlSqlParser.Create_function_bodyContext ctx) {
-        base.onRoutineEnter(extractRoutineName(ctx), "FUNCTION",
-                base.currentSchema(), null, getStartLine(ctx));
+        // create_function_body: CREATE ... FUNCTION function_name ...
+        String name = ctx.function_name() != null
+                ? BaseSemanticListener.cleanIdentifier(ctx.function_name().getText())
+                : "UNKNOWN";
+        base.onRoutineEnter(name, "FUNCTION", base.currentSchema(), null, getStartLine(ctx));
     }
 
     @Override
@@ -64,10 +76,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         base.onRoutineExit();
     }
 
+    // ═══════ Function body (в package) ═══════
     @Override
     public void enterFunction_body(PlSqlParser.Function_bodyContext ctx) {
-        base.onRoutineEnter(extractRoutineName(ctx), "FUNCTION",
-                base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        // function_body: FUNCTION identifier ...
+        String name = ctx.identifier() != null
+                ? BaseSemanticListener.cleanIdentifier(ctx.identifier().getText())
+                : "UNKNOWN";
+        base.onRoutineEnter(name, "FUNCTION", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
     }
 
     @Override
@@ -565,25 +581,5 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         }
     }
 
-    /**
-     * Извлекает имя routine через рефлексию (procedure_name или function_name -> identifier).
-     */
-    private String extractRoutineName(ParserRuleContext ctx) {
-        if (ctx == null) return "UNKNOWN";
-        for (String methodName : new String[]{"procedure_name", "function_name"}) {
-            try {
-                Method m = ctx.getClass().getMethod(methodName);
-                Object nameCtx = m.invoke(ctx);
-                if (nameCtx != null) {
-                    Method id = nameCtx.getClass().getMethod("identifier");
-                    Object idCtx = id.invoke(nameCtx);
-                    if (idCtx != null) {
-                        Method gt = idCtx.getClass().getMethod("getText");
-                        return BaseSemanticListener.cleanIdentifier((String) gt.invoke(idCtx));
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-        return ctx.getStart() != null ? "ROUTINE_" + ctx.getStart().getLine() : "UNKNOWN";
-    }
+
 }

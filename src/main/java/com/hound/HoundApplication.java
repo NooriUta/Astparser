@@ -31,7 +31,13 @@ import java.util.stream.Stream;
 public class HoundApplication {
 
     private static final Logger logger = LoggerFactory.getLogger(HoundApplication.class);
-    private static final String[] SQL_EXTENSIONS = {".sql", ".plsql", ".pks", ".pkb"};
+    private static final String[] SQL_EXTENSIONS = {
+            ".sql", ".plsql", ".pls",
+            ".pks", ".pkb", ".pkh",
+            ".prc", ".fnc",
+            ".trg", ".vw", ".typ",
+            ".ddl", ".dml", ".pck"
+    };
 
     public static void main(String[] args) {
         try {
@@ -95,8 +101,11 @@ public class HoundApplication {
                 failed++;
             }
         }
-
-        logger.info("ИТОГО: успешно={}, ошибок={}, время={} ms", success, failed, totalTime);
+        String timeStr = totalTime >= 1000
+                ? String.format("%.1f s", totalTime / 1000.0)
+                : totalTime + " ms";
+        //System.out.println("--- " + file.getFileName() + " (" + timeStr + " ms) ---");
+        logger.info("ИТОГО: успешно={}, ошибок={}, время={} ms", success, failed, timeStr);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -151,7 +160,10 @@ public class HoundApplication {
     // ═══════════════════════════════════════════════════════════════
 
     private void printResult(Path file, SemanticResult result, long duration) {
-        System.out.println("--- " + file.getFileName() + " (" + duration + " ms) ---");
+        String timeStr = duration >= 1000
+                ? String.format("%.1f s", duration / 1000.0)
+                : duration + " ms";
+        System.out.println("--- " + file.getFileName() + " (" + timeStr + " ms) ---");
 
         var structure = result.getStructure();
         if (structure != null) {

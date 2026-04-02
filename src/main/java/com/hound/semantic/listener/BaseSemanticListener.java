@@ -528,7 +528,7 @@ public abstract class BaseSemanticListener {
 
     public void onStatementEnter(String type, String snippet, int lineStart, int lineEnd) {
         initStatement(type, snippet, lineStart, lineEnd, null);
-        engine.onStatementEnter(type, snippet, lineStart, lineEnd);
+        engine.onStatementEnter(type, snippet, lineStart, lineEnd, null);
     }
 
     public void onStatementExit() {
@@ -567,10 +567,12 @@ public abstract class BaseSemanticListener {
         engine.onJoinExit();
     }
 
+    // CTE — alias = имя CTE (из ANTLR ctx.query_name()):
     public void onCTEEnter(String cteText, int line, int endLine) {
+        String cteName = (String) current.get("subquery_alias");  // ← имя CTE уже в current
         initStatement("CTE", cteText, line, endLine, null);
         subqueryAliasStack().add(" ");
-        engine.onCTEStart(cteText, line, endLine);
+        engine.onCTEStart(cteName, cteText, line, endLine);       // ← передаём имя
     }
 
     public void onCTEExit() {
@@ -580,9 +582,12 @@ public abstract class BaseSemanticListener {
         engine.onCTEExit();
     }
 
+    // Subquery — alias = alias подзапроса (если есть):
     public void onSubqueryEnter(String subqueryText, int line, int endLine) {
+        List<String> stack = subqueryAliasStack();
+        String alias = !stack.isEmpty() ? stack.get(stack.size() - 1) : null;
         initStatement("SUBQUERY", subqueryText, line, endLine, null);
-        engine.onSubqueryStart(subqueryText, line, endLine);
+        engine.onSubqueryStart(alias, subqueryText, line, endLine);  // ← передаём alias
     }
 
     public void onSubqueryExit() {

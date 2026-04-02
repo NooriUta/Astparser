@@ -5,7 +5,22 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * ScopeContext — представляет текущее состояние разбора (аналог _current dict в Python).
+ * ScopeContext — текущее состояние разбора.
+ *
+ * GEOID — иерархический идентификатор.
+ * Разделитель ":" для execution hierarchy (routine → statement → subquery).
+ *
+ * Routine geoid примеры:
+ *   PACKAGE:  "TEST_PKG"
+ *   В пакете: "TEST_PKG:PROCEDURE:HELLO"
+ *   Вложенная: "TEST_PKG:PROCEDURE:OUTER:FUNCTION:INNER"
+ *   Без пакета: "PROCEDURE:STANDALONE"
+ *   Вложенная без пакета: "PROCEDURE:OUTER:FUNCTION:LOCAL_HELPER"
+ *
+ * Statement geoid примеры:
+ *   DML:      "{routine_or_parent}:SELECT:48"
+ *   CTE:      "{parent}:MONTHLY_REVENUE:58"
+ *   SUBQUERY: "{parent}:SQ:ALIAS:89" или "{parent}:SQ:89"
  */
 public class ScopeContext {
 
@@ -26,19 +41,92 @@ public class ScopeContext {
 
     private final Map<String, String> aliases = new HashMap<>();
 
-    public static ScopeContext forStatement(String type, String snippet, int lineStart, int lineEnd) {
+    // ═══════ Factory: Statement ═══════
+
+    /**
+     * Создаёт ScopeContext для statement с иерархическим geoid.
+     *
+     * @param type            SELECT, INSERT, UPDATE, DELETE, MERGE, CTE, SUBQUERY, CURSOR, VIEW, ...
+     * @param snippet         SQL text (для отладки)
+     * @param lineStart       строка начала
+     * @param lineEnd         строка конца
+     * @param parentStmtGeoid geoid родительского statement (nullable)
+     * @param routineGeoid    geoid текущей routine (nullable)
+     * @param alias           имя CTE / alias subquery / cursor name (nullable)
+     */
+    public static ScopeContext forStatement(String type, String snippet, int lineStart, int lineEnd,
+                                            String parentStmtGeoid, String routineGeoid, String alias) {
         ScopeContext ctx = new ScopeContext();
         ctx.statementType = type;
-        ctx.statementGeoid = "stmt:" + type + ":" + lineStart;
+        ctx.parentStatement = parentStmtGeoid;
+        ctx.routineGeoid = routineGeoid;
+
+        // general_geoid: parent_statement → routine → null
+        String general = parentStmtGeoid != null ? parentStmtGeoid
+                : routineGeoid != null ? routineGeoid
+                : null;
+
+        ctx.statementGeoid = buildStatementGeoid(type, lineStart, general, alias);
         return ctx;
     }
 
-    public void registerAlias(String alias, String geoid) {
-        if (alias != null && geoid != null) {
-            aliases.put(alias.toUpperCase(), geoid);
-        }
+    /** Backward-compatible: без parent/routine/alias */
+    public static ScopeContext forStatement(String type, String snippet, int lineStart, int lineEnd) {
+        return forStatement(type, snippet, lineStart, lineEnd, null, null, null);
     }
 
+    /**
+     * Формула geoid для statement (портирование Python PlSqlAnalyzerListener._init_statement).
+     */
+    private static String buildStatementGeoid(String type, int line, String general, String alias) {
+        return switch (type) {
+            case "CTE" -> {
+                String name = upper(alias, "CTE");
+                yield join(general, name + ":" + line);
+            }
+            case "SUBQUERY", "MSUBQUERY" -> {
+                String sq = upper(alias) != null
+                        ? "SQ:" + upper(alias) + ":" + line
+                        : "SQ:" + line;
+                yield join(general, sq);
+            }
+            case "USUBQUERY" -> {
+                String usq = upper(alias) != null
+                        ? "USQ:" + upper(alias) + ":" + line
+                        : "USQ:" + line;
+                yield join(general, usq);
+            }
+            case "CURSOR", "REF CURSOR" -> {
+                String name = upper(alias, "CURSOR");
+                yield join(general, name + ":" + line);
+            }
+            case "VIEW" -> upper(alias) != null ? upper(alias) : "VIEW:" + line;
+            default ->  // SELECT, INSERT, UPDATE, DELETE, MERGE
+                    join(general, type + ":" + line);
+        };
+    }
+
+    // ═══════ Helpers ═══════
+
+    /** Соединяет general:suffix, пропуская null general */
+    private static String join(String general, String suffix) {
+        return general != null ? general + ":" + suffix : suffix;
+    }
+
+    private static String upper(String s) {
+        return (s != null && !s.isBlank()) ? s.trim().toUpperCase() : null;
+    }
+
+    private static String upper(String s, String fallback) {
+        String u = upper(s);
+        return u != null ? u : fallback;
+    }
+
+    // ═══════ Alias / Resolve ═══════
+
+    public void registerAlias(String alias, String geoid) {
+        if (alias != null && geoid != null) aliases.put(alias.toUpperCase(), geoid);
+    }
     public String resolveAlias(String alias) {
         return alias != null ? aliases.get(alias.toUpperCase()) : null;
     }
@@ -52,14 +140,12 @@ public class ScopeContext {
     public String getPackageGeoid()    { return packageGeoid; }
     public String getParentStatement() { return parentStatement; }
     public String getTargetTable()     { return targetTable; }
-
     public boolean isInDmlTarget()      { return isInDmlTarget; }
     public boolean isInJoinContext()     { return isInJoinContext; }
     public boolean isInValuesClause()   { return isInValuesClause; }
     public boolean isMergeInsertPart()  { return isMergeInsertPart; }
     public boolean isMergeUpdatePart()  { return isMergeUpdatePart; }
     public boolean isUnion()            { return isUnion; }
-
     public Map<String, String> getAliases() { return aliases; }
 
     public String getActiveClause() {
@@ -72,29 +158,22 @@ public class ScopeContext {
 
     // ═══════ Setters ═══════
 
-    public void setParentStatement(String parentStatement)  { this.parentStatement = parentStatement; }
-    public void setTargetTable(String targetTable)          { this.targetTable = targetTable; }
-    public void setRoutineGeoid(String routineGeoid)        { this.routineGeoid = routineGeoid; }
-
-    public void setStatementGeoid(String statementGeoid)    { this.statementGeoid = statementGeoid; }
-    public void setSchemaGeoid(String schemaGeoid)          { this.schemaGeoid = schemaGeoid; }
-    public void setPackageGeoid(String packageGeoid)        { this.packageGeoid = packageGeoid; }
-
-    public void setInDmlTarget(boolean inDmlTarget)         { this.isInDmlTarget = inDmlTarget; }
-    public void setInJoinContext(boolean inJoinContext)      { this.isInJoinContext = inJoinContext; }
-    public void setInValuesClause(boolean inValuesClause)   { this.isInValuesClause = inValuesClause; }
-    public void setMergeInsertPart(boolean mergeInsertPart) { this.isMergeInsertPart = mergeInsertPart; }
-    public void setMergeUpdatePart(boolean mergeUpdatePart) { this.isMergeUpdatePart = mergeUpdatePart; }
-    public void setUnion(boolean union)                     { this.isUnion = union; }
+    public void setParentStatement(String v)  { this.parentStatement = v; }
+    public void setTargetTable(String v)      { this.targetTable = v; }
+    public void setRoutineGeoid(String v)     { this.routineGeoid = v; }
+    public void setStatementGeoid(String v)   { this.statementGeoid = v; }
+    public void setSchemaGeoid(String v)      { this.schemaGeoid = v; }
+    public void setPackageGeoid(String v)     { this.packageGeoid = v; }
+    public void setInDmlTarget(boolean v)     { this.isInDmlTarget = v; }
+    public void setInJoinContext(boolean v)    { this.isInJoinContext = v; }
+    public void setInValuesClause(boolean v)  { this.isInValuesClause = v; }
+    public void setMergeInsertPart(boolean v) { this.isMergeInsertPart = v; }
+    public void setMergeUpdatePart(boolean v) { this.isMergeUpdatePart = v; }
+    public void setUnion(boolean v)           { this.isUnion = v; }
 
     @Override
     public String toString() {
-        return "ScopeContext{stmt=" + statementGeoid
-                + ", type=" + statementType
-                + ", routine=" + routineGeoid
-                + ", parent=" + parentStatement
-                + ", target=" + targetTable
-                + ", aliases=" + aliases.size()
-                + "}";
+        return "ScopeContext{" + statementGeoid + ", type=" + statementType
+                + ", routine=" + routineGeoid + ", parent=" + parentStatement + "}";
     }
 }

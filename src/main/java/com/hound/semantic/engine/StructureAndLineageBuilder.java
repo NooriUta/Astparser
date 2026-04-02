@@ -83,12 +83,47 @@ public class StructureAndLineageBuilder {
 
     // ═══════ Routines ═══════
 
+    /** Backward-compatible (без parentRoutine) */
     public String addRoutine(String name, String routineType, String schemaGeoid,
                              String packageGeoid, int lineStart) {
+        return addRoutine(name, routineType, schemaGeoid, packageGeoid, lineStart, null);
+    }
+
+    /**
+     * Регистрирует routine с правильным geoid.
+     *
+     * Формула geoid (портирование Python _init_routine):
+     *   Package-контейнер:     packageName (просто имя, без типа в geoid)
+     *   Routine в пакете:      PKG_NAME:ROUTINE_TYPE:ROUTINE_NAME
+     *   Вложенная routine:     PARENT_ROUTINE_GEOID:ROUTINE_TYPE:ROUTINE_NAME
+     *   Routine со схемой:     SCHEMA:ROUTINE_TYPE:ROUTINE_NAME
+     *   Routine без контекста: ROUTINE_TYPE:ROUTINE_NAME
+     *
+     * Разделитель: ":" (двоеточие)
+     *
+     * @param parentRoutineGeoid geoid parent routine (для вложенности), nullable
+     */
+    public String addRoutine(String name, String routineType, String schemaGeoid,
+                             String packageGeoid, int lineStart, String parentRoutineGeoid) {
         String upperName = name != null ? name.toUpperCase() : "UNKNOWN";
-        String geoid = (packageGeoid != null ? packageGeoid + "." : "")
-                + (schemaGeoid != null ? schemaGeoid + "." : "")
-                + upperName;
+
+        String geoid;
+        if (parentRoutineGeoid != null && !parentRoutineGeoid.isBlank()) {
+            // Вложенная routine: parent:TYPE:NAME
+            // Примеры:
+            //   PKG_NAME:PROCEDURE:OUTER → PKG_NAME:PROCEDURE:OUTER:FUNCTION:INNER
+            //   PROCEDURE:STANDALONE → PROCEDURE:STANDALONE:FUNCTION:LOCAL_HELPER
+            geoid = parentRoutineGeoid + ":" + routineType + ":" + upperName;
+        } else if (packageGeoid != null && !packageGeoid.isBlank()) {
+            // Top-level routine в пакете: PKG:TYPE:NAME
+            geoid = packageGeoid + ":" + routineType + ":" + upperName;
+        } else if (schemaGeoid != null && !schemaGeoid.isBlank()) {
+            // Routine со схемой: SCHEMA:TYPE:NAME
+            geoid = schemaGeoid + ":" + routineType + ":" + upperName;
+        } else {
+            // Standalone: TYPE:NAME
+            geoid = routineType + ":" + upperName;
+        }
 
         routines.computeIfAbsent(geoid, k -> {
             logger.debug("New routine registered: {} {} [{}]", routineType, upperName, geoid);
@@ -96,6 +131,7 @@ public class StructureAndLineageBuilder {
         });
         return geoid;
     }
+
 
     // ═══════ Lineage ═══════
 
