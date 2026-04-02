@@ -3,128 +3,143 @@ package com.hound.semantic.dialect.plsql;
 
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParserBaseListener;
+import com.hound.semantic.listener.BaseSemanticListener;
 import com.hound.semantic.engine.UniversalSemanticEngine;
 import org.antlr.v4.runtime.ParserRuleContext;
 
 /**
- * Улучшенный PlSqlSemanticListener.
- * Обрабатывает: SELECT, FROM, JOIN, CTE, subqueries, column references, atoms.
+ * PlSqlSemanticListener — точный перенос логики из Python PlSqlAnalyzerListener.
  */
 public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
-    private final UniversalSemanticEngine engine;
+    private final BaseSemanticListener base;
 
     public PlSqlSemanticListener(UniversalSemanticEngine engine) {
-        this.engine = engine;
+        this.base = new BaseSemanticListener(engine) {};
     }
 
-    // ====================== TOP-LEVEL ======================
+    // ====================== PL/SQL-специфичные правила ======================
 
     @Override
     public void enterSelect_statement(PlSqlParser.Select_statementContext ctx) {
-        if (ctx == null) return;
-        engine.onStatementEnter("SELECT", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+        base.onStatementEnter("SELECT", extract(ctx), getStartLine(ctx), getEndLine(ctx));
     }
 
     @Override
     public void exitSelect_statement(PlSqlParser.Select_statementContext ctx) {
-        engine.onStatementExit();
-    }
-
-    // ====================== FROM & TABLE REFERENCES ======================
-
-    @Override
-    public void enterFrom_clause(PlSqlParser.From_clauseContext ctx) {
-        if (ctx == null) return;
-        // Можно отметить начало FROM-блока
-        engine.onStatementEnter("FROM", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+        base.onStatementExit();
     }
 
     @Override
-    public void exitFrom_clause(PlSqlParser.From_clauseContext ctx) {
-        engine.onStatementExit();
+    public void enterInsert_statement(PlSqlParser.Insert_statementContext ctx) {
+        base.onStatementEnter("INSERT", extract(ctx), getStartLine(ctx), getEndLine(ctx));
     }
 
     @Override
-    public void enterTable_ref_aux_internal(PlSqlParser.Table_ref_aux_internalContext ctx) {
-        if (ctx == null || ctx.getText() == null) return;
-        engine.onColumnRef(ctx.getText()); // временно используем как table ref
-    }
-
-    // ====================== JOIN ======================
-
-    @Override
-    public void enterJoin_clause(PlSqlParser.Join_clauseContext ctx) {
-        if (ctx == null) return;
-        engine.onStatementEnter("JOIN", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+    public void exitInsert_statement(PlSqlParser.Insert_statementContext ctx) {
+        base.onStatementExit();
     }
 
     @Override
-    public void exitJoin_clause(PlSqlParser.Join_clauseContext ctx) {
-        engine.onStatementExit();
+    public void enterUpdate_statement(PlSqlParser.Update_statementContext ctx) {
+        base.onStatementEnter("UPDATE", extract(ctx), getStartLine(ctx), getEndLine(ctx));
     }
 
-    // ====================== WITH / CTE ======================
+    @Override
+    public void exitUpdate_statement(PlSqlParser.Update_statementContext ctx) {
+        base.onStatementExit();
+    }
+
+    @Override
+    public void enterDelete_statement(PlSqlParser.Delete_statementContext ctx) {
+        base.onStatementEnter("DELETE", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitDelete_statement(PlSqlParser.Delete_statementContext ctx) {
+        base.onStatementExit();
+    }
+
+    @Override
+    public void enterMerge_statement(PlSqlParser.Merge_statementContext ctx) {
+        base.onStatementEnter("MERGE", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitMerge_statement(PlSqlParser.Merge_statementContext ctx) {
+        base.onStatementExit();
+    }
 
     @Override
     public void enterWith_clause(PlSqlParser.With_clauseContext ctx) {
-        if (ctx == null) return;
-        engine.onStatementEnter("WITH", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+        base.onCTEStart(extract(ctx), getStartLine(ctx), getEndLine(ctx));
     }
 
     @Override
     public void exitWith_clause(PlSqlParser.With_clauseContext ctx) {
-        engine.onStatementExit();
+        base.onCTEExit();
     }
 
-    // ====================== SUBQUERY ======================
+    @Override
+    public void enterFrom_clause(PlSqlParser.From_clauseContext ctx) {
+        base.onFromStart();
+    }
+
+    @Override
+    public void exitFrom_clause(PlSqlParser.From_clauseContext ctx) {
+        base.onFromExit();
+    }
+
+    @Override
+    public void enterTable_ref_aux_internal(PlSqlParser.Table_ref_aux_internalContext ctx) {
+        if (ctx != null && ctx.getText() != null) {
+            base.onTableReference(ctx.getText(), getStartLine(ctx), getEndLine(ctx));
+        }
+    }
+
+    @Override
+    public void enterJoin_clause(PlSqlParser.Join_clauseContext ctx) {
+        base.onJoinStart(extract(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitJoin_clause(PlSqlParser.Join_clauseContext ctx) {
+        base.onJoinExit();
+    }
 
     @Override
     public void enterSubquery(PlSqlParser.SubqueryContext ctx) {
-        if (ctx == null) return;
-        engine.onStatementEnter("SUBQUERY", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+        base.onSubqueryStart(extract(ctx), getStartLine(ctx), getEndLine(ctx));
     }
 
     @Override
     public void exitSubquery(PlSqlParser.SubqueryContext ctx) {
-        engine.onStatementExit();
+        base.onSubqueryExit();
     }
-
-    // ====================== COLUMN & SELECT LIST ======================
 
     @Override
     public void enterColumn_name(PlSqlParser.Column_nameContext ctx) {
         if (ctx != null && ctx.getText() != null) {
-            engine.onColumnRef(ctx.getText());
+            base.onColumnRef(ctx.getText(), getStartLine(ctx), getEndLine(ctx));
         }
     }
-
-    @Override
-    public void enterSelect_list_element(PlSqlParser.Select_list_elementContext ctx) {
-        if (ctx != null && ctx.getText() != null) {
-            // Можно добавить onSelectItem или расширить позже
-            engine.onColumnRef(ctx.getText());
-        }
-    }
-
-    // ====================== ATOM ======================
 
     @Override
     public void enterAtom(PlSqlParser.AtomContext ctx) {
         if (ctx == null) return;
-
-        String text = ctx.getText() != null ? ctx.getText() : "";
-        int startLine = getStartLine(ctx);
-        int startCol = getStartColumn(ctx);
-        int endLine = getEndLine(ctx);
-        int endCol = getEndColumn(ctx);
-
-        engine.onAtom(text, startLine, startCol, endLine, endCol, "ATOM");
+        base.onAtom(
+                ctx.getText() != null ? ctx.getText() : "",
+                getStartLine(ctx),
+                getStartColumn(ctx),
+                getEndLine(ctx),
+                getEndColumn(ctx),
+                "ATOM"
+        );
     }
 
-    // ====================== HELPERS ======================
+    // ====================== Helpers ======================
 
-    private String extractSnippet(ParserRuleContext ctx) {
+    private String extract(ParserRuleContext ctx) {
         if (ctx == null) return "";
         try {
             return ctx.getText();
