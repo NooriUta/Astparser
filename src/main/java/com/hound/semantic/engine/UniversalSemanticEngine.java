@@ -1,8 +1,6 @@
-// src/main/java/com/hound/semantic/engine/UniversalSemanticEngine.java
 package com.hound.semantic.engine;
 
 import com.hound.semantic.model.SemanticResult;
-import com.hound.semantic.model.Structure;
 
 /**
  * UniversalSemanticEngine — главный оркестратор семантического анализа
@@ -57,7 +55,7 @@ public class UniversalSemanticEngine {
     }
 
     public void clear() {
-        scopeManager = new ScopeManager(); // пересоздаём
+        scopeManager.clear();       // очищаем стек, не пересоздаём
         nameResolver.clearCache();
         builder.clear();
         atomProcessor.clear();

@@ -36,6 +36,13 @@ public class ScopeManager {
         return scopeStack.isEmpty();
     }
 
+    /**
+     * Полная очистка стека (используется вместо пересоздания объекта)
+     */
+    public void clear() {
+        scopeStack.clear();
+    }
+
     // ====================== Удобные геттеры ======================
 
     public String currentStatement() {
@@ -84,7 +91,6 @@ public class ScopeManager {
     }
 
     public String resolveAlias(String alias) {
-        // Можно реализовать поиск по всему стеку при необходимости
         ScopeContext ctx = peek();
         return ctx != null ? ctx.resolveAlias(alias) : null;
     }

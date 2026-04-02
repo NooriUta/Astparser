@@ -5,10 +5,10 @@ import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParserBaseListener;
 import com.hound.semantic.engine.UniversalSemanticEngine;
 import org.antlr.v4.runtime.ParserRuleContext;
-import org.antlr.v4.runtime.Token;
 
 /**
- * PlSqlSemanticListener — маппит события ANTLR парсера PL/SQL в UniversalSemanticEngine.
+ * Улучшенный PlSqlSemanticListener.
+ * Обрабатывает: SELECT, FROM, JOIN, CTE, subqueries, column references, atoms.
  */
 public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
@@ -18,35 +18,96 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         this.engine = engine;
     }
 
-    // ====================== DML Statements ======================
+    // ====================== TOP-LEVEL ======================
 
     @Override
-    public void enterData_manipulation_language_statements(PlSqlParser.Data_manipulation_language_statementsContext ctx) {
+    public void enterSelect_statement(PlSqlParser.Select_statementContext ctx) {
         if (ctx == null) return;
-
-        String type = detectDmlType(ctx);
-        String snippet = extractSnippet(ctx);
-
-        int startLine = getStartLine(ctx);
-        int endLine = getEndLine(ctx);
-
-        engine.onStatementEnter(type, snippet, startLine, endLine);
+        engine.onStatementEnter("SELECT", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
     }
 
     @Override
-    public void exitData_manipulation_language_statements(PlSqlParser.Data_manipulation_language_statementsContext ctx) {
+    public void exitSelect_statement(PlSqlParser.Select_statementContext ctx) {
         engine.onStatementExit();
     }
 
-    // ====================== Column References ======================
+    // ====================== FROM & TABLE REFERENCES ======================
+
+    @Override
+    public void enterFrom_clause(PlSqlParser.From_clauseContext ctx) {
+        if (ctx == null) return;
+        // Можно отметить начало FROM-блока
+        engine.onStatementEnter("FROM", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitFrom_clause(PlSqlParser.From_clauseContext ctx) {
+        engine.onStatementExit();
+    }
+
+    @Override
+    public void enterTable_ref_aux_internal(PlSqlParser.Table_ref_aux_internalContext ctx) {
+        if (ctx == null || ctx.getText() == null) return;
+        engine.onColumnRef(ctx.getText()); // временно используем как table ref
+    }
+
+    // ====================== JOIN ======================
+
+    @Override
+    public void enterJoin_clause(PlSqlParser.Join_clauseContext ctx) {
+        if (ctx == null) return;
+        engine.onStatementEnter("JOIN", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitJoin_clause(PlSqlParser.Join_clauseContext ctx) {
+        engine.onStatementExit();
+    }
+
+    // ====================== WITH / CTE ======================
+
+    @Override
+    public void enterWith_clause(PlSqlParser.With_clauseContext ctx) {
+        if (ctx == null) return;
+        engine.onStatementEnter("WITH", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitWith_clause(PlSqlParser.With_clauseContext ctx) {
+        engine.onStatementExit();
+    }
+
+    // ====================== SUBQUERY ======================
+
+    @Override
+    public void enterSubquery(PlSqlParser.SubqueryContext ctx) {
+        if (ctx == null) return;
+        engine.onStatementEnter("SUBQUERY", extractSnippet(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitSubquery(PlSqlParser.SubqueryContext ctx) {
+        engine.onStatementExit();
+    }
+
+    // ====================== COLUMN & SELECT LIST ======================
 
     @Override
     public void enterColumn_name(PlSqlParser.Column_nameContext ctx) {
-        if (ctx == null || ctx.getText() == null) return;
-        engine.onColumnRef(ctx.getText());
+        if (ctx != null && ctx.getText() != null) {
+            engine.onColumnRef(ctx.getText());
+        }
     }
 
-    // ====================== Atoms ======================
+    @Override
+    public void enterSelect_list_element(PlSqlParser.Select_list_elementContext ctx) {
+        if (ctx != null && ctx.getText() != null) {
+            // Можно добавить onSelectItem или расширить позже
+            engine.onColumnRef(ctx.getText());
+        }
+    }
+
+    // ====================== ATOM ======================
 
     @Override
     public void enterAtom(PlSqlParser.AtomContext ctx) {
@@ -61,19 +122,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         engine.onAtom(text, startLine, startCol, endLine, endCol, "ATOM");
     }
 
-    // ====================== Helpers ======================
-
-    private String detectDmlType(PlSqlParser.Data_manipulation_language_statementsContext ctx) {
-        if (ctx == null) return "UNKNOWN";
-
-        if (ctx.select_statement() != null) return "SELECT";
-        if (ctx.insert_statement() != null) return "INSERT";
-        if (ctx.update_statement() != null) return "UPDATE";
-        if (ctx.delete_statement() != null) return "DELETE";
-        if (ctx.merge_statement() != null) return "MERGE";
-
-        return "UNKNOWN";
-    }
+    // ====================== HELPERS ======================
 
     private String extractSnippet(ParserRuleContext ctx) {
         if (ctx == null) return "";
@@ -85,22 +134,18 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     }
 
     private int getStartLine(ParserRuleContext ctx) {
-        if (ctx == null || ctx.getStart() == null) return 0;
-        return ctx.getStart().getLine();
+        return (ctx != null && ctx.getStart() != null) ? ctx.getStart().getLine() : 0;
     }
 
     private int getEndLine(ParserRuleContext ctx) {
-        if (ctx == null || ctx.getStop() == null) return getStartLine(ctx);
-        return ctx.getStop().getLine();
+        return (ctx != null && ctx.getStop() != null) ? ctx.getStop().getLine() : getStartLine(ctx);
     }
 
     private int getStartColumn(ParserRuleContext ctx) {
-        if (ctx == null || ctx.getStart() == null) return 0;
-        return ctx.getStart().getCharPositionInLine();
+        return (ctx != null && ctx.getStart() != null) ? ctx.getStart().getCharPositionInLine() : 0;
     }
 
     private int getEndColumn(ParserRuleContext ctx) {
-        if (ctx == null || ctx.getStop() == null) return getStartColumn(ctx);
-        return ctx.getStop().getCharPositionInLine();
+        return (ctx != null && ctx.getStop() != null) ? ctx.getStop().getCharPositionInLine() : getStartColumn(ctx);
     }
 }
