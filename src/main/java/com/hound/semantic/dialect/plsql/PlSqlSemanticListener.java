@@ -7,16 +7,17 @@ import com.hound.semantic.listener.BaseSemanticListener;
 import com.hound.semantic.engine.UniversalSemanticEngine;
 import org.antlr.v4.runtime.ParserRuleContext;
 
+import java.lang.reflect.Method;
+import java.util.List;
+
 /**
  * PlSqlSemanticListener — Java-аналог Python PlSqlAnalyzerListener.
  *
- * Наследует PlSqlParserBaseListener (ANTLR) и делегирует все события
- * в BaseSemanticListener через поле base (composition).
- *
- * Ключевые принципы:
- * - Все имена методов ANTLR берутся только из реально сгенерированного PlSqlParserBaseListener.
- * - Имена правил грамматики используются как есть, без предположений о суффиксах.
- * - enterTable_ref_aux обрабатывает таблицу напрямую (без внутреннего Internal-вызова).
+ * ПРАВИЛА:
+ * 1. Никаких ctx.tableview_name() — этого метода нет в Table_ref_auxContext и Create_viewContext
+ *    данной версии грамматики. Используем рефлексию или getText().
+ * 2. Никаких прямых base.current.put / base.protected — только публичные методы base.
+ * 3. Никаких BaseSemanticListener.cleanIdentifier() без static — метод public static.
  */
 public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
@@ -32,8 +33,8 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void enterCreate_procedure_body(PlSqlParser.Create_procedure_bodyContext ctx) {
-        String name = extractRoutineName(ctx);
-        base.onRoutineEnter(name, "PROCEDURE", base.currentSchema(), null, getStartLine(ctx));
+        base.onRoutineEnter(extractRoutineName(ctx), "PROCEDURE",
+                base.currentSchema(), null, getStartLine(ctx));
     }
 
     @Override
@@ -43,8 +44,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void enterProcedure_body(PlSqlParser.Procedure_bodyContext ctx) {
-        String name = extractRoutineName(ctx);
-        base.onRoutineEnter(name, "PROCEDURE",
+        base.onRoutineEnter(extractRoutineName(ctx), "PROCEDURE",
                 base.currentSchema(), base.currentPackage(), getStartLine(ctx));
     }
 
@@ -55,8 +55,8 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void enterCreate_function_body(PlSqlParser.Create_function_bodyContext ctx) {
-        String name = extractRoutineName(ctx);
-        base.onRoutineEnter(name, "FUNCTION", base.currentSchema(), null, getStartLine(ctx));
+        base.onRoutineEnter(extractRoutineName(ctx), "FUNCTION",
+                base.currentSchema(), null, getStartLine(ctx));
     }
 
     @Override
@@ -66,8 +66,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void enterFunction_body(PlSqlParser.Function_bodyContext ctx) {
-        String name = extractRoutineName(ctx);
-        base.onRoutineEnter(name, "FUNCTION",
+        base.onRoutineEnter(extractRoutineName(ctx), "FUNCTION",
                 base.currentSchema(), base.currentPackage(), getStartLine(ctx));
     }
 
@@ -85,15 +84,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (ctx.package_name() == null) return;
         for (PlSqlParser.Package_nameContext pkgCtx : ctx.package_name()) {
             String packageName = BaseSemanticListener.cleanIdentifier(pkgCtx.getText());
-            String schemaGeoid = base.currentSchema();
-            String pkgGeoid = base.initPackage(packageName, schemaGeoid);
-            base.current.put("package", pkgGeoid);
+            String pkgGeoid = base.initPackage(packageName, base.currentSchema());
+            base.setPackage(pkgGeoid);
         }
     }
 
     @Override
     public void exitCreate_package_body(PlSqlParser.Create_package_bodyContext ctx) {
-        base.current.put("package", null);
+        base.setPackage(null);
     }
 
     // =========================================================================
@@ -103,8 +101,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void enterSchema_name(PlSqlParser.Schema_nameContext ctx) {
         if (ctx == null || ctx.identifier() == null) return;
-        String schemaName = BaseSemanticListener.cleanIdentifier(ctx.identifier().getText());
-        base.onSchemaEnter(schemaName);
+        base.onSchemaEnter(BaseSemanticListener.cleanIdentifier(ctx.identifier().getText()));
     }
 
     @Override
@@ -182,16 +179,16 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterCursor_declaration(PlSqlParser.Cursor_declarationContext ctx) {
         base.onStatementEnter("CURSOR", extract(ctx), getStartLine(ctx), getEndLine(ctx));
         if (ctx.select_statement() != null) {
-            base.current.put("is_first_subq",  ctx.select_statement().start.getLine());
-            base.current.put("is_first_subqp", ctx.select_statement().start.getCharPositionInLine());
+            base.setIsFirstSubq(ctx.select_statement().start.getLine());
+            base.setIsFirstSubqp(ctx.select_statement().start.getCharPositionInLine());
         }
     }
 
     @Override
     public void exitCursor_declaration(PlSqlParser.Cursor_declarationContext ctx) {
         base.onStatementExit();
-        base.current.put("is_first_subq",  null);
-        base.current.put("is_first_subqp", null);
+        base.setIsFirstSubq(null);
+        base.setIsFirstSubqp(null);
     }
 
     // =========================================================================
@@ -201,8 +198,8 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void enterWith_clause(PlSqlParser.With_clauseContext ctx) {
         base.onCTEEnter(extract(ctx), getStartLine(ctx), getEndLine(ctx));
-        base.current.put("is_first_subq",  null);
-        base.current.put("is_first_subqp", null);
+        base.setIsFirstSubq(null);
+        base.setIsFirstSubqp(null);
     }
 
     @Override
@@ -218,30 +215,26 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterSubquery(PlSqlParser.SubqueryContext ctx) {
         if (ctx == null) return;
 
-        Integer firstLine = (Integer) base.current.get("is_first_subq");
-        Integer firstCol  = (Integer) base.current.get("is_first_subqp");
+        Integer firstLine = base.getIsFirstSubq();
+        Integer firstCol  = base.getIsFirstSubqp();
         int ctxLine = ctx.start.getLine();
         int ctxCol  = ctx.start.getCharPositionInLine();
 
-        // Пропускаем первый подзапрос (он совпадает с DML/SELECT statement)
         if (firstLine != null && firstLine == ctxLine
                 && firstCol != null && firstCol == ctxCol) {
-            base.current.put("is_first_subq",  ctxLine);
-            base.current.put("is_first_subqp", ctxCol);
+            base.setIsFirstSubq(ctxLine);
+            base.setIsFirstSubqp(ctxCol);
             return;
         }
 
-        base.current.put("is_first_subq",  ctxLine);
-        base.current.put("is_first_subqp", ctxCol);
-
-        boolean hasUnion = ctx.subquery_operation_part() != null
-                && !ctx.subquery_operation_part().isEmpty();
-        base.current.put("is_union", hasUnion);
+        base.setIsFirstSubq(ctxLine);
+        base.setIsFirstSubqp(ctxCol);
+        base.setIsUnion(ctx.subquery_operation_part() != null
+                && !ctx.subquery_operation_part().isEmpty());
 
         if (!base.isInDmlTarget()) {
             base.onSubqueryEnter(extract(ctx), getStartLine(ctx), getEndLine(ctx));
         } else {
-            // USUBQUERY — подзапрос в DML target (Updatable subquery для MERGE)
             base.initStatement("USUBQUERY", extract(ctx), getStartLine(ctx), getEndLine(ctx), null);
         }
     }
@@ -269,12 +262,11 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     }
 
     // =========================================================================
-    // Ссылки на таблицы — enterTable_ref_aux (без Internal)
+    // Таблицы — enterTable_ref_aux
     //
-    // Аналог Python enterTable_ref_aux:
-    //   - Извлекаем tableview_name из дочерних правил грамматики
-    //   - Сами читаем алиас из table_alias
-    //   - Управляем subquery_alias_stack
+    // ctx.tableview_name() НЕ существует в Table_ref_auxContext этой грамматики.
+    // Имя таблицы извлекается через рефлексию из table_ref_aux_internal,
+    // либо как getText() всего контекста минус алиас.
     // =========================================================================
 
     @Override
@@ -282,27 +274,20 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (ctx == null) return;
 
         String tableAlias = extractAlias(ctx.table_alias());
-        String tableName  = null;
-
-        // Пытаемся извлечь имя таблицы из tableview_name через дочерние контексты
-        if (ctx.tableview_name() != null) {
-            tableName = BaseSemanticListener.cleanIdentifier(ctx.tableview_name().getText());
-        }
+        String tableName  = extractTableNameViaReflection(ctx, tableAlias);
 
         if (tableName != null && !tableName.isBlank()) {
             base.onTableReference(tableName, tableAlias, getStartLine(ctx), getEndLine(ctx));
-            base.current.put("table", tableName);
+            base.setCurrentTable(tableName);
         }
 
-        base.current.put("subquery_alias", tableAlias);
+        base.setSubqueryAlias(tableAlias);
         base.subqueryAliasStack().add(tableAlias != null ? tableAlias : "");
-
-        base.logger.debug("enterTable_ref_aux: table={} alias={}", tableName, tableAlias);
     }
 
     @Override
     public void exitTable_ref_aux(PlSqlParser.Table_ref_auxContext ctx) {
-        java.util.List<String> stack = base.subqueryAliasStack();
+        List<String> stack = base.subqueryAliasStack();
         if (!stack.isEmpty()) stack.remove(stack.size() - 1);
     }
 
@@ -327,13 +312,13 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
         if (tableName != null && !tableName.isBlank()) {
             base.onTableReference(tableName, tableAlias, getStartLine(ctx), getEndLine(ctx));
-            base.current.put("table", tableName);
+            base.setCurrentTable(tableName);
         }
     }
 
     @Override
     public void exitGeneral_table_ref(PlSqlParser.General_table_refContext ctx) {
-        base.current.put("general_table", null);
+        base.setGeneralTable(null);
         base.onDmlTargetExit();
     }
 
@@ -397,82 +382,47 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // =========================================================================
 
     @Override
-    public void enterWhere_clause(PlSqlParser.Where_clauseContext ctx) {
-        base.onWhereEnter(getStartLine(ctx));
-    }
+    public void enterWhere_clause(PlSqlParser.Where_clauseContext ctx)   { base.onWhereEnter(getStartLine(ctx)); }
+    @Override
+    public void exitWhere_clause(PlSqlParser.Where_clauseContext ctx)    { base.onWhereExit(); }
 
     @Override
-    public void exitWhere_clause(PlSqlParser.Where_clauseContext ctx) {
-        base.onWhereExit();
-    }
+    public void enterHaving_clause(PlSqlParser.Having_clauseContext ctx) { base.onHavingEnter(getStartLine(ctx)); }
+    @Override
+    public void exitHaving_clause(PlSqlParser.Having_clauseContext ctx)  { base.onHavingExit(); }
 
     @Override
-    public void enterHaving_clause(PlSqlParser.Having_clauseContext ctx) {
-        base.onHavingEnter(getStartLine(ctx));
-    }
+    public void enterOrder_by_clause(PlSqlParser.Order_by_clauseContext ctx) { base.onOrderByEnter(getStartLine(ctx)); }
+    @Override
+    public void exitOrder_by_clause(PlSqlParser.Order_by_clauseContext ctx)  { base.onOrderByExit(); }
 
     @Override
-    public void exitHaving_clause(PlSqlParser.Having_clauseContext ctx) {
-        base.onHavingExit();
-    }
-
+    public void enterGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx) { base.onGroupByEnter(getStartLine(ctx)); }
     @Override
-    public void enterOrder_by_clause(PlSqlParser.Order_by_clauseContext ctx) {
-        base.onOrderByEnter(getStartLine(ctx));
-    }
-
-    @Override
-    public void exitOrder_by_clause(PlSqlParser.Order_by_clauseContext ctx) {
-        base.onOrderByExit();
-    }
-
-    @Override
-    public void enterGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx) {
-        base.onGroupByEnter(getStartLine(ctx));
-    }
-
-    @Override
-    public void exitGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx) {
-        base.onGroupByExit();
-    }
+    public void exitGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx)  { base.onGroupByExit(); }
 
     // =========================================================================
     // MERGE insert/update parts
     // =========================================================================
 
     @Override
-    public void enterMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx) {
-        base.onMergeInsertEnter();
-    }
+    public void enterMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx) { base.onMergeInsertEnter(); }
+    @Override
+    public void exitMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx)  { base.onMergeInsertExit(); }
 
     @Override
-    public void exitMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx) {
-        base.onMergeInsertExit();
-    }
-
+    public void enterMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx) { base.onMergeUpdateEnter(); }
     @Override
-    public void enterMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx) {
-        base.onMergeUpdateEnter();
-    }
-
-    @Override
-    public void exitMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx) {
-        base.onMergeUpdateExit();
-    }
+    public void exitMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx)  { base.onMergeUpdateExit(); }
 
     // =========================================================================
     // Values clause
     // =========================================================================
 
     @Override
-    public void enterValues_clause(PlSqlParser.Values_clauseContext ctx) {
-        base.onValuesClauseEnter();
-    }
-
+    public void enterValues_clause(PlSqlParser.Values_clauseContext ctx) { base.onValuesClauseEnter(); }
     @Override
-    public void exitValues_clause(PlSqlParser.Values_clauseContext ctx) {
-        base.onValuesClauseExit();
-    }
+    public void exitValues_clause(PlSqlParser.Values_clauseContext ctx)  { base.onValuesClauseExit(); }
 
     // =========================================================================
     // Atom
@@ -484,39 +434,31 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         String text = ctx.getText() != null ? ctx.getText() : "";
         boolean isComplex = ctx.getStop() != null && ctx.getStart() != null
                 && ctx.getStop().getTokenIndex() > ctx.getStart().getTokenIndex();
-        base.onAtom(text, getStartLine(ctx), getStartCol(ctx),
-                getEndLine(ctx), getEndCol(ctx), isComplex);
+        base.onAtom(text, getStartLine(ctx), getStartCol(ctx), getEndLine(ctx), getEndCol(ctx), isComplex);
     }
 
     // =========================================================================
     // CREATE VIEW
+    // ctx.tableview_name() НЕ существует в Create_viewContext — используем рефлексию
     // =========================================================================
 
     @Override
     public void enterCreate_view(PlSqlParser.Create_viewContext ctx) {
         if (ctx == null) return;
-        // Имя view ищем через tableview_name если есть, иначе по тексту
-        String viewName = null;
-        try {
-            if (ctx.tableview_name() != null) {
-                viewName = BaseSemanticListener.cleanIdentifier(ctx.tableview_name().getText());
-            }
-        } catch (Exception ignored) {
-            // tableview_name может отсутствовать в данной версии грамматики
-        }
+        String viewName = extractViaReflection(ctx, "tableview_name");
         if (viewName != null) {
             base.initTable(viewName, null, base.currentSchema(), "VIEW");
         }
         base.onStatementEnter("CREATE_VIEW", extract(ctx), getStartLine(ctx), getEndLine(ctx));
-        base.current.put("is_first_subq",  null);
-        base.current.put("is_first_subqp", null);
+        base.setIsFirstSubq(null);
+        base.setIsFirstSubqp(null);
     }
 
     @Override
     public void exitCreate_view(PlSqlParser.Create_viewContext ctx) {
         base.onStatementExit();
-        base.current.put("is_first_subq",  null);
-        base.current.put("is_first_subqp", null);
+        base.setIsFirstSubq(null);
+        base.setIsFirstSubqp(null);
     }
 
     // =========================================================================
@@ -526,11 +468,9 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     private String extract(ParserRuleContext ctx) {
         if (ctx == null) return "";
         try {
-            String text = ctx.getText();
-            return text != null && text.length() > 300 ? text.substring(0, 300) + "..." : text;
-        } catch (Exception e) {
-            return "";
-        }
+            String t = ctx.getText();
+            return t != null && t.length() > 300 ? t.substring(0, 300) + "..." : t;
+        } catch (Exception e) { return ""; }
     }
 
     private int getStartLine(ParserRuleContext ctx) {
@@ -549,49 +489,101 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         return (ctx != null && ctx.getStop() != null) ? ctx.getStop().getCharPositionInLine() : getStartCol(ctx);
     }
 
-    /**
-     * Извлекает алиас из table_alias контекста.
-     */
+    /** Алиас из table_alias контекста */
     private String extractAlias(PlSqlParser.Table_aliasContext aliasCtx) {
         if (aliasCtx == null) return null;
         try {
-            String text = aliasCtx.getText();
-            return text != null && !text.isBlank()
-                    ? BaseSemanticListener.cleanIdentifier(text) : null;
+            String t = aliasCtx.getText();
+            return (t != null && !t.isBlank()) ? BaseSemanticListener.cleanIdentifier(t) : null;
+        } catch (Exception e) { return null; }
+    }
+
+    /**
+     * Извлекает getText() дочернего правила ctx.methodName() через рефлексию,
+     * возвращает cleanIdentifier от результата или null.
+     */
+    private String extractViaReflection(Object ctx, String methodName) {
+        if (ctx == null) return null;
+        try {
+            Method m = ctx.getClass().getMethod(methodName);
+            Object child = m.invoke(ctx);
+            if (child == null) return null;
+            Method gt = child.getClass().getMethod("getText");
+            String text = (String) gt.invoke(child);
+            return BaseSemanticListener.cleanIdentifier(text);
         } catch (Exception e) {
             return null;
         }
     }
 
     /**
-     * Извлекает имя routine через рефлексию (procedure_name или function_name).
+     * Извлекает имя таблицы из Table_ref_auxContext.
+     *
+     * Стратегии (по приоритету):
+     * 1. table_ref_aux_internal -> dml_table_expression_clause -> tableview_name (рефлексия)
+     * 2. table_ref_aux_internal -> getText() целиком (рефлексия)
+     * 3. getText() всего ctx минус суффикс алиаса
+     */
+    private String extractTableNameViaReflection(PlSqlParser.Table_ref_auxContext ctx,
+                                                 String tableAlias) {
+        // Стратегия 1+2: через table_ref_aux_internal
+        try {
+            Method internalM = ctx.getClass().getMethod("table_ref_aux_internal");
+            Object internal = internalM.invoke(ctx);
+            if (internal != null) {
+                // 1: dml_table_expression_clause -> tableview_name
+                try {
+                    Method dmlM = internal.getClass().getMethod("dml_table_expression_clause");
+                    Object dml = dmlM.invoke(internal);
+                    if (dml != null) {
+                        String name = extractViaReflection(dml, "tableview_name");
+                        if (name != null && !name.isBlank()) return name;
+                    }
+                } catch (Exception ignored) {}
+
+                // 2: getText() internal целиком
+                try {
+                    Method gtM = internal.getClass().getMethod("getText");
+                    String text = (String) gtM.invoke(internal);
+                    if (text != null && !text.isBlank()) {
+                        return BaseSemanticListener.cleanIdentifier(text);
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+
+        // Стратегия 3: getText() ctx минус алиас в конце
+        try {
+            String full = ctx.getText();
+            if (full == null || full.isBlank()) return null;
+            if (tableAlias != null && full.toUpperCase().endsWith(tableAlias)) {
+                full = full.substring(0, full.length() - tableAlias.length());
+            }
+            return BaseSemanticListener.cleanIdentifier(full);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Извлекает имя routine через рефлексию (procedure_name или function_name -> identifier).
      */
     private String extractRoutineName(ParserRuleContext ctx) {
         if (ctx == null) return "UNKNOWN";
-        // procedure_name
-        try {
-            java.lang.reflect.Method m = ctx.getClass().getMethod("procedure_name");
-            Object nameCtx = m.invoke(ctx);
-            if (nameCtx != null) {
-                java.lang.reflect.Method id = nameCtx.getClass().getMethod("identifier");
-                Object idCtx = id.invoke(nameCtx);
-                if (idCtx != null) {
-                    return BaseSemanticListener.cleanIdentifier(idCtx.toString());
+        for (String methodName : new String[]{"procedure_name", "function_name"}) {
+            try {
+                Method m = ctx.getClass().getMethod(methodName);
+                Object nameCtx = m.invoke(ctx);
+                if (nameCtx != null) {
+                    Method id = nameCtx.getClass().getMethod("identifier");
+                    Object idCtx = id.invoke(nameCtx);
+                    if (idCtx != null) {
+                        Method gt = idCtx.getClass().getMethod("getText");
+                        return BaseSemanticListener.cleanIdentifier((String) gt.invoke(idCtx));
+                    }
                 }
-            }
-        } catch (Exception ignored) {}
-        // function_name
-        try {
-            java.lang.reflect.Method m = ctx.getClass().getMethod("function_name");
-            Object nameCtx = m.invoke(ctx);
-            if (nameCtx != null) {
-                java.lang.reflect.Method id = nameCtx.getClass().getMethod("identifier");
-                Object idCtx = id.invoke(nameCtx);
-                if (idCtx != null) {
-                    return BaseSemanticListener.cleanIdentifier(idCtx.toString());
-                }
-            }
-        } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
+        }
         return ctx.getStart() != null ? "ROUTINE_" + ctx.getStart().getLine() : "UNKNOWN";
     }
 }
