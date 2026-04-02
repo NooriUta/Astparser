@@ -539,13 +539,18 @@ public abstract class BaseSemanticListener {
     public void onRoutineEnter(String name, String type, String schemaGeoid,
                                String packageGeoid, int sourceLine) {
         initRoutine(name, type, schemaGeoid, packageGeoid, sourceLine);
+        engine.onRoutineEnter(name, type, schemaGeoid, packageGeoid, sourceLine);
     }
 
-    public void onRoutineExit() { exitRoutine(); }
+    public void onRoutineExit() {
+        exitRoutine();
+        engine.onRoutineExit();
+    }
 
     public void onTableReference(String tableName, String tableAlias, int line, int endLine) {
+        String role = isInDmlTarget() ? "TARGET" : "SOURCE";
         processTableReference(tableName, tableAlias);
-        engine.onTableReference(tableName, line, endLine);
+        engine.onTableReference(tableName, tableAlias, role, line, endLine);
     }
 
     public void onColumnRef(String columnName, int line, int endLine) {

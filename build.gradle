@@ -271,6 +271,7 @@ task fatJar(type: Jar) {
 // ==================== RUN ====================
 
 run {
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
     if (project.hasProperty('appArgs')) {
         args appArgs.split('\\s+')
     }

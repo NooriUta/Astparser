@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Финальный результат семантического анализа файла
+ * Финальный результат семантического анализа файла.
  */
 public class SemanticResult {
 
@@ -14,12 +14,12 @@ public class SemanticResult {
     private final String dialect;
     private final long processingTimeMs;
 
-    private final Object structure;                    // Map или Structure
+    private final Structure structure;
     private final List<LineageEdge> lineage;
     private final Map<String, Object> atoms;
 
     public SemanticResult(String sessionId, String filePath, String dialect, long processingTimeMs,
-                          Object structure, List<LineageEdge> lineage, Map<String, Object> atoms) {
+                          Structure structure, List<LineageEdge> lineage, Map<String, Object> atoms) {
         this.sessionId = sessionId;
         this.filePath = filePath;
         this.dialect = dialect;
@@ -29,12 +29,24 @@ public class SemanticResult {
         this.atoms = atoms != null ? atoms : Map.of();
     }
 
-    // Getters
     public String getSessionId() { return sessionId; }
     public String getFilePath() { return filePath; }
     public String getDialect() { return dialect; }
     public long getProcessingTimeMs() { return processingTimeMs; }
-    public Object getStructure() { return structure; }
+    public Structure getStructure() { return structure; }
     public List<LineageEdge> getLineage() { return lineage; }
     public Map<String, Object> getAtoms() { return atoms; }
+
+    @Override
+    public String toString() {
+        return "SemanticResult{" +
+                "sessionId='" + sessionId + '\'' +
+                ", filePath='" + filePath + '\'' +
+                ", dialect='" + dialect + '\'' +
+                ", processingTimeMs=" + processingTimeMs +
+                ", tables=" + (structure != null ? structure.getTables().size() : 0) +
+                ", lineage=" + lineage.size() +
+                ", atoms=" + atoms.size() +
+                '}';
+    }
 }
