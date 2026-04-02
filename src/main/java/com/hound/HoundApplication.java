@@ -1,143 +1,79 @@
+// src/main/java/com/hound/HoundApplication.java
 package com.hound;
 
-import com.hound.config.AppConfig;
-import com.hound.graph.GraphDatabaseWriter;
-import com.hound.graph.adapters.FalkorDBWriter;
-import com.hound.graph.adapters.MemgraphWriter;
-import com.hound.graph.adapters.Neo4jWriter;
-import com.hound.processor.DirectoryScanner;
-import com.hound.processor.FileProcessor;
-import com.hound.processor.ThreadPoolManager;
-import com.hound.cache.FileCache;
-import com.hound.metrics.MetricsCollector;
-import org.apache.commons.cli.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.hound.semantic.engine.UniversalSemanticEngine;
+import com.hound.semantic.dialect.plsql.PlSqlSemanticListener;
+import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
+import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
 
-import java.nio.file.Path;
-import java.util.List;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
+import org.antlr.v4.runtime.tree.ParseTreeWalker;
 
 /**
- * Главный класс приложения HOUND.
- * Исправлена ошибка конструктора FileProcessor (убран batchSize).
+ * Главный класс приложения Hound (временная версия для тестирования семантики)
  */
 public class HoundApplication {
 
-    private static final Logger logger = LoggerFactory.getLogger(HoundApplication.class);
-
     public static void main(String[] args) {
-        try {
-            AppConfig config = parseArguments(args);
-            HoundApplication app = new HoundApplication();
-            app.run(config);
-        } catch (Exception e) {
-            logger.error("Application error", e);
-            System.exit(1);
-        }
-    }
+        System.out.println("=== Hound Semantic Engine Starting ===");
 
-    public void run(AppConfig config) throws Exception {
-        logger.info("Starting HOUND AST Parser v1.0.0");
-
-        // Инициализация компонентов
-        GraphDatabaseWriter dbWriter = createDatabaseWriter(config);
-        dbWriter.connect(config.getDbHost(), config.getDbPort(),
-                config.getDbName(), config.getDbUser(), config.getDbPassword());
-
-        FileCache cache = new FileCache(config.getCachePath());
-        MetricsCollector metrics = new MetricsCollector();
-
-        // Сканирование файлов
-        DirectoryScanner scanner = new DirectoryScanner();
-        List<Path> files = scanner.scan(config.getInputPath(), config.getFileExtensions());
-        logger.info("Found {} files to process", files.size());
-
-        if (files.isEmpty()) {
-            logger.warn("No files found to process. Check input path and file extensions.");
-            dbWriter.close();
+        if (args.length == 0) {
+            System.out.println("Usage: provide SQL file or inline SQL as argument");
+            testSemanticEngine();
             return;
         }
 
-        // Обработка файлов
-        ThreadPoolManager threadPool = new ThreadPoolManager(config.getThreads());
-
-        for (Path file : files) {
-            FileProcessor processor = new FileProcessor(
-                    file,
-                    dbWriter,
-                    cache,
-                    metrics,
-                    config.getForcedLanguage()   // ← только 5 параметров!
-            );
-            threadPool.submit(processor);
-        }
-
-        // Ожидание завершения всех задач
-        threadPool.shutdownAndWait();
-
-        // Вывод отчёта
-        metrics.printReport();
-
-        // Очистка ресурсов
-        dbWriter.close();
-        logger.info("HOUND processing completed successfully");
-    }
-
-    private GraphDatabaseWriter createDatabaseWriter(AppConfig config) {
-        return switch (config.getDbType().toLowerCase()) {
-            case "neo4j" -> new Neo4jWriter();
-            case "falkordb" -> new FalkorDBWriter();
-            case "memgraph" -> new MemgraphWriter();
-            default -> throw new IllegalArgumentException("Unsupported database type: " + config.getDbType());
-        };
+        String sql = args[0];
+        testSemanticEngineWithSql(sql);
     }
 
     /**
-     * Парсинг аргументов командной строки
+     * Тестовый запуск семантического движка
      */
-    private static AppConfig parseArguments(String[] args) throws ParseException {
-        Options options = new Options();
+    private static void testSemanticEngine() {
+        String testSql = """
+            SELECT u.name, d.department_name 
+            FROM users u 
+            JOIN departments d ON u.department_id = d.id 
+            WHERE u.age > 30
+            """;
 
-        options.addOption("i", "input", true, "Input file or directory path");
-        options.addOption("t", "db-type", true, "Database type: neo4j|falkordb|memgraph");
-        options.addOption("h", "db-host", true, "Database host");
-        options.addOption("p", "db-port", true, "Database port");
-        options.addOption("n", "db-name", true, "Database name");
-        options.addOption("u", "db-user", true, "Database user");
-        options.addOption("pw", "db-password", true, "Database password");
-        options.addOption("th", "threads", true, "Number of threads");
-        options.addOption("c", "cache", true, "Cache path");
-        options.addOption("l", "language", true, "Force SQL dialect (plsql, mysql, postgresql, etc.)");
-        options.addOption("d", "dialect", true, "Force SQL dialect (alias for --language)");
+        testSemanticEngineWithSql(testSql);
+    }
 
-        CommandLineParser parser = new DefaultParser();
-        CommandLine cmd = parser.parse(options, args);
+    private static void testSemanticEngineWithSql(String sql) {
+        try {
+            long startTime = System.currentTimeMillis();
 
-        AppConfig config = new AppConfig();
+            // 1. Создаём engine
+            UniversalSemanticEngine engine = new UniversalSemanticEngine();
 
-        config.setInputPath(cmd.getOptionValue("input"));
-        config.setDbType(cmd.getOptionValue("db-type", "falkordb"));
-        config.setDbHost(cmd.getOptionValue("db-host", "localhost"));
-        config.setDbPort(Integer.parseInt(cmd.getOptionValue("db-port", "6379")));
-        config.setDbName(cmd.getOptionValue("db-name", "hound"));
-        config.setDbUser(cmd.getOptionValue("db-user", ""));
-        config.setDbPassword(cmd.getOptionValue("db-password", ""));
+            // 2. Создаём listener
+            PlSqlSemanticListener listener = new PlSqlSemanticListener(engine);
 
-        config.setThreads(Integer.parseInt(cmd.getOptionValue("threads",
-                String.valueOf(Runtime.getRuntime().availableProcessors()))));
+            // 3. Парсим SQL
+            PlSqlLexer lexer = new PlSqlLexer(CharStreams.fromString(sql));
+            CommonTokenStream tokens = new CommonTokenStream(lexer);
+            PlSqlParser parser = new PlSqlParser(tokens);
 
-        config.setCachePath(cmd.getOptionValue("cache", ".hound-cache"));
-        config.setFileExtensions(List.of(".sql", ".plsql", ".pks", ".pkb"));
-        config.setIncrementalMode(false);
-        config.setMaxFileSizeMB(100);
+            // 4. Запускаем парсинг
+            PlSqlParser.Sql_scriptContext tree = parser.sql_script();
 
-        // Принудительный язык/диалект
-        if (cmd.hasOption("language")) {
-            config.setForcedLanguage(cmd.getOptionValue("language"));
-        } else if (cmd.hasOption("dialect")) {
-            config.setForcedLanguage(cmd.getOptionValue("dialect"));
+            // 5. Проходим listener'ом
+            ParseTreeWalker.DEFAULT.walk(listener, tree);
+
+            // 6. Получаем результат
+            Object result = engine.getResult();
+
+            long duration = System.currentTimeMillis() - startTime;
+
+            System.out.println("Semantic analysis completed in " + duration + " ms");
+            System.out.println("Result: " + result);
+
+        } catch (Exception e) {
+            System.err.println("Error during semantic analysis:");
+            e.printStackTrace();
         }
-
-        return config;
     }
 }
