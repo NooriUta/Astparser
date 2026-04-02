@@ -2,8 +2,9 @@
 package com.hound;
 
 import com.hound.semantic.engine.UniversalSemanticEngine;
-import com.hound.semantic.model.SemanticResult;
+import com.hound.semantic.model.*;
 import com.hound.semantic.dialect.plsql.PlSqlSemanticListener;
+import com.hound.storage.ArcadeDBSemanticWriter;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
 
@@ -25,18 +26,20 @@ import java.util.stream.Stream;
  *
  * Использование:
  *   hound --input path/to/dir --language plsql
- *   hound --input path/to/file.sql
+ *   hound --input path/to/dir --language plsql --arcade-db ./data/hound-db
+ *   hound --input path/to/dir --language plsql --db-type arcadedb --db-host localhost --db-port 2480 --db-name hound
  *   hound path/to/file.sql
  */
 public class HoundApplication {
 
     private static final Logger logger = LoggerFactory.getLogger(HoundApplication.class);
+
     private static final String[] SQL_EXTENSIONS = {
             ".sql", ".plsql", ".pls",
             ".pks", ".pkb", ".pkh",
             ".prc", ".fnc",
             ".trg", ".vw", ".typ",
-            ".ddl", ".dml", ".pck"
+            ".ddl", ".dml"
     };
 
     public static void main(String[] args) {
@@ -53,26 +56,68 @@ public class HoundApplication {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Run
+    // ═══════════════════════════════════════════════════════════════
+
     public void run(RunConfig config) throws Exception {
         logger.info("=== Hound Semantic Engine v1.0.0 ===");
         logger.info("Input    : {}", config.inputPath);
         logger.info("Language : {}", config.language);
 
+        // Создаём writer (embedded или remote или null)
+        ArcadeDBSemanticWriter writer = createWriter(config);
+
         Path target = Path.of(config.inputPath);
         if (!Files.exists(target)) {
+            if (writer != null) writer.close();
             throw new IllegalArgumentException("Не найдено: " + target);
         }
 
-        if (Files.isDirectory(target)) {
-            processDirectory(target, config);
-        } else {
-            processFile(target, config);
+        try {
+            if (Files.isDirectory(target)) {
+                processDirectory(target, config, writer);
+            } else {
+                processFile(target, config, writer);
+            }
+        } finally {
+            if (writer != null) writer.close();
         }
     }
 
+    /**
+     * Создаёт writer в зависимости от параметров:
+     *   --arcade-db path          → embedded mode
+     *   --db-type arcadedb        → remote mode (к Docker серверу)
+     *   ничего                     → null (без записи)
+     */
+    private ArcadeDBSemanticWriter createWriter(RunConfig config) {
+        // Embedded mode
+        if (config.arcadeDbPath != null) {
+            logger.info("ArcadeDB : EMBEDDED {}", config.arcadeDbPath);
+            return new ArcadeDBSemanticWriter(config.arcadeDbPath);
+        }
+
+        // Remote mode
+        if ("arcadedb".equalsIgnoreCase(config.dbType)) {
+            logger.info("ArcadeDB : REMOTE {}:{}/{} user={}",
+                    config.dbHost, config.dbPort, config.dbName, config.dbUser);
+            return new ArcadeDBSemanticWriter(
+                    config.dbHost, config.dbPort, config.dbName,
+                    config.dbUser, config.dbPassword);
+        }
+
+        // Нет записи
+        logger.info("Storage  : disabled (используйте --arcade-db или --db-type arcadedb)");
+        return null;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Directory
     // ═══════════════════════════════════════════════════════════════
 
-    private void processDirectory(Path dir, RunConfig config) throws IOException {
+    private void processDirectory(Path dir, RunConfig config, ArcadeDBSemanticWriter writer)
+            throws IOException {
         List<Path> sqlFiles;
         try (Stream<Path> stream = Files.walk(dir)) {
             sqlFiles = stream
@@ -94,23 +139,23 @@ public class HoundApplication {
 
         for (Path file : sqlFiles) {
             try {
-                totalTime += processFile(file, config);
+                totalTime += processFile(file, config, writer);
                 success++;
             } catch (Exception e) {
                 logger.error("Ошибка: {} — {}", file.getFileName(), e.getMessage());
                 failed++;
             }
         }
-        String timeStr = totalTime >= 1000
-                ? String.format("%.1f s", totalTime / 1000.0)
-                : totalTime + " ms";
-        //System.out.println("--- " + file.getFileName() + " (" + timeStr + " ms) ---");
-        logger.info("ИТОГО: успешно={}, ошибок={}, время={} ms", success, failed, timeStr);
+
+        logger.info("ИТОГО: успешно={}, ошибок={}, время={}", success, failed, formatTime(totalTime));
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // File
+    // ═══════════════════════════════════════════════════════════════
 
-    private long processFile(Path file, RunConfig config) throws IOException {
+    private long processFile(Path file, RunConfig config, ArcadeDBSemanticWriter writer)
+            throws IOException {
         String sql = Files.readString(file);
         if (sql.isBlank()) {
             logger.warn("Пустой файл: {}", file);
@@ -131,10 +176,17 @@ public class HoundApplication {
                 duration
         );
 
+        // Запись в ArcadeDB
+        if (writer != null) {
+            writer.saveResult(result);
+        }
+
         printResult(file, result, duration);
         return duration;
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Dialect
     // ═══════════════════════════════════════════════════════════════
 
     private Object createListener(String language, UniversalSemanticEngine engine) {
@@ -158,12 +210,11 @@ public class HoundApplication {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Output
+    // ═══════════════════════════════════════════════════════════════
 
     private void printResult(Path file, SemanticResult result, long duration) {
-        String timeStr = duration >= 1000
-                ? String.format("%.1f s", duration / 1000.0)
-                : duration + " ms";
-        System.out.println("--- " + file.getFileName() + " (" + timeStr + " ms) ---");
+        System.out.println("--- " + file.getFileName() + " (" + formatTime(duration) + ") ---");
 
         var structure = result.getStructure();
         if (structure != null) {
@@ -190,20 +241,12 @@ public class HoundApplication {
         if (lineage != null && !lineage.isEmpty()) {
             System.out.println("  Lineage  : " + lineage.size() + " edges");
             lineage.forEach(e ->
-                    System.out.println("    L: " + e.sourceGeoid() + " → " + e.targetGeoid()
+                    System.out.println("    L: " + e.sourceGeoid() + " -> " + e.targetGeoid()
                             + " [" + e.relationType() + "]"));
         }
 
         System.out.println("  Atoms    : " + size(result.getAtoms()) + " groups");
         System.out.println();
-    }
-
-    private static int size(java.util.Map<?, ?> map) {
-        return map != null ? map.size() : 0;
-    }
-
-    private static int size(java.util.List<?> list) {
-        return list != null ? list.size() : 0;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -221,12 +264,13 @@ public class HoundApplication {
         options.addOption("i", "input", true, "Input file or directory path");
         options.addOption("l", "language", true, "SQL dialect: plsql (default)");
         options.addOption("d", "dialect", true, "Alias for --language");
-        options.addOption("t", "db-type", true, "Database type (reserved)");
-        options.addOption(null, "db-host", true, "Database host (reserved)");
-        options.addOption("p", "db-port", true, "Database port (reserved)");
-        options.addOption("n", "db-name", true, "Database name (reserved)");
-        options.addOption("u", "db-user", true, "Database user (reserved)");
-        options.addOption(null, "db-password", true, "Database password (reserved)");
+        options.addOption(null, "arcade-db", true, "ArcadeDB embedded path");
+        options.addOption("t", "db-type", true, "Database type: arcadedb");
+        options.addOption(null, "db-host", true, "Database host (default: localhost)");
+        options.addOption("p", "db-port", true, "Database port (default: 2480)");
+        options.addOption("n", "db-name", true, "Database name (default: hound)");
+        options.addOption("u", "db-user", true, "Database user (default: root)");
+        options.addOption(null, "db-password", true, "Database password");
         options.addOption(null, "threads", true, "Number of threads (reserved)");
         options.addOption(null, "help", false, "Show help");
 
@@ -238,39 +282,82 @@ public class HoundApplication {
         }
 
         RunConfig config = new RunConfig();
+
         config.inputPath = cmd.getOptionValue("input");
         if (config.inputPath == null || config.inputPath.isBlank()) {
             throw new ParseException("--input обязателен");
         }
-        if (cmd.hasOption("language")) {
-            config.language = cmd.getOptionValue("language");
-        } else if (cmd.hasOption("dialect")) {
-            config.language = cmd.getOptionValue("dialect");
+
+        if (cmd.hasOption("language")) config.language = cmd.getOptionValue("language");
+        else if (cmd.hasOption("dialect")) config.language = cmd.getOptionValue("dialect");
+
+        // ArcadeDB embedded
+        if (cmd.hasOption("arcade-db")) {
+            config.arcadeDbPath = cmd.getOptionValue("arcade-db");
         }
 
-        if (cmd.hasOption("db-type")) {
-            logger.info("DB-параметры пока игнорируются (semantic-only mode)");
-        }
+        // ArcadeDB remote
+        if (cmd.hasOption("db-type")) config.dbType = cmd.getOptionValue("db-type");
+        if (cmd.hasOption("db-host")) config.dbHost = cmd.getOptionValue("db-host");
+        if (cmd.hasOption("db-port")) config.dbPort = Integer.parseInt(cmd.getOptionValue("db-port"));
+        if (cmd.hasOption("db-name")) config.dbName = cmd.getOptionValue("db-name");
+        if (cmd.hasOption("db-user")) config.dbUser = cmd.getOptionValue("db-user");
+        if (cmd.hasOption("db-password")) config.dbPassword = cmd.getOptionValue("db-password");
 
         return config;
     }
 
     private static void printHelp() {
         System.out.println("Hound Semantic Engine v1.0.0");
-        System.out.println("  hound --input <path> [--language plsql]");
+        System.out.println();
+        System.out.println("Использование:");
+        System.out.println("  hound --input <path> [--language plsql] [storage options]");
         System.out.println("  hound <path>");
+        System.out.println();
+        System.out.println("Storage (выберите один):");
+        System.out.println("  --arcade-db <path>           ArcadeDB embedded (файл)");
+        System.out.println("  --db-type arcadedb           ArcadeDB remote (Docker/сервер)");
+        System.out.println("    --db-host localhost");
+        System.out.println("    --db-port 2480");
+        System.out.println("    --db-name hound");
+        System.out.println("    --db-user root");
+        System.out.println("    --db-password playwithdata");
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Helpers
+    // ═══════════════════════════════════════════════════════════════
+
+    private static String formatTime(long ms) {
+        return ms >= 1000 ? String.format("%.1f s", ms / 1000.0) : ms + " ms";
+    }
+
+    private static int size(java.util.Map<?, ?> m) { return m != null ? m.size() : 0; }
+    private static int size(java.util.List<?> l) { return l != null ? l.size() : 0; }
 
     private static boolean isSqlFile(Path path) {
         String name = path.getFileName().toString().toLowerCase();
-        for (String ext : SQL_EXTENSIONS) {
-            if (name.endsWith(ext)) return true;
-        }
+        for (String ext : SQL_EXTENSIONS) if (name.endsWith(ext)) return true;
         return false;
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Config
+    // ═══════════════════════════════════════════════════════════════
 
     static class RunConfig {
         String inputPath;
         String language = "plsql";
+
+        // Embedded ArcadeDB
+        String arcadeDbPath = null;
+
+        // Remote ArcadeDB (Docker)
+        String dbType = null;
+        String dbHost = "localhost";
+        int dbPort = 2480;
+        String dbName = "hound";
+        String dbUser = "root";
+        String dbPassword = "playwithdata";
     }
 }

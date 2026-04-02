@@ -56,6 +56,9 @@ dependencies {
     // Tests
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testImplementation 'org.mockito:mockito-core:5.12.0'
+
+    implementation 'com.arcadedb:arcadedb-engine:24.11.1'
+    implementation 'com.arcadedb:arcadedb-network:24.11.1'
 }
 
 // ==================== SOURCE SETS ====================
@@ -249,7 +252,12 @@ clean.dependsOn cleanGenerated
 application {
     mainClass = 'com.hound.HoundApplication'
 }
-
+tasks.withType(Tar).configureEach {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+tasks.withType(Zip).configureEach {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
 // ==================== TESTS ====================
 
 test {

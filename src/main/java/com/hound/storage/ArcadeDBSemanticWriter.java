@@ -4,6 +4,7 @@ package com.hound.storage;
 import com.arcadedb.database.Database;
 import com.arcadedb.database.DatabaseFactory;
 import com.arcadedb.graph.MutableVertex;
+import com.arcadedb.remote.RemoteDatabase;
 import com.hound.semantic.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,116 +12,204 @@ import org.slf4j.LoggerFactory;
 import java.util.*;
 
 /**
- * Записывает SemanticResult в ArcadeDB (embedded mode).
+ * Записывает SemanticResult в ArcadeDB.
  *
- * Аналог Python ParsingResultStorage (DuckDB), но для ArcadeDB.
- * Embedded mode — нулевой сетевой overhead, БД в файловой системе.
+ * Два режима:
+ *   EMBEDDED — БД в файловой системе, in-process (--arcade-db ./data/hound-db)
+ *   REMOTE   — подключение к ArcadeDB Server через HTTP (--db-host, --db-port, --db-name)
  *
- * Все типы с префиксом "Dali" для избежания конфликтов с зарезервированными словами.
- *
- * Использование:
- *   try (var writer = new ArcadeDBSemanticWriter("./data/hound-db")) {
- *       writer.saveResult(result);
- *   }
+ * Типы с префиксом "Dali" для избежания конфликтов с зарезервированными словами.
  */
 public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(ArcadeDBSemanticWriter.class);
 
-    private final Database db;
+    private Database embeddedDb;
+    private RemoteDatabase remoteDb;
+    private final Mode mode;
 
-    /**
-     * Открывает или создаёт БД в embedded mode.
-     * @param dbPath путь к директории БД
-     */
+    public enum Mode { EMBEDDED, REMOTE }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Constructors
+    // ═══════════════════════════════════════════════════════════════
+
+    /** Embedded mode: БД в локальной папке */
     public ArcadeDBSemanticWriter(String dbPath) {
+        this.mode = Mode.EMBEDDED;
         DatabaseFactory factory = new DatabaseFactory(dbPath);
-        this.db = factory.exists() ? factory.open() : factory.create();
-        SchemaInitializer.ensureSchema(db);
-        logger.info("ArcadeDB opened: {}", dbPath);
+        this.embeddedDb = factory.exists() ? factory.open() : factory.create();
+        initSchema();
+        logger.info("ArcadeDB EMBEDDED opened: {}", dbPath);
     }
 
-    /** Конструктор для уже открытой БД (для тестов) */
-    public ArcadeDBSemanticWriter(Database db) {
-        this.db = db;
-        SchemaInitializer.ensureSchema(db);
+    /** Remote mode: подключение к ArcadeDB Server (Docker) */
+    public ArcadeDBSemanticWriter(String host, int port, String dbName,
+                                  String user, String password) {
+        this.mode = Mode.REMOTE;
+        this.remoteDb = new RemoteDatabase(host, port, dbName, user, password);
+        initSchemaRemote();
+        logger.info("ArcadeDB REMOTE connected: {}:{}/{}", host, port, dbName);
     }
 
-    /**
-     * Записывает полный SemanticResult в ArcadeDB одной транзакцией.
-     * Аналог Python save_parsing_results().
-     *
-     * @return sessionId
-     */
+    // ═══════════════════════════════════════════════════════════════
+    // Schema initialization
+    // ═══════════════════════════════════════════════════════════════
+
+    private void initSchema() {
+        SchemaInitializer.ensureSchema(embeddedDb);
+    }
+
+    private void initSchemaRemote() {
+        // Vertex types
+        for (String type : new String[]{
+                "DaliSession", "DaliDatabase", "DaliSchema", "DaliPackage",
+                "DaliTable", "DaliColumn", "DaliRoutine", "DaliStatement"}) {
+            safeCommand("CREATE VERTEX TYPE " + type + " IF NOT EXISTS");
+        }
+        // Document types
+        for (String type : new String[]{
+                "DaliAtom", "DaliJoin", "DaliParameter", "DaliVariable"}) {
+            safeCommand("CREATE DOCUMENT TYPE " + type + " IF NOT EXISTS");
+        }
+        // Edge types
+        for (String type : new String[]{
+                "READS_FROM", "WRITES_TO", "CONTAINS_STMT", "CONTAINS_ROUTINE",
+                "CONTAINS_TABLE", "HAS_COLUMN", "CHILD_OF", "CALLS",
+                "DEPENDS_ON", "BELONGS_TO_SESSION"}) {
+            safeCommand("CREATE EDGE TYPE " + type + " IF NOT EXISTS");
+        }
+        logger.info("ArcadeDB remote schema initialized");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Save result
+    // ═══════════════════════════════════════════════════════════════
+
     public String saveResult(SemanticResult result) {
         String sessionId = result.getSessionId();
         long start = System.currentTimeMillis();
 
-        db.transaction(() -> {
-            // 1. Session vertex
-            MutableVertex sessionV = saveSession(sessionId, result);
+        if (mode == Mode.EMBEDDED) {
+            saveResultEmbedded(sessionId, result);
+        } else {
+            saveResultRemote(sessionId, result);
+        }
+
+        long elapsed = System.currentTimeMillis() - start;
+        logger.info("Saved to ArcadeDB ({}): session={}, tables={}, routines={}, " +
+                        "statements={}, lineage={} ({}ms)",
+                mode, sessionId,
+                safe(result.getStructure(), s -> s.getTables().size()),
+                safe(result.getStructure(), s -> s.getRoutines().size()),
+                safe(result.getStructure(), s -> s.getStatements().size()),
+                result.getLineage().size(), elapsed);
+
+        return sessionId;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // EMBEDDED mode
+    // ═══════════════════════════════════════════════════════════════
+
+    private void saveResultEmbedded(String sessionId, SemanticResult result) {
+        embeddedDb.transaction(() -> {
+            MutableVertex sessionV = embeddedDb.newVertex("DaliSession")
+                    .set("session_id", sessionId)
+                    .set("file_path", result.getFilePath())
+                    .set("dialect", result.getDialect())
+                    .set("processing_time_ms", result.getProcessingTimeMs())
+                    .set("created_at", System.currentTimeMillis())
+                    .save();
 
             Structure structure = result.getStructure();
             if (structure == null) return;
 
-            // 2. Tables → DaliTable vertex
+            // Tables
             Map<String, MutableVertex> tableVtx = new LinkedHashMap<>();
             for (var e : structure.getTables().entrySet()) {
-                MutableVertex v = saveTable(sessionId, e.getKey(), e.getValue());
+                MutableVertex v = embeddedDb.newVertex("DaliTable")
+                        .set("session_id", sessionId)
+                        .set("table_geoid", e.getKey())
+                        .set("table_name", e.getValue().tableName())
+                        .set("schema_geoid", e.getValue().schemaGeoid())
+                        .set("table_type", e.getValue().tableType())
+                        .set("aliases", listFrom(e.getValue().aliases()))
+                        .set("column_count", e.getValue().columnCount())
+                        .save();
                 tableVtx.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
             }
 
-            // 3. Columns → DaliColumn vertex + HAS_COLUMN edge
+            // Columns + HAS_COLUMN edges
             for (var e : structure.getColumns().entrySet()) {
                 ColumnInfo col = e.getValue();
-                MutableVertex colV = saveColumn(sessionId, e.getKey(), col);
+                MutableVertex colV = embeddedDb.newVertex("DaliColumn")
+                        .set("session_id", sessionId)
+                        .set("column_geoid", e.getKey())
+                        .set("table_geoid", col.getTableGeoid())
+                        .set("column_name", col.getColumnName())
+                        .set("expression", col.getExpression())
+                        .set("alias", col.getAlias())
+                        .set("is_output", col.isOutput())
+                        .set("col_order", col.getOrder())
+                        .save();
                 MutableVertex tableV = tableVtx.get(col.getTableGeoid());
-                if (tableV != null) {
-                    tableV.newEdge("HAS_COLUMN", colV, true);
-                }
+                if (tableV != null) tableV.newEdge("HAS_COLUMN", colV, true);
             }
 
-            // 4. Routines → DaliRoutine vertex
+            // Routines
             Map<String, MutableVertex> routineVtx = new LinkedHashMap<>();
             for (var e : structure.getRoutines().entrySet()) {
-                MutableVertex v = saveRoutine(sessionId, e.getKey(), e.getValue());
+                MutableVertex v = embeddedDb.newVertex("DaliRoutine")
+                        .set("session_id", sessionId)
+                        .set("routine_geoid", e.getKey())
+                        .set("routine_name", e.getValue().getName())
+                        .set("routine_type", e.getValue().getRoutineType())
+                        .set("package_geoid", e.getValue().getPackageGeoid())
+                        .set("schema_geoid", e.getValue().getSchemaGeoid())
+                        .save();
                 routineVtx.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
             }
 
-            // 5. Statements → DaliStatement vertex
+            // Statements
             Map<String, MutableVertex> stmtVtx = new LinkedHashMap<>();
             for (var e : structure.getStatements().entrySet()) {
-                MutableVertex v = saveStatement(sessionId, e.getKey(), e.getValue());
+                StatementInfo stmt = e.getValue();
+                String snippet = stmt.getSnippet();
+                if (snippet != null && snippet.length() > 500)
+                    snippet = snippet.substring(0, 500) + "...";
+
+                MutableVertex v = embeddedDb.newVertex("DaliStatement")
+                        .set("session_id", sessionId)
+                        .set("stmt_geoid", e.getKey())
+                        .set("type", stmt.getType())
+                        .set("snippet", snippet)
+                        .set("line_start", stmt.getLineStart())
+                        .set("line_end", stmt.getLineEnd())
+                        .set("parent_statement", stmt.getParentStatementGeoid())
+                        .set("routine_geoid", stmt.getRoutineGeoid())
+                        .save();
                 stmtVtx.put(e.getKey(), v);
             }
 
-            // 6. Statement → parent CHILD_OF edges
-            //    Routine → Statement CONTAINS_STMT edges
+            // Statement edges: CHILD_OF, CONTAINS_STMT
             for (var e : structure.getStatements().entrySet()) {
                 StatementInfo stmt = e.getValue();
                 MutableVertex stmtV = stmtVtx.get(e.getKey());
                 if (stmtV == null) continue;
-
-                // parent-child
                 if (stmt.getParentStatementGeoid() != null) {
                     MutableVertex parentV = stmtVtx.get(stmt.getParentStatementGeoid());
-                    if (parentV != null) {
-                        stmtV.newEdge("CHILD_OF", parentV, true);
-                    }
+                    if (parentV != null) stmtV.newEdge("CHILD_OF", parentV, true);
                 }
-
-                // routine contains statement
                 if (stmt.getRoutineGeoid() != null) {
                     MutableVertex routineV = routineVtx.get(stmt.getRoutineGeoid());
-                    if (routineV != null) {
-                        routineV.newEdge("CONTAINS_STMT", stmtV, true);
-                    }
+                    if (routineV != null) routineV.newEdge("CONTAINS_STMT", stmtV, true);
                 }
             }
 
-            // 7. Lineage edges: READS_FROM, WRITES_TO
+            // Lineage edges
             for (LineageEdge edge : result.getLineage()) {
                 MutableVertex fromV = resolve(edge.sourceGeoid(), stmtVtx, tableVtx, routineVtx);
                 MutableVertex toV = resolve(edge.targetGeoid(), stmtVtx, tableVtx, routineVtx);
@@ -129,157 +218,226 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("session_id", sessionId)
                             .set("statement_geoid", edge.statementGeoid())
                             .save();
-                } else {
-                    logger.debug("Lineage edge skipped: {} → {} (vertex not found)",
-                            edge.sourceGeoid(), edge.targetGeoid());
                 }
             }
 
-            // 8. Atoms → DaliAtom documents
-            saveAllAtoms(sessionId, result.getAtoms());
+            // Atoms
+            saveAtomsEmbedded(sessionId, result.getAtoms());
 
-            // 9. Joins → DaliJoin documents
+            // Joins
             for (var e : structure.getStatements().entrySet()) {
                 for (JoinInfo join : e.getValue().getJoins()) {
-                    saveJoin(sessionId, e.getKey(), join);
+                    embeddedDb.newDocument("DaliJoin")
+                            .set("session_id", sessionId)
+                            .set("stmt_geoid", e.getKey())
+                            .set("join_type", join.joinType())
+                            .set("target_table", join.targetTableGeoid())
+                            .set("source_table", join.sourceTableGeoid())
+                            .set("conditions", join.conditions())
+                            .save();
                 }
             }
         });
-
-        long elapsed = System.currentTimeMillis() - start;
-        logger.info("Saved to ArcadeDB: session={}, tables={}, columns={}, routines={}, " +
-                        "statements={}, lineage={}, atoms={} ({}ms)",
-                sessionId,
-                safe(result.getStructure(), s -> s.getTables().size()),
-                safe(result.getStructure(), s -> s.getColumns().size()),
-                safe(result.getStructure(), s -> s.getRoutines().size()),
-                safe(result.getStructure(), s -> s.getStatements().size()),
-                result.getLineage().size(),
-                result.getAtoms().size(),
-                elapsed);
-
-        return sessionId;
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Private: save individual entities
-    // ═══════════════════════════════════════════════════════════════
-
-    private MutableVertex saveSession(String sessionId, SemanticResult result) {
-        return db.newVertex("DaliSession")
-                .set("session_id", sessionId)
-                .set("file_path", result.getFilePath())
-                .set("dialect", result.getDialect())
-                .set("processing_time_ms", result.getProcessingTimeMs())
-                .set("created_at", System.currentTimeMillis())
-                .save();
-    }
-
-    private MutableVertex saveTable(String sessionId, String geoid, TableInfo table) {
-        return db.newVertex("DaliTable")
-                .set("session_id", sessionId)
-                .set("table_geoid", geoid)
-                .set("table_name", table.tableName())
-                .set("schema_geoid", table.schemaGeoid())
-                .set("table_type", table.tableType())
-                .set("aliases", listFrom(table.aliases()))
-                .set("column_count", table.columnCount())
-                .save();
-    }
-
-    private MutableVertex saveColumn(String sessionId, String geoid, ColumnInfo col) {
-        return db.newVertex("DaliColumn")
-                .set("session_id", sessionId)
-                .set("column_geoid", geoid)
-                .set("table_geoid", col.getTableGeoid())
-                .set("column_name", col.getColumnName())
-                .set("expression", col.getExpression())
-                .set("alias", col.getAlias())
-                .set("is_output", col.isOutput())
-                .set("col_order", col.getOrder())
-                .save();
-    }
-
-    private MutableVertex saveRoutine(String sessionId, String geoid, RoutineInfo routine) {
-        return db.newVertex("DaliRoutine")
-                .set("session_id", sessionId)
-                .set("routine_geoid", geoid)
-                .set("routine_name", routine.getName())
-                .set("routine_type", routine.getRoutineType())
-                .set("package_geoid", routine.getPackageGeoid())
-                .set("schema_geoid", routine.getSchemaGeoid())
-                .save();
-    }
-
-    private MutableVertex saveStatement(String sessionId, String geoid, StatementInfo stmt) {
-        String snippet = stmt.getSnippet();
-        if (snippet != null && snippet.length() > 500) {
-            snippet = snippet.substring(0, 500) + "...";
-        }
-        return db.newVertex("DaliStatement")
-                .set("session_id", sessionId)
-                .set("stmt_geoid", geoid)
-                .set("type", stmt.getType())
-                .set("snippet", snippet)
-                .set("line_start", stmt.getLineStart())
-                .set("line_end", stmt.getLineEnd())
-                .set("parent_statement", stmt.getParentStatementGeoid())
-                .set("routine_geoid", stmt.getRoutineGeoid())
-                .set("source_tables", listFrom(stmt.getSourceTables().keySet()))
-                .set("target_tables", listFrom(stmt.getTargetTables().keySet()))
-                .set("child_statements", new ArrayList<>(stmt.getChildStatements()))
-                .save();
     }
 
     @SuppressWarnings("unchecked")
-    private void saveAllAtoms(String sessionId, Map<String, Object> allAtoms) {
+    private void saveAtomsEmbedded(String sessionId, Map<String, Object> allAtoms) {
         for (var groupEntry : allAtoms.entrySet()) {
-            String groupKey = groupEntry.getKey();
             if (!(groupEntry.getValue() instanceof Map)) continue;
-
             Map<String, Object> group = (Map<String, Object>) groupEntry.getValue();
             Object atomsObj = group.get("atoms");
             if (!(atomsObj instanceof Map)) continue;
-
             Map<String, Map<String, Object>> atoms = (Map<String, Map<String, Object>>) atomsObj;
-            for (var atomEntry : atoms.entrySet()) {
-                Map<String, Object> atom = atomEntry.getValue();
-                db.newDocument("DaliAtom")
+            for (var atom : atoms.values()) {
+                embeddedDb.newDocument("DaliAtom")
                         .set("session_id", sessionId)
-                        .set("group_key", groupKey)
                         .set("source_geoid", group.get("source_geoid"))
                         .set("atom_text", atom.get("atom_text"))
                         .set("position", atom.get("position"))
-                        .set("atom_context", atom.get("atom_context"))
                         .set("parent_context", atom.get("parent_context"))
-                        .set("table_geoid", atom.get("table_geoid"))
-                        .set("column_name", atom.get("column_name"))
-                        .set("is_column_reference", atom.get("is_column_reference"))
                         .set("status", atom.get("status"))
                         .save();
             }
         }
     }
 
-    private void saveJoin(String sessionId, String stmtGeoid, JoinInfo join) {
-        db.newDocument("DaliJoin")
-                .set("session_id", sessionId)
-                .set("stmt_geoid", stmtGeoid)
-                .set("join_type", join.joinType())
-                .set("target_table_geoid", join.targetTableGeoid())
-                .set("target_alias", join.targetTableAlias())
-                .set("source_table_geoid", join.sourceTableGeoid())
-                .set("source_alias", join.sourceTableAlias())
-                .set("conditions", join.conditions())
-                .set("line_start", join.lineStart())
-                .save();
+    // ═══════════════════════════════════════════════════════════════
+    // REMOTE mode (HTTP API к ArcadeDB Server/Docker)
+    // ═══════════════════════════════════════════════════════════════
+
+    private void saveResultRemote(String sessionId, SemanticResult result) {
+        // Session
+        command("INSERT INTO DaliSession SET session_id = ?, file_path = ?, dialect = ?, " +
+                        "processing_time_ms = ?, created_at = ?",
+                sessionId, result.getFilePath(), result.getDialect(),
+                result.getProcessingTimeMs(), System.currentTimeMillis());
+
+        Structure structure = result.getStructure();
+        if (structure == null) return;
+
+        // Tables
+        for (var e : structure.getTables().entrySet()) {
+            TableInfo t = e.getValue();
+            command("INSERT INTO DaliTable SET session_id = ?, table_geoid = ?, " +
+                            "table_name = ?, schema_geoid = ?, table_type = ?, column_count = ?",
+                    sessionId, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(), t.columnCount());
+        }
+
+        // Columns
+        for (var e : structure.getColumns().entrySet()) {
+            ColumnInfo c = e.getValue();
+            command("INSERT INTO DaliColumn SET session_id = ?, column_geoid = ?, " +
+                            "table_geoid = ?, column_name = ?, expression = ?, alias = ?",
+                    sessionId, e.getKey(), c.getTableGeoid(), c.getColumnName(),
+                    c.getExpression(), c.getAlias());
+        }
+
+        // Routines
+        for (var e : structure.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            command("INSERT INTO DaliRoutine SET session_id = ?, routine_geoid = ?, " +
+                            "routine_name = ?, routine_type = ?, package_geoid = ?, schema_geoid = ?",
+                    sessionId, e.getKey(), r.getName(), r.getRoutineType(),
+                    r.getPackageGeoid(), r.getSchemaGeoid());
+        }
+
+        // Statements
+        for (var e : structure.getStatements().entrySet()) {
+            StatementInfo s = e.getValue();
+            String snippet = s.getSnippet();
+            if (snippet != null && snippet.length() > 500) snippet = snippet.substring(0, 500);
+            command("INSERT INTO DaliStatement SET session_id = ?, stmt_geoid = ?, " +
+                            "type = ?, snippet = ?, line_start = ?, line_end = ?, " +
+                            "parent_statement = ?, routine_geoid = ?",
+                    sessionId, e.getKey(), s.getType(), snippet, s.getLineStart(),
+                    s.getLineEnd(), s.getParentStatementGeoid(), s.getRoutineGeoid());
+        }
+// HAS_COLUMN edges: Table → Column
+        for (var e : structure.getColumns().entrySet()) {
+            ColumnInfo c = e.getValue();
+            if (c.getTableGeoid() != null) {
+                safeCommand(String.format(
+                        "CREATE EDGE HAS_COLUMN FROM (SELECT FROM DaliTable WHERE table_geoid = '%s' AND session_id = '%s') " +
+                                "TO (SELECT FROM DaliColumn WHERE column_geoid = '%s' AND session_id = '%s')",
+                        esc(c.getTableGeoid()), sessionId, esc(e.getKey()), sessionId));
+            }
+        }
+
+// CHILD_OF edges: Statement → Parent Statement
+        for (var e : structure.getStatements().entrySet()) {
+            StatementInfo s = e.getValue();
+            if (s.getParentStatementGeoid() != null) {
+                safeCommand(String.format(
+                        "CREATE EDGE CHILD_OF FROM (SELECT FROM DaliStatement WHERE stmt_geoid = '%s' AND session_id = '%s') " +
+                                "TO (SELECT FROM DaliStatement WHERE stmt_geoid = '%s' AND session_id = '%s')",
+                        esc(e.getKey()), sessionId, esc(s.getParentStatementGeoid()), sessionId));
+            }
+        }
+
+// CONTAINS_STMT edges: Routine → Statement
+        for (var e : structure.getStatements().entrySet()) {
+            StatementInfo s = e.getValue();
+            if (s.getRoutineGeoid() != null) {
+                safeCommand(String.format(
+                        "CREATE EDGE CONTAINS_STMT FROM (SELECT FROM DaliRoutine WHERE routine_geoid = '%s' AND session_id = '%s') " +
+                                "TO (SELECT FROM DaliStatement WHERE stmt_geoid = '%s' AND session_id = '%s')",
+                        esc(s.getRoutineGeoid()), sessionId, esc(e.getKey()), sessionId));
+            }
+        }
+
+// BELONGS_TO_SESSION edges: Session → Tables, Session → Routines
+        for (String tGeoid : structure.getTables().keySet()) {
+            safeCommand(String.format(
+                    "CREATE EDGE BELONGS_TO_SESSION FROM (SELECT FROM DaliSession WHERE session_id = '%s') " +
+                            "TO (SELECT FROM DaliTable WHERE table_geoid = '%s' AND session_id = '%s')",
+                    sessionId, esc(tGeoid), sessionId));
+        }
+        for (String rGeoid : structure.getRoutines().keySet()) {
+            safeCommand(String.format(
+                    "CREATE EDGE BELONGS_TO_SESSION FROM (SELECT FROM DaliSession WHERE session_id = '%s') " +
+                            "TO (SELECT FROM DaliRoutine WHERE routine_geoid = '%s' AND session_id = '%s')",
+                    sessionId, esc(rGeoid), sessionId));
+        }
+        // Lineage edges via SQL
+        for (LineageEdge edge : result.getLineage()) {
+            String edgeType = edge.relationType();
+            // CREATE EDGE FROM (SELECT FROM DaliX WHERE geoid=?) TO (SELECT FROM DaliY WHERE geoid=?)
+            String fromType = guessType(edge.sourceGeoid(), structure);
+            String toType = guessType(edge.targetGeoid(), structure);
+            String fromField = geoidField(fromType);
+            String toField = geoidField(toType);
+            safeCommand(String.format(
+                    "CREATE EDGE %s FROM (SELECT FROM %s WHERE %s = '%s' AND session_id = '%s') " +
+                            "TO (SELECT FROM %s WHERE %s = '%s' AND session_id = '%s') " +
+                            "SET session_id = '%s'",
+                    edgeType, fromType, fromField, esc(edge.sourceGeoid()), sessionId,
+                    toType, toField, esc(edge.targetGeoid()), sessionId, sessionId));
+        }
+
+        // Atoms
+        saveAtomsRemote(sessionId, result.getAtoms());
+    }
+
+    @SuppressWarnings("unchecked")
+    private void saveAtomsRemote(String sessionId, Map<String, Object> allAtoms) {
+        for (var groupEntry : allAtoms.entrySet()) {
+            if (!(groupEntry.getValue() instanceof Map)) continue;
+            Map<String, Object> group = (Map<String, Object>) groupEntry.getValue();
+            Object atomsObj = group.get("atoms");
+            if (!(atomsObj instanceof Map)) continue;
+            Map<String, Map<String, Object>> atoms = (Map<String, Map<String, Object>>) atomsObj;
+            for (var atom : atoms.values()) {
+                command("INSERT INTO DaliAtom SET session_id = ?, source_geoid = ?, " +
+                                "atom_text = ?, position = ?, status = ?",
+                        sessionId, group.get("source_geoid"),
+                        atom.get("atom_text"), atom.get("position"), atom.get("status"));
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
     // Helpers
     // ═══════════════════════════════════════════════════════════════
 
-    /** Resolve geoid to vertex — ищет в statements, потом tables, потом routines */
+    private void command(String sql, Object... params) {
+        try {
+            remoteDb.command("sql", sql, params);
+        } catch (Exception e) {
+            logger.error("ArcadeDB command failed: {} — {}", sql, e.getMessage());
+        }
+    }
+
+    private void safeCommand(String sql) {
+        try {
+            if (mode == Mode.REMOTE) {
+                remoteDb.command("sql", sql);
+            } else {
+                embeddedDb.command("sql", sql);
+            }
+        } catch (Exception e) {
+            logger.debug("ArcadeDB command skipped: {} — {}", sql, e.getMessage());
+        }
+    }
+
+    private String guessType(String geoid, Structure structure) {
+        if (structure.getStatements().containsKey(geoid)) return "DaliStatement";
+        if (structure.getTables().containsKey(geoid)) return "DaliTable";
+        if (structure.getRoutines().containsKey(geoid)) return "DaliRoutine";
+        return "DaliStatement"; // fallback
+    }
+
+    private String geoidField(String type) {
+        return switch (type) {
+            case "DaliTable" -> "table_geoid";
+            case "DaliRoutine" -> "routine_geoid";
+            default -> "stmt_geoid";
+        };
+    }
+
+    private static String esc(String s) {
+        return s != null ? s.replace("'", "''") : "";
+    }
+
     @SafeVarargs
     private MutableVertex resolve(String geoid, Map<String, MutableVertex>... maps) {
         if (geoid == null) return null;
@@ -298,20 +456,12 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         return obj != null ? fn.applyAsInt(obj) : 0;
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Querying (для будущего использования)
-    // ═══════════════════════════════════════════════════════════════
-
-    /** Возвращает открытую БД для произвольных запросов */
-    public Database getDatabase() {
-        return db;
-    }
-
     @Override
     public void close() {
-        if (db != null && db.isOpen()) {
-            db.close();
-            logger.info("ArcadeDB closed");
+        if (embeddedDb != null && embeddedDb.isOpen()) {
+            embeddedDb.close();
+            logger.info("ArcadeDB EMBEDDED closed");
         }
+        // RemoteDatabase не требует close()
     }
 }
