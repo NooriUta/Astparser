@@ -53,6 +53,16 @@ public class UniversalSemanticEngine {
 
         ScopeContext ctx = ScopeContext.forStatement(type, snippet, lineStart, lineEnd,
                 parentStmt, routineGeoid, alias);
+
+        // Register alias on PARENT scope so atoms in the parent statement can resolve it
+        // (e.g., MERGE USING subquery aliases SOURCE/TARGET)
+        if (alias != null && !alias.isBlank()) {
+            ScopeContext parentScope = scopeManager.peek();
+            if (parentScope != null) {
+                parentScope.registerAlias(alias.toUpperCase(), ctx.getStatementGeoid());
+            }
+        }
+
         scopeManager.push(ctx);
 
         builder.addStatement(ctx.getStatementGeoid(), type, snippet, lineStart, lineEnd,
@@ -129,6 +139,18 @@ public class UniversalSemanticEngine {
     /** Backward-compatible version without role */
     public void onTableReference(String tableName, int line, int endLine) {
         onTableReference(tableName, null, "SOURCE", line, endLine);
+    }
+
+    /**
+     * MERGE INTO (SELECT * FROM target_table) msubquery —
+     * регистрирует алиас подзапроса (msubquery) → geoid целевой таблицы
+     * на РОДИТЕЛЬСКОМ scope (MERGE), чтобы msubquery.column резолвился в target_table.column.
+     */
+    public void registerMergeIntoSubqueryAlias(String subqueryAlias, String tableName) {
+        String schemaGeoid = scopeManager.currentSchema();
+        String tableGeoid = builder.ensureTable(tableName, schemaGeoid);
+        scopeManager.registerAliasOnParent(subqueryAlias.toUpperCase(), tableGeoid);
+        logger.debug("MERGE INTO subquery alias: {} → {} (table {})", subqueryAlias, tableGeoid, tableName);
     }
 
     // ═══════════════════════════════════════════════════════════════

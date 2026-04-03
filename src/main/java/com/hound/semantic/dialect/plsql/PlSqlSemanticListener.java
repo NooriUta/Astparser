@@ -183,14 +183,60 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void enterMerge_statement(PlSqlParser.Merge_statementContext ctx) {
-        base.onDmlTargetEnter();
         base.onStatementEnter("MERGE", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        base.onDmlTargetEnter();
+
+        // Case A: MERGE INTO table_name alias (прямая таблица)
+        if (ctx.tableview_name() != null) {
+            String targetTable = BaseSemanticListener.cleanIdentifier(ctx.tableview_name().getText());
+            String targetAlias = extractAlias(ctx.table_alias());
+            if (targetTable != null) {
+                base.onTableReference(targetTable, targetAlias, getStartLine(ctx), getEndLine(ctx));
+            }
+            // Прямая таблица — сразу сбрасываем target-флаг
+            base.onDmlTargetExit();
+        }
+        // Case B: MERGE INTO (SELECT ... FROM target_table) msubquery (updatable subquery)
+        // НЕ сбрасываем in_dml_target — он пропагируется в подзапрос,
+        // target_table внутри зарегистрируется как TARGET при walk.
+        // Сброс произойдёт в enterSelected_tableview (граница INTO → USING).
+        else {
+            String subqAlias = extractAlias(ctx.table_alias());
+            if (subqAlias != null) {
+                base.setMergeIntoSubqueryAlias(subqAlias);
+            }
+        }
+    }
+
+    /**
+     * Граница MERGE INTO → USING.
+     * Сбрасываем in_dml_target: всё что после USING — это SOURCE.
+     * Также регистрируем USING source таблицу/подзапрос.
+     */
+    @Override
+    public void enterSelected_tableview(PlSqlParser.Selected_tableviewContext ctx) {
+        // Сброс target-флага для Case B (updatable subquery в MERGE INTO)
+        if (base.isInDmlTarget()) {
+            base.onDmlTargetExit();
+        }
+        // Регистрируем USING source
+        String sourceAlias = extractAlias(ctx.table_alias());
+        if (ctx.tableview_name() != null) {
+            String sourceName = BaseSemanticListener.cleanIdentifier(ctx.tableview_name().getText());
+            if (sourceName != null) {
+                base.onTableReference(sourceName, sourceAlias, getStartLine(ctx), getEndLine(ctx));
+            }
+        }
+        if (sourceAlias != null) {
+            base.setSubqueryAlias(sourceAlias);
+            base.subqueryAliasStack().add(sourceAlias);
+        }
     }
 
     @Override
     public void exitMerge_statement(PlSqlParser.Merge_statementContext ctx) {
+        base.clearMergeIntoSubqueryAlias();
         base.onStatementExit();
-        base.onDmlTargetExit();
     }
 
     // =========================================================================
@@ -781,28 +827,36 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
                     }
                 } catch (Exception ignored) {}
 
-                // 2: getText() internal целиком
+                // 2: getText() internal целиком (но НЕ подзапросы)
                 try {
                     Method gtM = internal.getClass().getMethod("getText");
                     String text = (String) gtM.invoke(internal);
-                    if (text != null && !text.isBlank()) {
+                    if (text != null && !text.isBlank() && !looksLikeSubquery(text)) {
                         return BaseSemanticListener.cleanIdentifier(text);
                     }
                 } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
 
-        // Стратегия 3: getText() ctx минус алиас в конце
+        // Стратегия 3: getText() ctx минус алиас в конце (но НЕ подзапросы)
         try {
             String full = ctx.getText();
             if (full == null || full.isBlank()) return null;
             if (tableAlias != null && full.toUpperCase().endsWith(tableAlias)) {
                 full = full.substring(0, full.length() - tableAlias.length());
             }
+            if (looksLikeSubquery(full)) return null;
             return BaseSemanticListener.cleanIdentifier(full);
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** Проверяет, является ли текст подзапросом, а не именем таблицы */
+    private static boolean looksLikeSubquery(String text) {
+        if (text == null) return false;
+        String upper = text.trim().toUpperCase();
+        return upper.startsWith("(SELECT") || upper.startsWith("SELECT") || text.length() > 200;
     }
 
 

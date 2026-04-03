@@ -95,6 +95,19 @@ public class ScopeManager {
         return ctx != null ? ctx.resolveAlias(alias) : null;
     }
 
+    /**
+     * Регистрация алиаса на РОДИТЕЛЬСКОМ scope (второй элемент стека).
+     * Используется для MERGE INTO (subquery) alias — алиас подзапроса
+     * регистрируется на scope MERGE, а не на scope самого подзапроса.
+     */
+    public void registerAliasOnParent(String alias, String geoid) {
+        if (scopeStack.size() < 2) return;
+        var it = scopeStack.iterator();
+        it.next(); // skip current (top)
+        ScopeContext parent = it.next();
+        parent.registerAlias(alias, geoid);
+    }
+
     public int depth() {
         return scopeStack.size();
     }

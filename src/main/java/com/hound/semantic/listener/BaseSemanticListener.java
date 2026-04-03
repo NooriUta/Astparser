@@ -129,6 +129,9 @@ public abstract class BaseSemanticListener {
     // Методы-сеттеры для PlSqlSemanticListener (вместо прямого current.put)
     public void setCurrentTable(String tableName)          { current.put("table", tableName); }
     public void setSubqueryAlias(String alias)             { current.put("subquery_alias", alias); }
+    public void setMergeIntoSubqueryAlias(String alias)    { current.put("merge_into_subquery_alias", alias); }
+    public String getMergeIntoSubqueryAlias()              { return (String) current.get("merge_into_subquery_alias"); }
+    public void clearMergeIntoSubqueryAlias()              { current.remove("merge_into_subquery_alias"); }
     public void setGeneralTable(Object val)                { current.put("general_table", val); }
     public void setIsFirstSubq(Integer line)               { current.put("is_first_subq", line); }
     public void setIsFirstSubqp(Integer col)               { current.put("is_first_subqp", col); }
@@ -560,6 +563,15 @@ public abstract class BaseSemanticListener {
         String role = isInDmlTarget() ? "TARGET" : "SOURCE";
         processTableReference(tableName, tableAlias);
         engine.onTableReference(tableName, tableAlias, role, line, endLine);
+
+        // MERGE INTO (subquery) alias — propagate subquery alias → target table geoid on parent scope
+        if ("TARGET".equals(role)) {
+            String mergeSubqAlias = getMergeIntoSubqueryAlias();
+            if (mergeSubqAlias != null) {
+                engine.registerMergeIntoSubqueryAlias(mergeSubqAlias, tableName);
+                clearMergeIntoSubqueryAlias();
+            }
+        }
     }
 
     public void onColumnRef(String columnName, int line, int endLine) {
