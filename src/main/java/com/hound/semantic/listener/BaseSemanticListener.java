@@ -719,10 +719,12 @@ public abstract class BaseSemanticListener {
                                     String expressionText, boolean isTableStar) {
         String stmt = currentStatement();
         if (stmt == null) return;
+        String engineStmt = engine.getScopeManager().currentStatement();
+        if (engineStmt == null) return;
 
         String alias = (String) current.get("column_alias");
 
-        var stmtInfo = engine.getBuilder().getStatements().get(stmt);
+        var stmtInfo = engine.getBuilder().getStatements().get(engineStmt);
         if (stmtInfo == null) return;
 
         String colName = alias != null ? alias : expressionText;
@@ -738,7 +740,7 @@ public abstract class BaseSemanticListener {
 
         // Position-based atom binding
         engine.getAtomProcessor().bindAtomsToOutputColumn(
-                stmt, startLine, startCol, endLine, endCol, order);
+                engineStmt, startLine, startCol, endLine, endCol, order);
 
         current.put("column_alias", null);
         current.put("column_output", columnInfo);

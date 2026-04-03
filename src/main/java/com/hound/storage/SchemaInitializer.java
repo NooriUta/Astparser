@@ -15,9 +15,9 @@ import org.slf4j.LoggerFactory;
  *   DaliStatement, DaliAtom, DaliOutputColumn, DaliJoin,
  *   DaliParameter, DaliVariable
  *
- * 1 Document type (вспомогательный контент, не участвует в граф-навигации):
- *   DaliSnippet — SQL-текст statement, хранится отдельно от DaliStatement
- *   чтобы избежать проблем с экранированием при remote INSERT
+ * 2 Document types (аналитика + вспомогательный контент):
+ *   DaliSnippet  — SQL-текст statement, хранится отдельно от DaliStatement
+ *   DaliPerfStats — per-session timing/count snapshot для построения графиков
  *
  * 23 Edge types (structural + usage + atom resolution + flow)
  *   Note: CONTAINS_PACKAGE removed in v6 — packages use CONTAINS_ROUTINE (IS-A)
@@ -77,6 +77,9 @@ public final class SchemaInitializer {
                 "DATA_FLOW", "FILTER_FLOW", "JOIN_FLOW", "UNION_FLOW",
                 "NESTED_IN"
         }) { c += edg(schema, e); }
+
+        // DaliPerfStats — per-session pipeline timing & structural counts (analytics/graphing)
+        if (!schema.existsType("DaliPerfStats")) schema.createDocumentType("DaliPerfStats");
 
         // DaliJoin: conditions_b64 property (legacy, kept for backward compat with older DBs)
         if (schema.existsType("DaliJoin")
@@ -143,6 +146,7 @@ public final class SchemaInitializer {
                 "CREATE EDGE TYPE NESTED_IN IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliSnippet IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliMeta IF NOT EXISTS",
+                "CREATE DOCUMENT TYPE DaliPerfStats IF NOT EXISTS",
         };
     }
 

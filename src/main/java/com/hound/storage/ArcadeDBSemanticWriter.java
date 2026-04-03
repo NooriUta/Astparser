@@ -72,18 +72,101 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             for (var e : s.getStatements().entrySet()) oc += e.getValue().getColumnsOutput().size();
         }
 
+        int cntTables     = s != null ? s.getTables().size()     : 0;
+        int cntColumns    = s != null ? s.getColumns().size()    : 0;
+        int cntStatements = s != null ? s.getStatements().size() : 0;
+        int cntRoutines   = s != null ? s.getRoutines().size()   : 0;
+        int cntAtoms      = result.getAtoms().size();
+        int cntJoins      = s != null ? s.getStatements().values().stream()
+                .mapToInt(st -> st.getJoins().size()).sum() : 0;
+        int cntLineage    = result.getLineage().size();
+
         logger.info("ArcadeDB ({}): T:{} C:{} S:{} R:{} A:{} J:{} OC:{} L:{} [{}]",
-                mode,
-                s != null ? s.getTables().size() : 0,
-                s != null ? s.getColumns().size() : 0,
-                s != null ? s.getStatements().size() : 0,
-                s != null ? s.getRoutines().size() : 0,
-                result.getAtoms().size(),
-                s != null ? s.getStatements().values().stream().mapToInt(st -> st.getJoins().size()).sum() : 0,
-                oc,
-                result.getLineage().size(),
-                formatTime(ms));
+                mode, cntTables, cntColumns, cntStatements, cntRoutines,
+                cntAtoms, cntJoins, oc, cntLineage, formatTime(ms));
+
+        writePerfStats(sid, result, timer,
+                cntTables, cntColumns, cntStatements, cntRoutines,
+                cntAtoms, cntJoins, oc, cntLineage);
         return sid;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DaliPerfStats — per-session pipeline timing & structural counts
+    // ═══════════════════════════════════════════════════════════════
+
+    private void writePerfStats(String sid, SemanticResult result, PipelineTimer timer,
+                                int cntTables, int cntColumns, int cntStatements, int cntRoutines,
+                                int cntAtoms, int cntJoins, int cntOutputCols, int cntLineage) {
+        // Atom resolution breakdown — iterate raw atoms map
+        int atomResolved = 0, atomConst = 0, atomFunc = 0, atomFailed = 0;
+        for (var container : result.getAtoms().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cont = (Map<String, Object>) container.getValue();
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, Object>> atoms =
+                    (Map<String, Map<String, Object>>) cont.get("atoms");
+            if (atoms == null) continue;
+            for (var at : atoms.entrySet()) {
+                String status = (String) at.getValue().get("status");
+                if ("Обработано".equals(status))      atomResolved++;
+                else if ("constant".equals(status))   atomConst++;
+                else if ("function_call".equals(status)) atomFunc++;
+                else                                  atomFailed++;
+            }
+        }
+
+        try {
+            if (mode == Mode.EMBEDDED) {
+                embeddedDb.transaction(() ->
+                    embeddedDb.newDocument("DaliPerfStats")
+                        .set("session_id",       sid)
+                        .set("file_path",        result.getFilePath())
+                        .set("dialect",          result.getDialect())
+                        .set("created_at",       System.currentTimeMillis())
+                        // ── timing (ms) ──
+                        .set("ms_parse",         timer.ms("parse"))
+                        .set("ms_walk",          timer.ms("walk"))
+                        .set("ms_resolve",       timer.ms("resolve"))
+                        .set("ms_write_vtx",     timer.ms("write.vtx"))
+                        .set("ms_write_edge",    timer.ms("write.edge"))
+                        .set("ms_total",         timer.totalMs())
+                        // ── token/line counts ──
+                        .set("count_tokens",     timer.count("tokens"))
+                        // ── structural counts ──
+                        .set("cnt_tables",       cntTables)
+                        .set("cnt_columns",      cntColumns)
+                        .set("cnt_statements",   cntStatements)
+                        .set("cnt_routines",     cntRoutines)
+                        .set("cnt_atoms",        cntAtoms)
+                        .set("cnt_atoms_resolved", atomResolved)
+                        .set("cnt_atoms_const",  atomConst)
+                        .set("cnt_atoms_func",   atomFunc)
+                        .set("cnt_atoms_failed", atomFailed)
+                        .set("cnt_output_cols",  cntOutputCols)
+                        .set("cnt_joins",        cntJoins)
+                        .set("cnt_lineage",      cntLineage)
+                        .save()
+                );
+            } else {
+                rcmd("INSERT INTO DaliPerfStats SET " +
+                     "session_id=?, file_path=?, dialect=?, created_at=?, " +
+                     "ms_parse=?, ms_walk=?, ms_resolve=?, ms_write_vtx=?, ms_write_edge=?, ms_total=?, " +
+                     "count_tokens=?, " +
+                     "cnt_tables=?, cnt_columns=?, cnt_statements=?, cnt_routines=?, " +
+                     "cnt_atoms=?, cnt_atoms_resolved=?, cnt_atoms_const=?, cnt_atoms_func=?, cnt_atoms_failed=?, " +
+                     "cnt_output_cols=?, cnt_joins=?, cnt_lineage=?",
+                        sid, result.getFilePath(), result.getDialect(), System.currentTimeMillis(),
+                        timer.ms("parse"), timer.ms("walk"), timer.ms("resolve"),
+                        timer.ms("write.vtx"), timer.ms("write.edge"), timer.totalMs(),
+                        timer.count("tokens"),
+                        cntTables, cntColumns, cntStatements, cntRoutines,
+                        cntAtoms, atomResolved, atomConst, atomFunc, atomFailed,
+                        cntOutputCols, cntJoins, cntLineage);
+            }
+        } catch (Exception e) {
+            logger.warn("DaliPerfStats write failed for {}: {}", sid, e.getMessage());
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -221,6 +304,31 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         parent.newEdge("NESTED_IN", child, true)
                                 .set("session_id", sid).save();
                     }
+                }
+            }
+
+            for (var e : str.getRoutines().entrySet()) {
+                RoutineInfo r = e.getValue();
+                MutableVertex rv = rtV.get(e.getKey());
+                if (rv == null) continue;
+                for (RoutineInfo.ParameterInfo p : r.getTypedParameters()) {
+                    MutableVertex pV = embeddedDb.newVertex("DaliParameter")
+                            .set("session_id", sid)
+                            .set("routine_geoid", e.getKey())
+                            .set("param_name", p.name())
+                            .set("param_type", p.type())
+                            .set("param_mode", p.mode())
+                            .save();
+                    rv.newEdge("HAS_PARAMETER", pV, true);
+                }
+                for (RoutineInfo.VariableInfo v : r.getTypedVariables()) {
+                    MutableVertex vV = embeddedDb.newVertex("DaliVariable")
+                            .set("session_id", sid)
+                            .set("routine_geoid", e.getKey())
+                            .set("var_name", v.name())
+                            .set("var_type", v.type())
+                            .save();
+                    rv.newEdge("HAS_VARIABLE", vV, true);
                 }
             }
 
@@ -474,6 +582,18 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     sid, e.getKey(), r.getName(), r.getRoutineType(), r.getPackageGeoid(), r.getSchemaGeoid());
         }
 
+        for (var e : str.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            for (RoutineInfo.ParameterInfo p : r.getTypedParameters()) {
+                rcmd("INSERT INTO DaliParameter SET session_id=?, routine_geoid=?, param_name=?, param_type=?, param_mode=?",
+                        sid, e.getKey(), p.name(), p.type(), p.mode());
+            }
+            for (RoutineInfo.VariableInfo v : r.getTypedVariables()) {
+                rcmd("INSERT INTO DaliVariable SET session_id=?, routine_geoid=?, var_name=?, var_type=?",
+                        sid, e.getKey(), v.name(), v.type());
+            }
+        }
+
         for (var e : str.getStatements().entrySet()) {
             StatementInfo s = e.getValue();
             rcmd("INSERT INTO DaliStatement SET session_id=?, stmt_geoid=?, type=?, " +
@@ -638,6 +758,15 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         for (String rg : str.getRoutines().keySet()) {
             edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
                     "DaliRoutine", "routine_geoid", rg, sid);
+        }
+
+        for (var e : str.getRoutines().entrySet()) {
+            if (!e.getValue().getTypedParameters().isEmpty())
+                edgeRemote("HAS_PARAMETER", "DaliRoutine", "routine_geoid", e.getKey(),
+                        "DaliParameter", "routine_geoid", e.getKey(), sid);
+            if (!e.getValue().getTypedVariables().isEmpty())
+                edgeRemote("HAS_VARIABLE", "DaliRoutine", "routine_geoid", e.getKey(),
+                        "DaliVariable", "routine_geoid", e.getKey(), sid);
         }
 
         for (var e : str.getStatements().entrySet()) {

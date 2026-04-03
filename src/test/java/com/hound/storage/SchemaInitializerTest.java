@@ -1,0 +1,171 @@
+package com.hound.storage;
+
+import com.arcadedb.database.Database;
+import com.arcadedb.database.DatabaseFactory;
+import com.arcadedb.graph.MutableVertex;
+import com.arcadedb.query.sql.executor.ResultSet;
+import org.junit.jupiter.api.*;
+
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.Comparator;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Tests for SchemaInitializer — ADR-012 inheritance verification.
+ *
+ * Uses an embedded ArcadeDB in a temp directory (auto-cleaned).
+ */
+class SchemaInitializerTest {
+
+    private static final String TEST_DB = "target/test-db-schema";
+    private Database db;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        // Clean up any previous test DB
+        Path dbPath = Path.of(TEST_DB);
+        if (Files.exists(dbPath)) {
+            try (var walk = Files.walk(dbPath)) {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                });
+            }
+        }
+        DatabaseFactory factory = new DatabaseFactory(TEST_DB);
+        db = factory.create();
+    }
+
+    @AfterEach
+    void tearDown() throws IOException {
+        if (db != null && db.isOpen()) db.close();
+        Path dbPath = Path.of(TEST_DB);
+        if (Files.exists(dbPath)) {
+            try (var walk = Files.walk(dbPath)) {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                    try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                });
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("ADR-012: DaliPackage EXTENDS DaliRoutine in schema")
+    void daliPackageExtendsDaliRoutine() {
+        SchemaInitializer.ensureSchema(db);
+
+        // Verify both types exist
+        assertTrue(db.getSchema().existsType("DaliRoutine"), "DaliRoutine type must exist");
+        assertTrue(db.getSchema().existsType("DaliPackage"), "DaliPackage type must exist");
+
+        // Verify inheritance: DaliRoutine is a supertype of DaliPackage
+        var routineType = db.getSchema().getType("DaliRoutine");
+        assertTrue(routineType.isSuperTypeOf("DaliPackage"),
+                "DaliRoutine must be a supertype of DaliPackage (IS-A)");
+    }
+
+    @Test
+    @DisplayName("ADR-012: DaliPackage vertex is found by polymorphic SELECT FROM DaliRoutine")
+    void daliPackageFoundByPolymorphicQuery() {
+        SchemaInitializer.ensureSchema(db);
+
+        db.transaction(() -> {
+            // Insert a DaliPackage
+            db.newVertex("DaliPackage")
+                    .set("session_id", "test-session")
+                    .set("package_geoid", "MY_PACKAGE")
+                    .set("package_name", "MY_PACKAGE")
+                    .set("routine_geoid", "MY_PACKAGE")
+                    .set("routine_name", "MY_PACKAGE")
+                    .set("routine_type", "PACKAGE")
+                    .save();
+
+            // Insert a regular DaliRoutine
+            db.newVertex("DaliRoutine")
+                    .set("session_id", "test-session")
+                    .set("routine_geoid", "PROCEDURE:MY_PROC")
+                    .set("routine_name", "MY_PROC")
+                    .set("routine_type", "PROCEDURE")
+                    .save();
+        });
+
+        // Polymorphic query: SELECT FROM DaliRoutine should return BOTH
+        ResultSet rs = db.query("sql", "SELECT FROM DaliRoutine WHERE session_id = 'test-session'");
+        int count = 0;
+        boolean foundPackage = false;
+        boolean foundProcedure = false;
+        while (rs.hasNext()) {
+            var record = rs.next().toMap();
+            String rType = (String) record.get("routine_type");
+            if ("PACKAGE".equals(rType)) foundPackage = true;
+            if ("PROCEDURE".equals(rType)) foundProcedure = true;
+            count++;
+        }
+
+        assertEquals(2, count, "Polymorphic query on DaliRoutine should return both package and procedure");
+        assertTrue(foundPackage, "DaliPackage should be found via SELECT FROM DaliRoutine");
+        assertTrue(foundProcedure, "DaliRoutine (PROCEDURE) should be found via SELECT FROM DaliRoutine");
+    }
+
+    @Test
+    @DisplayName("ADR-012: CONTAINS_PACKAGE edge type is NOT created in v6 schema")
+    void containsPackageEdgeNotCreated() {
+        SchemaInitializer.ensureSchema(db);
+
+        // CONTAINS_PACKAGE should NOT exist in fresh v6 schema
+        assertFalse(db.getSchema().existsType("CONTAINS_PACKAGE"),
+                "CONTAINS_PACKAGE edge type should not be created in v6 schema");
+
+        // CONTAINS_ROUTINE should exist (used for both packages and routines)
+        assertTrue(db.getSchema().existsType("CONTAINS_ROUTINE"),
+                "CONTAINS_ROUTINE edge type must exist");
+    }
+
+    @Test
+    @DisplayName("ADR-012: CONTAINS_ROUTINE edge works for Schema→Package")
+    void containsRoutineEdgeWorksForPackages() {
+        SchemaInitializer.ensureSchema(db);
+
+        db.transaction(() -> {
+            MutableVertex schema = db.newVertex("DaliSchema")
+                    .set("session_id", "test-session")
+                    .set("schema_geoid", "MY_SCHEMA")
+                    .set("schema_name", "MY_SCHEMA")
+                    .save();
+
+            MutableVertex pkg = db.newVertex("DaliPackage")
+                    .set("session_id", "test-session")
+                    .set("package_geoid", "MY_SCHEMA.MY_PKG")
+                    .set("package_name", "MY_PKG")
+                    .set("routine_geoid", "MY_SCHEMA.MY_PKG")
+                    .set("routine_name", "MY_PKG")
+                    .set("routine_type", "PACKAGE")
+                    .save();
+
+            // Link using CONTAINS_ROUTINE (not CONTAINS_PACKAGE)
+            schema.newEdge("CONTAINS_ROUTINE", pkg, true)
+                    .set("session_id", "test-session")
+                    .save();
+        });
+
+        // Verify the edge exists and is traversable
+        ResultSet rs = db.query("sql",
+                "SELECT expand(out('CONTAINS_ROUTINE')) FROM DaliSchema WHERE schema_geoid = 'MY_SCHEMA'");
+        assertTrue(rs.hasNext(), "CONTAINS_ROUTINE edge from DaliSchema to DaliPackage should be traversable");
+        var target = rs.next().toMap();
+        assertEquals("MY_PKG", target.get("package_name"));
+        assertEquals("PACKAGE", target.get("routine_type"));
+    }
+
+    @Test
+    @DisplayName("Schema version is 6")
+    void schemaVersionIsSix() {
+        SchemaInitializer.ensureSchema(db);
+
+        ResultSet rs = db.query("sql", "SELECT schema_version FROM DaliMeta LIMIT 1");
+        assertTrue(rs.hasNext(), "DaliMeta should have a record");
+        int version = ((Number) rs.next().toMap().get("schema_version")).intValue();
+        assertEquals(6, version, "Schema version should be 6");
+    }
+}

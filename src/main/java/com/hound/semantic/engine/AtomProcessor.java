@@ -378,6 +378,24 @@ public class AtomProcessor {
                     result.put("reason", "table.column resolved via " + resolved.getType());
                     return result;
                 }
+                // Fallback: parent statement scope — covers SOURCE.*/TARGET.* in MERGE WHEN clauses
+                if (builder != null) {
+                    StatementInfo si = builder.getStatements().get(statementGeoid);
+                    if (si != null && si.getParentStatementGeoid() != null) {
+                        ResolvedRef parentResolved = nameResolver.resolve(
+                                tableAlias, "any", si.getParentStatementGeoid());
+                        if (parentResolved.isResolved()) {
+                            result.put("resolved", true);
+                            result.put("table_geoid", parentResolved.getGeoid());
+                            result.put("table_name", tableAlias);
+                            result.put("column_name", columnName);
+                            result.put("reference_type", parentResolved.getType().toLowerCase() + "s");
+                            result.put("is_column_reference", true);
+                            result.put("reason", "table.column resolved via parent scope: " + tableAlias);
+                            return result;
+                        }
+                    }
+                }
                 result.put("reason", "Таблица/подзапрос не найден для: " + tableAlias);
                 return result;
             }
