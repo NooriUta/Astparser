@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 3;
+    private static final int SCHEMA_VERSION = 4;
 
     private SchemaInitializer() {}
 
@@ -73,6 +73,12 @@ public final class SchemaInitializer {
                 "ATOM_REF_TABLE", "ATOM_REF_COLUMN", "ATOM_PRODUCES",
                 "DATA_FLOW", "FILTER_FLOW", "JOIN_FLOW", "UNION_FLOW"
         }) { c += edg(schema, e); }
+
+        // DaliJoin: conditions_b64 property (Base64-encoded conditions text)
+        if (schema.existsType("DaliJoin")
+                && !schema.getType("DaliJoin").existsProperty("conditions_b64")) {
+            schema.getType("DaliJoin").createProperty("conditions_b64", com.arcadedb.schema.Type.STRING);
+        }
 
         // DaliSnippet — Document type for SQL text (avoids quoting issues in remote INSERT)
         if (!schema.existsType("DaliSnippet")) schema.createDocumentType("DaliSnippet");

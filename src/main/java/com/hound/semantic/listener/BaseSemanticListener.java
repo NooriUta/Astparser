@@ -605,6 +605,13 @@ public abstract class BaseSemanticListener {
 
     // Subquery — alias = alias подзапроса (если есть):
     public void onSubqueryEnter(String subqueryText, int line, int endLine) {
+        // Сохраняем in_dml_target — обычный subquery всегда читает (SOURCE)
+        // Исключение: MERGE INTO (subquery) — там in_dml_target остаётся true
+        current.put("saved_dml_target_for_subquery", isInDmlTarget());
+        if (getMergeIntoSubqueryAlias() == null) {
+            current.put("in_dml_target", false);
+        }
+
         List<String> stack = subqueryAliasStack();
         String alias = !stack.isEmpty() ? stack.get(stack.size() - 1) : null;
         initStatement("SUBQUERY", subqueryText, line, endLine, null);
@@ -614,6 +621,13 @@ public abstract class BaseSemanticListener {
     public void onSubqueryExit() {
         exitStatement();
         engine.onSubqueryExit();
+
+        // Восстанавливаем in_dml_target
+        Boolean saved = (Boolean) current.get("saved_dml_target_for_subquery");
+        if (saved != null) {
+            current.put("in_dml_target", saved);
+            current.remove("saved_dml_target_for_subquery");
+        }
     }
 
     public void onFromEnter(int line)    { current.put("from", line);           engine.onFromStart(); }

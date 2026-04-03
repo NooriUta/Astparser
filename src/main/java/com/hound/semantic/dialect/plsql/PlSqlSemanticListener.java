@@ -856,7 +856,8 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     private static boolean looksLikeSubquery(String text) {
         if (text == null) return false;
         String upper = text.trim().toUpperCase();
-        return upper.startsWith("(SELECT") || upper.startsWith("SELECT") || text.length() > 200;
+        return upper.startsWith("(SELECT") || upper.startsWith("SELECT")
+                || upper.startsWith("(WITH") || text.length() > 200;
     }
 
 

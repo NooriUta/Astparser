@@ -27,15 +27,6 @@ dependencies {
     // ANTLR4 runtime (только runtime, генерация — через кастомную задачу)
     implementation 'org.antlr:antlr4-runtime:4.13.1'
 
-    // FalkorDB (временно, до миграции на ArcadeDB)
-    implementation 'com.falkordb:jfalkordb:0.7.0'
-
-    // Neo4j Driver (временно, до миграции на ArcadeDB)
-    implementation 'org.neo4j.driver:neo4j-java-driver:5.26.0'
-
-    // Redis (для FalkorDB)
-    implementation 'io.lettuce:lettuce-core:6.4.0.RELEASE'
-
     // CLI
     implementation 'commons-cli:commons-cli:1.6.0'
 
@@ -55,10 +46,16 @@ dependencies {
 
     // Tests
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testImplementation 'org.mockito:mockito-core:5.12.0'
 
     implementation 'com.arcadedb:arcadedb-engine:24.11.1'
     implementation 'com.arcadedb:arcadedb-network:24.11.1'
+
+    // Apache Arrow (Arrow IPC формат для передачи Hound → Dali)
+    implementation platform('org.apache.arrow:arrow-bom:17.0.0')
+    implementation 'org.apache.arrow:arrow-vector'
+    implementation 'org.apache.arrow:arrow-memory-netty'
 }
 
 // ==================== SOURCE SETS ====================

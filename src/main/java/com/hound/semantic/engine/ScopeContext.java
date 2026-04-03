@@ -122,6 +122,18 @@ public class ScopeContext {
         return u != null ? u : fallback;
     }
 
+    // ═══════ Factory: Routine ═══════
+
+    /**
+     * Создаёт ScopeContext для routine (procedure/function).
+     * Statements внутри routine наследуют routineGeoid.
+     */
+    public static ScopeContext forRoutine(String routineGeoid) {
+        ScopeContext ctx = new ScopeContext();
+        ctx.routineGeoid = routineGeoid;
+        return ctx;
+    }
+
     // ═══════ Alias / Resolve ═══════
 
     public void registerAlias(String alias, String geoid) {

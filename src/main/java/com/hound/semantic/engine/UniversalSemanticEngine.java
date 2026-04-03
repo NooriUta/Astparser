@@ -252,20 +252,20 @@ public class UniversalSemanticEngine {
         String parentRoutine = scopeManager.currentRoutine();
         String geoid = builder.addRoutine(name, routineType, schemaGeoid, packageGeoid,
                 lineStart, parentRoutine);
-        ScopeContext ctx = scopeManager.peek();
-        if (ctx != null) {
-            ctx.setRoutineGeoid(geoid);
-        }
+
+        // Push routine scope so nested statements inherit routineGeoid
+        ScopeContext routineScope = ScopeContext.forRoutine(geoid);
+        scopeManager.push(routineScope);
+
         logger.debug("Routine ENTER: {} {} [{}] parentRoutine={}",
                 routineType, name, geoid, parentRoutine);
     }
 
     public void onRoutineExit() {
-        ScopeContext ctx = scopeManager.peek();
-        if (ctx != null) {
-            ctx.setRoutineGeoid(null);
-        }
-        logger.debug("Routine EXIT");
+        // Pop the routine scope
+        ScopeContext popped = scopeManager.pop();
+        logger.debug("Routine EXIT: {}",
+                popped != null ? popped.getRoutineGeoid() : "?");
     }
 
     // ═══════════════════════════════════════════════════════════════

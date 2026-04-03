@@ -409,9 +409,12 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         Structure str = result.getStructure();
         if (str == null) return;
 
-        // Session
+        // Session — normalize Windows paths to avoid backslash escaping issues
+        String safePath = result.getFilePath() != null
+                ? result.getFilePath().replace('\\', '/')
+                : null;
         rcmd("INSERT INTO DaliSession SET session_id=?, file_path=?, dialect=?, processing_time_ms=?, created_at=?",
-                sid, result.getFilePath(), result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
+                sid, safePath, result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
 
         // Databases
         for (var e : str.getDatabases().entrySet()) {
@@ -511,13 +514,22 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        // Joins
+        // Joins — conditions в Base64 для надёжности (как DaliSnippet)
         for (var e : str.getStatements().entrySet()) {
             for (JoinInfo j : e.getValue().getJoins()) {
+                String condB64 = null;
+                if (j.conditions() != null && !j.conditions().isBlank()) {
+                    condB64 = java.util.Base64.getEncoder().encodeToString(
+                            j.conditions().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
                 rcmd("INSERT INTO DaliJoin SET session_id=?, statement_geoid=?, join_type=?, " +
-                                "source_table_geoid=?, source_alias=?, target_table_geoid=?, target_alias=?, conditions=?",
-                        sid, e.getKey(), j.joinType(), j.sourceTableGeoid(), j.sourceTableAlias(),
-                        j.targetTableGeoid(), j.targetTableAlias(), j.conditions());
+                                "source_table_geoid=?, source_alias=?, source_type=?, " +
+                                "target_table_geoid=?, target_alias=?, target_type=?, " +
+                                "conditions_b64=?, line_start=?",
+                        sid, e.getKey(), j.joinType(),
+                        j.sourceTableGeoid(), j.sourceTableAlias(), j.sourceType(),
+                        j.targetTableGeoid(), j.targetTableAlias(), j.targetType(),
+                        condB64, j.lineStart());
             }
         }
 
@@ -733,17 +745,9 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     }
 
     private static String esc(String s) {
-        if (s == null) return "";
-        // 1. Strip SQL line comments (-- ... \n) that break ArcadeDB string literals
-        s = s.replaceAll("--[^\n\r]*", "");
-        // 2. Normalize whitespace: replace newlines/tabs with spaces, collapse multiple spaces
-        s = s.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ');
-        s = s.replaceAll(" {2,}", " ").trim();
-        // 3. Escape backslashes and single quotes for ArcadeDB SQL
-        //    ArcadeDB remote mode uses backslash-escaping, NOT '' doubling
-        s = s.replace("\\", "\\\\");
-        s = s.replace("'", "\\'");
-        return s;
+        if (s == null) return null;
+        return s.replace("\\", "\\\\")   // \ → \\
+                .replace("'", "\\'");     // ' → \'
     }
 
     private static String md5(String s) {
