@@ -679,7 +679,12 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             (p instanceof Number) ? p.toString() :
                                     (p instanceof Boolean) ? p.toString() :
                                             "'" + esc(p.toString()) + "'";
-                    resolved = resolved.replaceFirst("\\?", val);
+                    // Use indexOf instead of replaceFirst to avoid regex backreference issues
+                    // (replaceFirst treats \ and $ in replacement as regex special chars)
+                    int idx = resolved.indexOf('?');
+                    if (idx >= 0) {
+                        resolved = resolved.substring(0, idx) + val + resolved.substring(idx + 1);
+                    }
                 }
                 remoteDb.command("sql", resolved);
             } else {
