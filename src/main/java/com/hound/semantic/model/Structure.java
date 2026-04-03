@@ -29,6 +29,8 @@ public class Structure {
         this.statements = statements != null ? statements : Map.of();
     }
 
+    public Map<String, Object> getDatabases() { return databases; }
+    public Map<String, Object> getSchemas() { return schemas; }
     public Map<String, TableInfo> getTables() { return tables; }
     public Map<String, ColumnInfo> getColumns() { return columns; }
     public Map<String, StatementInfo> getStatements() { return statements; }

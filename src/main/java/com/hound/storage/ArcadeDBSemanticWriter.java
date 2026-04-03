@@ -9,8 +9,11 @@ import com.hound.semantic.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.Base64;
 
 /**
  * Записывает SemanticResult в ArcadeDB.
@@ -103,7 +106,34 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     .set("created_at", System.currentTimeMillis())
                     .save();
 
-            // 2. Tables → DaliTable + BELONGS_TO_SESSION
+            // 2. Databases → DaliDatabase
+            Map<String, MutableVertex> dbV = new LinkedHashMap<>();
+            for (var e : str.getDatabases().entrySet()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> d = (Map<String, Object>) e.getValue();
+                MutableVertex v = embeddedDb.newVertex("DaliDatabase")
+                        .set("session_id", sid)
+                        .set("database_geoid", e.getKey())
+                        .set("database_name", d.get("name"))
+                        .save();
+                dbV.put(e.getKey(), v);
+            }
+
+            // 3. Schemas → DaliSchema
+            Map<String, MutableVertex> schV = new LinkedHashMap<>();
+            for (var e : str.getSchemas().entrySet()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> sc = (Map<String, Object>) e.getValue();
+                MutableVertex v = embeddedDb.newVertex("DaliSchema")
+                        .set("session_id", sid)
+                        .set("schema_geoid", e.getKey())
+                        .set("schema_name", sc.get("name"))
+                        .set("database_geoid", sc.get("db"))
+                        .save();
+                schV.put(e.getKey(), v);
+            }
+
+            // 4. Tables → DaliTable + BELONGS_TO_SESSION + CONTAINS_TABLE
             Map<String, MutableVertex> tblV = new LinkedHashMap<>();
             for (var e : str.getTables().entrySet()) {
                 TableInfo t = e.getValue();
@@ -118,9 +148,13 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .save();
                 tblV.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
+                if (t.schemaGeoid() != null) {
+                    MutableVertex sv2 = schV.get(t.schemaGeoid().toUpperCase());
+                    if (sv2 != null) sv2.newEdge("CONTAINS_TABLE", v, true);
+                }
             }
 
-            // 3. Columns → DaliColumn + HAS_COLUMN edge
+            // 5. Columns → DaliColumn + HAS_COLUMN edge
             Map<String, MutableVertex> colV = new LinkedHashMap<>();
             for (var e : str.getColumns().entrySet()) {
                 ColumnInfo c = e.getValue();
@@ -140,7 +174,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
             }
 
-            // 4. Routines → DaliRoutine + BELONGS_TO_SESSION
+            // 6. Routines → DaliRoutine + BELONGS_TO_SESSION + CONTAINS_ROUTINE
             Map<String, MutableVertex> rtV = new LinkedHashMap<>();
             for (var e : str.getRoutines().entrySet()) {
                 RoutineInfo r = e.getValue();
@@ -154,9 +188,13 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .save();
                 rtV.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
+                if (r.getSchemaGeoid() != null) {
+                    MutableVertex sv2 = schV.get(r.getSchemaGeoid().toUpperCase());
+                    if (sv2 != null) sv2.newEdge("CONTAINS_ROUTINE", v, true);
+                }
             }
 
-            // 5. Statements → DaliStatement (full properties)
+            // 7. Statements → DaliStatement (full properties)
             Map<String, MutableVertex> stV = new LinkedHashMap<>();
             for (var e : str.getStatements().entrySet()) {
                 StatementInfo s = e.getValue();
@@ -180,7 +218,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 stV.put(e.getKey(), v);
             }
 
-            // 6. Statement structural edges
+            // 8. Statement structural edges
             for (var e : str.getStatements().entrySet()) {
                 StatementInfo s = e.getValue();
                 MutableVertex sv = stV.get(e.getKey());
@@ -254,46 +292,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     sv.newEdge("HAS_OUTPUT_COL", ocV, true);
                 }
 
-                // Atoms → DaliAtom + HAS_ATOM + resolution edges
-                for (var at : s.getAtoms().entrySet()) {
-                    Map<String, Object> a = at.getValue();
-                    MutableVertex aV = embeddedDb.newVertex("DaliAtom")
-                            .set("session_id", sid)
-                            .set("statement_geoid", e.getKey())
-                            .set("atom_text", at.getKey())
-                            .set("parent_context", a.get("parent_context"))
-                            .set("position", a.get("position"))
-                            .set("is_complex", a.get("is_complex"))
-                            .set("is_column_reference", a.get("is_column_reference"))
-                            .set("is_function_call", a.get("is_function_call"))
-                            .set("is_constant", a.get("is_constant"))
-                            .set("is_routine_param", a.get("is_routine_param"))
-                            .set("is_routine_var", a.get("is_routine_var"))
-                            .set("function_name", a.get("function_name"))
-                            .set("table_name", a.get("table_name"))
-                            .set("column_name", a.get("column_name"))
-                            .set("table_geoid", a.get("table_geoid"))
-                            .set("status", a.get("status"))
-                            .set("output_column_sequence", a.get("output_column_sequence"))
-                            .set("nested_atoms_count", a.get("nested_atoms_count"))
-                            .save();
-                    sv.newEdge("HAS_ATOM", aV, true);
-
-                    // ATOM_REF_TABLE edge
-                    String atomTableGeoid = (String) a.get("table_geoid");
-                    if (atomTableGeoid != null) {
-                        MutableVertex atbl = tblV.get(atomTableGeoid);
-                        if (atbl != null) aV.newEdge("ATOM_REF_TABLE", atbl, true);
-                    }
-
-                    // ATOM_REF_COLUMN edge
-                    String atomColName = (String) a.get("column_name");
-                    if (atomTableGeoid != null && atomColName != null) {
-                        String colGeoid = atomTableGeoid + "." + atomColName.toUpperCase();
-                        MutableVertex acol = colV.get(colGeoid);
-                        if (acol != null) aV.newEdge("ATOM_REF_COLUMN", acol, true);
-                    }
-                }
+                // Atoms are written in step 9 from result.getAtoms() (AtomProcessor data)
 
                 // Joins → DaliJoin + HAS_JOIN
                 for (JoinInfo j : s.getJoins()) {
@@ -314,7 +313,81 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
-            // 7. Lineage edges (from SemanticResult — backward compatible)
+            // 9. Atoms → DaliAtom + HAS_ATOM + ATOM_REF_TABLE + ATOM_REF_COLUMN + FILTER_FLOW
+            //    Source: result.getAtoms() from AtomProcessor (StatementInfo.atoms is never populated)
+            for (var container : result.getAtoms().entrySet()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> cont = (Map<String, Object>) container.getValue();
+                String stmtGeoid = (String) cont.get("source_geoid");
+                @SuppressWarnings("unchecked")
+                Map<String, Map<String, Object>> atoms =
+                        (Map<String, Map<String, Object>>) cont.get("atoms");
+                if (atoms == null || stmtGeoid == null) continue;
+
+                MutableVertex sv = stV.get(stmtGeoid);
+                if (sv == null) continue;
+
+                for (var at : atoms.entrySet()) {
+                    Map<String, Object> a = at.getValue();
+                    MutableVertex aV = embeddedDb.newVertex("DaliAtom")
+                            .set("session_id", sid)
+                            .set("statement_geoid", stmtGeoid)
+                            .set("atom_text", at.getKey())
+                            .set("atom_context", a.get("atom_context"))
+                            .set("parent_context", a.get("parent_context"))
+                            .set("position", a.get("position"))
+                            .set("sposition", a.get("sposition"))
+                            .set("is_complex", a.get("is_complex"))
+                            .set("is_column_reference", a.get("is_column_reference"))
+                            .set("is_function_call", a.get("is_function_call"))
+                            .set("is_constant", a.get("is_constant"))
+                            .set("is_routine_param", a.get("is_routine_param"))
+                            .set("is_routine_var", a.get("is_routine_var"))
+                            .set("table_name", a.get("table_name"))
+                            .set("column_name", a.get("column_name"))
+                            .set("table_geoid", a.get("table_geoid"))
+                            .set("status", a.get("status"))
+                            .set("output_column_sequence", a.get("output_column_sequence"))
+                            .set("nested_atoms_count", a.get("nested_atoms_count"))
+                            .save();
+                    sv.newEdge("HAS_ATOM", aV, true);
+
+                    String atomTableGeoid = (String) a.get("table_geoid");
+                    if (atomTableGeoid != null) {
+                        MutableVertex atbl = tblV.get(atomTableGeoid);
+                        if (atbl != null) aV.newEdge("ATOM_REF_TABLE", atbl, true);
+
+                        String atomColName = (String) a.get("column_name");
+                        if (atomColName != null) {
+                            String colGeoid = atomTableGeoid + "." + atomColName.toUpperCase();
+                            MutableVertex acol = colV.get(colGeoid);
+                            if (acol != null) aV.newEdge("ATOM_REF_COLUMN", acol, true);
+                        }
+                    }
+
+                    // FILTER_FLOW: resolved atom in WHERE/HAVING → DaliColumn -[FILTER_FLOW]-> DaliStatement
+                    String parentCtx = (String) a.get("parent_context");
+                    if (("WHERE".equals(parentCtx) || "HAVING".equals(parentCtx))
+                            && "Обработано".equals(a.get("status"))
+                            && atomTableGeoid != null) {
+                        String atomColName = (String) a.get("column_name");
+                        if (atomColName != null) {
+                            String colGeoid = atomTableGeoid + "." + atomColName.toUpperCase();
+                            MutableVertex colVt = colV.get(colGeoid);
+                            if (colVt != null) {
+                                colVt.newEdge("FILTER_FLOW", sv, true)
+                                        .set("context", parentCtx)
+                                        .set("session_id", sid)
+                                        .set("statement_geoid", stmtGeoid)
+                                        .set("via_atom", at.getKey())
+                                        .save();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 10. Lineage edges (from SemanticResult — backward compatible)
             for (LineageEdge le : result.getLineage()) {
                 MutableVertex from = resolve(le.sourceGeoid(), stV, tblV, rtV);
                 MutableVertex to = resolve(le.targetGeoid(), stV, tblV, rtV);
@@ -340,6 +413,22 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         rcmd("INSERT INTO DaliSession SET session_id=?, file_path=?, dialect=?, processing_time_ms=?, created_at=?",
                 sid, result.getFilePath(), result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
 
+        // Databases
+        for (var e : str.getDatabases().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> d = (Map<String, Object>) e.getValue();
+            rcmd("INSERT INTO DaliDatabase SET session_id=?, database_geoid=?, database_name=?",
+                    sid, e.getKey(), d.get("name"));
+        }
+
+        // Schemas
+        for (var e : str.getSchemas().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> sc = (Map<String, Object>) e.getValue();
+            rcmd("INSERT INTO DaliSchema SET session_id=?, schema_geoid=?, schema_name=?, database_geoid=?",
+                    sid, e.getKey(), sc.get("name"), sc.get("db"));
+        }
+
         // Tables
         for (var e : str.getTables().entrySet()) {
             TableInfo t = e.getValue();
@@ -361,13 +450,22 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     sid, e.getKey(), r.getName(), r.getRoutineType(), r.getPackageGeoid(), r.getSchemaGeoid());
         }
 
-        // Statements (full properties)
+        // Statements — snippet excluded; stored separately in DaliSnippet
         for (var e : str.getStatements().entrySet()) {
             StatementInfo s = e.getValue();
-            rcmd("INSERT INTO DaliStatement SET session_id=?, stmt_geoid=?, type=?, snippet=?, " +
+            rcmd("INSERT INTO DaliStatement SET session_id=?, stmt_geoid=?, type=?, " +
                             "line_start=?, line_end=?, parent_statement=?, routine_geoid=?, short_name=?",
-                    sid, e.getKey(), s.getType(), truncate(s.getSnippet(), SNIPPET_MAX),
+                    sid, e.getKey(), s.getType(),
                     s.getLineStart(), s.getLineEnd(), s.getParentStatementGeoid(), s.getRoutineGeoid(), s.getShortName());
+        }
+
+        // DaliSnippet — snippet stored Base64-encoded to avoid SQL parsing issues with quotes/newlines
+        for (var e : str.getStatements().entrySet()) {
+            String raw = truncate(e.getValue().getSnippet(), SNIPPET_MAX);
+            if (raw == null) continue;
+            String b64 = Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+            rcmd("INSERT INTO DaliSnippet SET session_id=?, stmt_geoid=?, snippet_b64=?, snippet_hash=?",
+                    sid, e.getKey(), b64, md5(raw));
         }
 
         // OutputColumns
@@ -381,18 +479,30 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        // Atoms (full properties)
-        for (var e : str.getStatements().entrySet()) {
-            for (var at : e.getValue().getAtoms().entrySet()) {
+        // Atoms — from result.getAtoms() (AtomProcessor data; StatementInfo.atoms is never populated)
+        for (var container : result.getAtoms().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cont = (Map<String, Object>) container.getValue();
+            String stmtGeoid = (String) cont.get("source_geoid");
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, Object>> atoms =
+                    (Map<String, Map<String, Object>>) cont.get("atoms");
+            if (atoms == null || stmtGeoid == null) continue;
+
+            for (var at : atoms.entrySet()) {
                 Map<String, Object> a = at.getValue();
                 rcmd("INSERT INTO DaliAtom SET session_id=?, statement_geoid=?, atom_text=?, " +
-                                "parent_context=?, position=?, is_complex=?, is_column_reference=?, " +
-                                "is_function_call=?, is_constant=?, table_name=?, column_name=?, " +
-                                "table_geoid=?, status=?, output_column_sequence=?",
-                        sid, e.getKey(), at.getKey(),
-                        a.get("parent_context"), a.get("position"), a.get("is_complex"), a.get("is_column_reference"),
-                        a.get("is_function_call"), a.get("is_constant"), a.get("table_name"), a.get("column_name"),
-                        a.get("table_geoid"), a.get("status"), a.get("output_column_sequence"));
+                                "atom_context=?, parent_context=?, position=?, sposition=?, " +
+                                "is_complex=?, is_column_reference=?, is_function_call=?, is_constant=?, " +
+                                "is_routine_param=?, is_routine_var=?, table_name=?, column_name=?, " +
+                                "table_geoid=?, status=?, output_column_sequence=?, nested_atoms_count=?",
+                        sid, stmtGeoid, at.getKey(),
+                        a.get("atom_context"), a.get("parent_context"), a.get("position"), a.get("sposition"),
+                        a.get("is_complex"), a.get("is_column_reference"), a.get("is_function_call"),
+                        a.get("is_constant"), a.get("is_routine_param"), a.get("is_routine_var"),
+                        a.get("table_name"), a.get("column_name"),
+                        a.get("table_geoid"), a.get("status"),
+                        a.get("output_column_sequence"), a.get("nested_atoms_count"));
             }
         }
 
@@ -407,6 +517,24 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         }
 
         // ═══════ Edges via SQL ═══════
+
+        // CONTAINS_TABLE (Schema → Table)
+        for (var e : str.getTables().entrySet()) {
+            String sg = e.getValue().schemaGeoid();
+            if (sg != null) {
+                edgeRemote("CONTAINS_TABLE", "DaliSchema", "schema_geoid", sg.toUpperCase(),
+                        "DaliTable", "table_geoid", e.getKey(), sid);
+            }
+        }
+
+        // CONTAINS_ROUTINE (Schema → Routine)
+        for (var e : str.getRoutines().entrySet()) {
+            String sg = e.getValue().getSchemaGeoid();
+            if (sg != null) {
+                edgeRemote("CONTAINS_ROUTINE", "DaliSchema", "schema_geoid", sg.toUpperCase(),
+                        "DaliRoutine", "routine_geoid", e.getKey(), sid);
+            }
+        }
 
         // HAS_COLUMN
         for (var e : str.getColumns().entrySet()) {
@@ -460,11 +588,52 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        // HAS_ATOM
-        for (var e : str.getStatements().entrySet()) {
-            for (var at : e.getValue().getAtoms().entrySet()) {
-                edgeRemote("HAS_ATOM", "DaliStatement", "stmt_geoid", e.getKey(),
-                        "DaliAtom", "atom_text", at.getKey(), sid, "statement_geoid", e.getKey());
+        // HAS_ATOM + ATOM_REF_TABLE + ATOM_REF_COLUMN + FILTER_FLOW
+        for (var container : result.getAtoms().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cont = (Map<String, Object>) container.getValue();
+            String stmtGeoid = (String) cont.get("source_geoid");
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, Object>> atoms =
+                    (Map<String, Map<String, Object>>) cont.get("atoms");
+            if (atoms == null || stmtGeoid == null) continue;
+
+            for (var at : atoms.entrySet()) {
+                Map<String, Object> a = at.getValue();
+                edgeRemote("HAS_ATOM", "DaliStatement", "stmt_geoid", stmtGeoid,
+                        "DaliAtom", "atom_text", at.getKey(), sid, "statement_geoid", stmtGeoid);
+
+                String tableGeoid = (String) a.get("table_geoid");
+                if (tableGeoid != null) {
+                    edgeRemote("ATOM_REF_TABLE",
+                            "DaliAtom", "atom_text", at.getKey(),
+                            "DaliTable", "table_geoid", tableGeoid,
+                            sid, "statement_geoid", stmtGeoid);
+
+                    String colName = (String) a.get("column_name");
+                    if (colName != null) {
+                        String colGeoid = tableGeoid + "." + colName.toUpperCase();
+                        edgeRemote("ATOM_REF_COLUMN",
+                                "DaliAtom", "atom_text", at.getKey(),
+                                "DaliColumn", "column_geoid", colGeoid,
+                                sid, "statement_geoid", stmtGeoid);
+                    }
+                }
+
+                // FILTER_FLOW: DaliColumn → DaliStatement for WHERE/HAVING resolved atoms
+                String parentCtx = (String) a.get("parent_context");
+                if (("WHERE".equals(parentCtx) || "HAVING".equals(parentCtx))
+                        && "Обработано".equals(a.get("status"))
+                        && tableGeoid != null) {
+                    String colName = (String) a.get("column_name");
+                    if (colName != null) {
+                        String colGeoid = tableGeoid + "." + colName.toUpperCase();
+                        edgeRemote("FILTER_FLOW",
+                                "DaliColumn", "column_geoid", colGeoid,
+                                "DaliStatement", "stmt_geoid", stmtGeoid,
+                                sid);
+                    }
+                }
             }
         }
 
@@ -477,6 +646,15 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
         }
+
+        // USES_SUBQUERY (Statement → Statement)
+        for (var e : str.getStatements().entrySet()) {
+            for (String sqGeoid : e.getValue().getSourceSubqueries().keySet()) {
+                edgeRemote("USES_SUBQUERY", "DaliStatement", "stmt_geoid", e.getKey(),
+                        "DaliStatement", "stmt_geoid", sqGeoid, sid);
+            }
+        }
+
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -543,7 +721,19 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private static String esc(String s) {
         if (s == null) return "";
-        return s.replace("\\", "\\\\").replace("'", "\\'");
+        return s.replace("'", "''");  // ArcadeDB SQL: double-quote, not backslash-escape
+    }
+
+    private static String md5(String s) {
+        if (s == null) return "";
+        try {
+            byte[] digest = MessageDigest.getInstance("MD5").digest(s.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(32);
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return "";
+        }
     }
 
     @Override

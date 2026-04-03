@@ -7,19 +7,23 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Создаёт схему ArcadeDB — все Dali vertex/edge types.
+ * Создаёт схему ArcadeDB — все Dali vertex/edge/document types.
  *
  * 13 Vertex types (все сущности — vertex, участвуют в граф-навигации):
  *   DaliSession, DaliDatabase, DaliSchema, DaliPackage, DaliTable, DaliColumn,
  *   DaliRoutine, DaliStatement, DaliAtom, DaliOutputColumn, DaliJoin,
  *   DaliParameter, DaliVariable
  *
+ * 1 Document type (вспомогательный контент, не участвует в граф-навигации):
+ *   DaliSnippet — SQL-текст statement, хранится отдельно от DaliStatement
+ *   чтобы избежать проблем с экранированием при remote INSERT
+ *
  * 24 Edge types (structural + usage + atom resolution + flow)
  */
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 2;
+    private static final int SCHEMA_VERSION = 3;
 
     private SchemaInitializer() {}
 
@@ -69,6 +73,9 @@ public final class SchemaInitializer {
                 "ATOM_REF_TABLE", "ATOM_REF_COLUMN", "ATOM_PRODUCES",
                 "DATA_FLOW", "FILTER_FLOW", "JOIN_FLOW", "UNION_FLOW"
         }) { c += edg(schema, e); }
+
+        // DaliSnippet — Document type for SQL text (avoids quoting issues in remote INSERT)
+        if (!schema.existsType("DaliSnippet")) schema.createDocumentType("DaliSnippet");
 
         // Meta version
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");
@@ -120,6 +127,7 @@ public final class SchemaInitializer {
                 "CREATE EDGE TYPE FILTER_FLOW IF NOT EXISTS",
                 "CREATE EDGE TYPE JOIN_FLOW IF NOT EXISTS",
                 "CREATE EDGE TYPE UNION_FLOW IF NOT EXISTS",
+                "CREATE DOCUMENT TYPE DaliSnippet IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliMeta IF NOT EXISTS",
         };
     }
