@@ -372,7 +372,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (!base.isInDmlTarget()) {
             base.onSubqueryEnter(extract(ctx), getStartLine(ctx), getEndLine(ctx));
         } else {
-            base.initStatement("USUBQUERY", extract(ctx), getStartLine(ctx), getEndLine(ctx), null);
+            base.onStatementEnter("USUBQUERY", extract(ctx), getStartLine(ctx), getEndLine(ctx));
         }
     }
 

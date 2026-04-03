@@ -255,6 +255,21 @@ tasks.withType(Tar).configureEach {
 tasks.withType(Zip).configureEach {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
+// ==================== DIAGNOSTIC ====================
+
+task diagnostic(type: JavaExec) {
+    description = 'Запуск ArcadeDB диагностики качества разбора'
+    group = 'hound'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.hound.diagnostic.DiagnosticRunner'
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
+    if (project.hasProperty('dbPath')) {
+        args project.property('dbPath')
+    } else {
+        args 'target/hound-diag'
+    }
+}
+
 // ==================== TESTS ====================
 
 test {

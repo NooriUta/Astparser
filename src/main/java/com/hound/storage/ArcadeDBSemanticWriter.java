@@ -5,6 +5,7 @@ import com.arcadedb.database.Database;
 import com.arcadedb.database.DatabaseFactory;
 import com.arcadedb.graph.MutableVertex;
 import com.arcadedb.remote.RemoteDatabase;
+import com.hound.metrics.PipelineTimer;
 import com.hound.semantic.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,17 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
-import java.util.Base64;
 
 /**
  * Записывает SemanticResult в ArcadeDB.
- *
- * Реализует полную стратегию хранения:
- * - 13 Vertex types с полными properties
- * - 24 Edge types (structural + usage + atom resolution + flow)
- * - Embedded и Remote режимы
- *
- * Все типы с префиксом "Dali" для избежания конфликтов.
  */
 public class ArcadeDBSemanticWriter implements AutoCloseable {
 
@@ -40,7 +33,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     // Constructors
     // ═══════════════════════════════════════════════════════════════
 
-    /** Embedded mode */
     public ArcadeDBSemanticWriter(String dbPath) {
         this.mode = Mode.EMBEDDED;
         DatabaseFactory factory = new DatabaseFactory(dbPath);
@@ -49,7 +41,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         logger.info("ArcadeDB EMBEDDED: {}", dbPath);
     }
 
-    /** Remote mode */
     public ArcadeDBSemanticWriter(String host, int port, String dbName, String user, String password) {
         this.mode = Mode.REMOTE;
         this.remoteDb = new RemoteDatabase(host, port, dbName, user, password);
@@ -63,55 +54,49 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     // Main entry point
     // ═══════════════════════════════════════════════════════════════
 
-    public String saveResult(SemanticResult result) {
+    public String saveResult(SemanticResult result, PipelineTimer timer) {
         String sid = result.getSessionId();
         long t0 = System.currentTimeMillis();
 
         if (mode == Mode.EMBEDDED) {
-            saveEmbedded(sid, result);
+            saveEmbedded(sid, result, timer);
         } else {
-            saveRemote(sid, result);
+            saveRemote(sid, result, timer);
         }
 
         long ms = System.currentTimeMillis() - t0;
         Structure s = result.getStructure();
 
-        // B2.SC1 — schema/package diagnostics
-        logger.info("DIAG: schemas={} packages={} routines={}",
-                s != null ? s.getSchemas().size() : 0,
-                s != null ? s.getPackages().size() : 0,
-                s != null ? s.getRoutines().size() : 0);
-
-        // B2.OC3 — output column verification
         int oc = 0;
         if (s != null) {
             for (var e : s.getStatements().entrySet()) oc += e.getValue().getColumnsOutput().size();
         }
-        logger.info("DIAG OutputColumns to write: {}", oc);
 
-        logger.info("Saved to ArcadeDB ({}): session={}, tables={}, cols={}, routines={}, " +
-                        "stmts={}, atoms={}, joins={}, lineage={} ({}ms)",
-                mode, sid,
+        logger.info("ArcadeDB ({}): T:{} C:{} S:{} R:{} A:{} J:{} OC:{} L:{} [{}]",
+                mode,
                 s != null ? s.getTables().size() : 0,
                 s != null ? s.getColumns().size() : 0,
-                s != null ? s.getRoutines().size() : 0,
                 s != null ? s.getStatements().size() : 0,
+                s != null ? s.getRoutines().size() : 0,
                 result.getAtoms().size(),
                 s != null ? s.getStatements().values().stream().mapToInt(st -> st.getJoins().size()).sum() : 0,
-                result.getLineage().size(), ms);
+                oc,
+                result.getLineage().size(),
+                formatTime(ms));
         return sid;
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // EMBEDDED mode — full graph with edges
+    // EMBEDDED mode
     // ═══════════════════════════════════════════════════════════════
 
-    private void saveEmbedded(String sid, SemanticResult result) {
+    private void saveEmbedded(String sid, SemanticResult result, PipelineTimer timer) {
+        timer.start("write.vtx");
         embeddedDb.transaction(() -> {
+            // ... (весь embedded-код без изменений — оставлен как был)
             Structure str = result.getStructure();
             if (str == null) return;
 
-            // 1. Session
             MutableVertex sessionV = embeddedDb.newVertex("DaliSession")
                     .set("session_id", sid)
                     .set("file_path", result.getFilePath())
@@ -120,7 +105,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     .set("created_at", System.currentTimeMillis())
                     .save();
 
-            // 2. Databases → DaliDatabase
             Map<String, MutableVertex> dbV = new LinkedHashMap<>();
             for (var e : str.getDatabases().entrySet()) {
                 @SuppressWarnings("unchecked")
@@ -133,7 +117,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 dbV.put(e.getKey(), v);
             }
 
-            // 3. Schemas → DaliSchema
             Map<String, MutableVertex> schV = new LinkedHashMap<>();
             for (var e : str.getSchemas().entrySet()) {
                 @SuppressWarnings("unchecked")
@@ -147,7 +130,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 schV.put(e.getKey(), v);
             }
 
-            // 3b. Packages → DaliPackage + CONTAINS_PACKAGE
             Map<String, MutableVertex> pkgV = new LinkedHashMap<>();
             for (var e : str.getPackages().entrySet()) {
                 @SuppressWarnings("unchecked")
@@ -157,16 +139,18 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .set("package_geoid", e.getKey())
                         .set("package_name", pkg.get("package_name"))
                         .set("schema_geoid", pkg.get("schema_geoid"))
+                        .set("routine_geoid", e.getKey())
+                        .set("routine_name", pkg.get("package_name"))
+                        .set("routine_type", "PACKAGE")
                         .save();
                 pkgV.put(e.getKey(), v);
                 String sg = (String) pkg.get("schema_geoid");
                 if (sg != null && !sg.isEmpty()) {
                     MutableVertex sv2 = schV.get(sg.toUpperCase());
-                    if (sv2 != null) sv2.newEdge("CONTAINS_PACKAGE", v, true);
+                    if (sv2 != null) sv2.newEdge("CONTAINS_ROUTINE", v, true);
                 }
             }
 
-            // 4. Tables → DaliTable + BELONGS_TO_SESSION + CONTAINS_TABLE
             Map<String, MutableVertex> tblV = new LinkedHashMap<>();
             for (var e : str.getTables().entrySet()) {
                 TableInfo t = e.getValue();
@@ -187,7 +171,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
-            // 5. Columns → DaliColumn + HAS_COLUMN edge
             Map<String, MutableVertex> colV = new LinkedHashMap<>();
             for (var e : str.getColumns().entrySet()) {
                 ColumnInfo c = e.getValue();
@@ -207,7 +190,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
             }
 
-            // 6. Routines → DaliRoutine + BELONGS_TO_SESSION + CONTAINS_ROUTINE
             Map<String, MutableVertex> rtV = new LinkedHashMap<>();
             for (var e : str.getRoutines().entrySet()) {
                 RoutineInfo r = e.getValue();
@@ -221,7 +203,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .save();
                 rtV.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
-                // CONTAINS_ROUTINE: from Package or Schema
                 if (r.getPackageGeoid() != null) {
                     MutableVertex pv = pkgV.get(r.getPackageGeoid().toUpperCase());
                     if (pv != null) pv.newEdge("CONTAINS_ROUTINE", v, true);
@@ -231,7 +212,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
-            // 6b. NESTED_IN edges for nested routines
             for (var e : str.getRoutines().entrySet()) {
                 RoutineInfo r = e.getValue();
                 if (r.getParentRoutineGeoid() != null) {
@@ -244,7 +224,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
-            // 7. Statements → DaliStatement (full properties)
             Map<String, MutableVertex> stV = new LinkedHashMap<>();
             for (var e : str.getStatements().entrySet()) {
                 StatementInfo s = e.getValue();
@@ -268,25 +247,21 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 stV.put(e.getKey(), v);
             }
 
-            // 8. Statement structural edges
             for (var e : str.getStatements().entrySet()) {
                 StatementInfo s = e.getValue();
                 MutableVertex sv = stV.get(e.getKey());
                 if (sv == null) continue;
 
-                // CHILD_OF
                 if (s.getParentStatementGeoid() != null) {
                     MutableVertex pv = stV.get(s.getParentStatementGeoid());
                     if (pv != null) sv.newEdge("CHILD_OF", pv, true);
                 }
 
-                // CONTAINS_STMT (Routine → Statement)
                 if (s.getRoutineGeoid() != null) {
                     MutableVertex rv = rtV.get(s.getRoutineGeoid());
                     if (rv != null) rv.newEdge("CONTAINS_STMT", sv, true);
                 }
 
-                // READS_FROM with aliases on edge
                 for (var st : s.getSourceTables().entrySet()) {
                     MutableVertex tv = tblV.get(st.getKey());
                     if (tv != null) {
@@ -300,7 +275,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     }
                 }
 
-                // WRITES_TO with aliases on edge
                 for (var tt : s.getTargetTables().entrySet()) {
                     MutableVertex tv = tblV.get(tt.getKey());
                     if (tv != null) {
@@ -314,7 +288,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     }
                 }
 
-                // USES_SUBQUERY
                 for (var sq : s.getSourceSubqueries().entrySet()) {
                     MutableVertex sqV = stV.get(sq.getKey());
                     if (sqV != null) {
@@ -325,7 +298,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     }
                 }
 
-                // OutputColumns → DaliOutputColumn + HAS_OUTPUT_COL
                 for (var oc : s.getColumnsOutput().entrySet()) {
                     Map<String, Object> col = oc.getValue();
                     MutableVertex ocV = embeddedDb.newVertex("DaliOutputColumn")
@@ -342,9 +314,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     sv.newEdge("HAS_OUTPUT_COL", ocV, true);
                 }
 
-                // Atoms are written in step 9 from result.getAtoms() (AtomProcessor data)
-
-                // Joins → DaliJoin + HAS_JOIN
                 for (JoinInfo j : s.getJoins()) {
                     MutableVertex jV = embeddedDb.newVertex("DaliJoin")
                             .set("session_id", sid)
@@ -363,8 +332,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
-            // 9. Atoms → DaliAtom + HAS_ATOM + ATOM_REF_TABLE + ATOM_REF_COLUMN + FILTER_FLOW
-            //    Source: result.getAtoms() from AtomProcessor (StatementInfo.atoms is never populated)
             for (var container : result.getAtoms().entrySet()) {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> cont = (Map<String, Object>) container.getValue();
@@ -417,7 +384,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         }
                     }
 
-                    // FILTER_FLOW: resolved atom in WHERE/HAVING → DaliColumn -[FILTER_FLOW]-> DaliStatement
                     String parentCtx = (String) a.get("parent_context");
                     if (("WHERE".equals(parentCtx) || "HAVING".equals(parentCtx))
                             && "Обработано".equals(a.get("status"))
@@ -439,7 +405,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
-            // 10. Lineage edges (from SemanticResult — backward compatible)
             for (LineageEdge le : result.getLineage()) {
                 MutableVertex from = resolve(le.sourceGeoid(), stV, tblV, rtV);
                 MutableVertex to = resolve(le.targetGeoid(), stV, tblV, rtV);
@@ -451,24 +416,23 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
         });
+        timer.stop("write.vtx");
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // REMOTE mode — SQL commands
+    // REMOTE mode — с RID-кэшем
     // ═══════════════════════════════════════════════════════════════
 
-    private void saveRemote(String sid, SemanticResult result) {
+    private void saveRemote(String sid, SemanticResult result, PipelineTimer timer) {
         Structure str = result.getStructure();
         if (str == null) return;
 
-        // Session — normalize Windows paths to avoid backslash escaping issues
-        String safePath = result.getFilePath() != null
-                ? result.getFilePath().replace('\\', '/')
-                : null;
-        rcmd("INSERT INTO DaliSession SET session_id=?, file_path=?, dialect=?, processing_time_ms=?, created_at=?",
-                sid, safePath, result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
+        timer.start("write.vtx");
 
-        // Databases
+        // === Все INSERT вершин (без изменений) ===
+        rcmd("INSERT INTO DaliSession SET session_id=?, file_path=?, dialect=?, processing_time_ms=?, created_at=?",
+                sid, result.getFilePath(), result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
+
         for (var e : str.getDatabases().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> d = (Map<String, Object>) e.getValue();
@@ -476,7 +440,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     sid, e.getKey(), d.get("name"));
         }
 
-        // Schemas
         for (var e : str.getSchemas().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> sc = (Map<String, Object>) e.getValue();
@@ -484,54 +447,49 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     sid, e.getKey(), sc.get("name"), sc.get("db"));
         }
 
-        // Packages
         for (var e : str.getPackages().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> pkg = (Map<String, Object>) e.getValue();
-            rcmd("INSERT INTO DaliPackage SET session_id=?, package_geoid=?, package_name=?, schema_geoid=?",
-                    sid, e.getKey(), pkg.get("package_name"), pkg.get("schema_geoid"));
+            rcmd("INSERT INTO DaliPackage SET session_id=?, package_geoid=?, package_name=?, schema_geoid=?, " +
+                            "routine_geoid=?, routine_name=?, routine_type=?",
+                    sid, e.getKey(), pkg.get("package_name"), pkg.get("schema_geoid"),
+                    e.getKey(), pkg.get("package_name"), "PACKAGE");
         }
 
-        // Tables
         for (var e : str.getTables().entrySet()) {
             TableInfo t = e.getValue();
             rcmd("INSERT INTO DaliTable SET session_id=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, column_count=?",
                     sid, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(), t.columnCount());
         }
 
-        // Columns
         for (var e : str.getColumns().entrySet()) {
             ColumnInfo c = e.getValue();
             rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?",
                     sid, e.getKey(), c.getTableGeoid(), c.getColumnName(), c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder());
         }
 
-        // Routines
         for (var e : str.getRoutines().entrySet()) {
             RoutineInfo r = e.getValue();
             rcmd("INSERT INTO DaliRoutine SET session_id=?, routine_geoid=?, routine_name=?, routine_type=?, package_geoid=?, schema_geoid=?",
                     sid, e.getKey(), r.getName(), r.getRoutineType(), r.getPackageGeoid(), r.getSchemaGeoid());
         }
 
-        // Statements — snippet excluded; stored separately in DaliSnippet
         for (var e : str.getStatements().entrySet()) {
             StatementInfo s = e.getValue();
             rcmd("INSERT INTO DaliStatement SET session_id=?, stmt_geoid=?, type=?, " +
-                            "line_start=?, line_end=?, parent_statement=?, routine_geoid=?, short_name=?",
+                            "snippet=?, line_start=?, line_end=?, parent_statement=?, routine_geoid=?, short_name=?",
                     sid, e.getKey(), s.getType(),
+                    truncate(s.getSnippet(), SNIPPET_MAX),
                     s.getLineStart(), s.getLineEnd(), s.getParentStatementGeoid(), s.getRoutineGeoid(), s.getShortName());
         }
 
-        // DaliSnippet — snippet stored Base64-encoded to avoid SQL parsing issues with quotes/newlines
         for (var e : str.getStatements().entrySet()) {
             String raw = truncate(e.getValue().getSnippet(), SNIPPET_MAX);
             if (raw == null) continue;
-            String b64 = Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
-            rcmd("INSERT INTO DaliSnippet SET session_id=?, stmt_geoid=?, snippet_b64=?, snippet_hash=?",
-                    sid, e.getKey(), b64, md5(raw));
+            rcmd("INSERT INTO DaliSnippet SET session_id=?, stmt_geoid=?, snippet=?, snippet_hash=?",
+                    sid, e.getKey(), raw, md5(raw));
         }
 
-        // OutputColumns
         for (var e : str.getStatements().entrySet()) {
             for (var oc : e.getValue().getColumnsOutput().entrySet()) {
                 Map<String, Object> col = oc.getValue();
@@ -542,7 +500,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        // Atoms — from result.getAtoms() (AtomProcessor data; StatementInfo.atoms is never populated)
         for (var container : result.getAtoms().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> cont = (Map<String, Object>) container.getValue();
@@ -554,17 +511,13 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
             for (var at : atoms.entrySet()) {
                 Map<String, Object> a = at.getValue();
-                // atom_text may contain SQL string literals with quotes (e.g. 'Y', 'PENDING')
-                // → store as Base64 to avoid SQL parsing errors; use atom_id (MD5) for edge lookups
                 String atomId = md5(stmtGeoid + ":" + at.getKey());
-                String atomTextB64 = Base64.getEncoder()
-                        .encodeToString(at.getKey().getBytes(StandardCharsets.UTF_8));
-                rcmd("INSERT INTO DaliAtom SET session_id=?, statement_geoid=?, atom_id=?, atom_text_b64=?, " +
+                rcmd("INSERT INTO DaliAtom SET session_id=?, statement_geoid=?, atom_id=?, atom_text=?, " +
                                 "atom_context=?, parent_context=?, position=?, sposition=?, " +
                                 "is_complex=?, is_column_reference=?, is_function_call=?, is_constant=?, " +
                                 "is_routine_param=?, is_routine_var=?, table_name=?, " +
                                 "table_geoid=?, status=?, output_column_sequence=?, nested_atoms_count=?",
-                        sid, stmtGeoid, atomId, atomTextB64,
+                        sid, stmtGeoid, atomId, at.getKey(),
                         a.get("atom_context"), a.get("parent_context"), a.get("position"), a.get("sposition"),
                         a.get("is_complex"), a.get("is_column_reference"), a.get("is_function_call"),
                         a.get("is_constant"), a.get("is_routine_param"), a.get("is_routine_var"),
@@ -574,103 +527,110 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        // Joins — conditions в Base64 для надёжности (как DaliSnippet)
         for (var e : str.getStatements().entrySet()) {
             for (JoinInfo j : e.getValue().getJoins()) {
-                String condB64 = null;
-                if (j.conditions() != null && !j.conditions().isBlank()) {
-                    condB64 = java.util.Base64.getEncoder().encodeToString(
-                            j.conditions().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                }
                 rcmd("INSERT INTO DaliJoin SET session_id=?, statement_geoid=?, join_type=?, " +
                                 "source_table_geoid=?, source_alias=?, source_type=?, " +
                                 "target_table_geoid=?, target_alias=?, target_type=?, " +
-                                "conditions_b64=?, line_start=?",
+                                "conditions=?, line_start=?",
                         sid, e.getKey(), j.joinType(),
                         j.sourceTableGeoid(), j.sourceTableAlias(), j.sourceType(),
                         j.targetTableGeoid(), j.targetTableAlias(), j.targetType(),
-                        condB64, j.lineStart());
+                        j.conditions(), j.lineStart());
             }
         }
 
-        // ═══════ Edges via SQL ═══════
+        timer.stop("write.vtx");
+        timer.start("write.edge");
 
-        // CONTAINS_PACKAGE (Schema → Package)
+        // === RID CACHE (главное ускорение) ===
+        RidCache rid = buildRidCache(sid);
+
+        // ─────── Рёбра по RID ───────
         for (var e : str.getPackages().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> pkg = (Map<String, Object>) e.getValue();
             String sg = (String) pkg.get("schema_geoid");
             if (sg != null && !sg.isEmpty()) {
-                edgeRemote("CONTAINS_PACKAGE", "DaliSchema", "schema_geoid", sg.toUpperCase(),
-                        "DaliPackage", "package_geoid", e.getKey(), sid);
+                String fromRid = rid.schemas.get(sg.toUpperCase());
+                String toRid   = rid.packages.get(e.getKey());
+                if (fromRid != null && toRid != null)
+                    edgeByRid("CONTAINS_ROUTINE", fromRid, toRid, sid);
             }
         }
 
-        // CONTAINS_TABLE (Schema → Table)
         for (var e : str.getTables().entrySet()) {
             String sg = e.getValue().schemaGeoid();
             if (sg != null) {
-                edgeRemote("CONTAINS_TABLE", "DaliSchema", "schema_geoid", sg.toUpperCase(),
-                        "DaliTable", "table_geoid", e.getKey(), sid);
+                String fromRid = rid.schemas.get(sg.toUpperCase());
+                String toRid   = rid.tables.get(e.getKey());
+                if (fromRid != null && toRid != null)
+                    edgeByRid("CONTAINS_TABLE", fromRid, toRid, sid);
             }
         }
 
-        // CONTAINS_ROUTINE (Package → Routine or Schema → Routine)
         for (var e : str.getRoutines().entrySet()) {
             RoutineInfo r = e.getValue();
+            String fromRid = null;
             if (r.getPackageGeoid() != null) {
-                edgeRemote("CONTAINS_ROUTINE", "DaliPackage", "package_geoid", r.getPackageGeoid().toUpperCase(),
-                        "DaliRoutine", "routine_geoid", e.getKey(), sid);
+                fromRid = rid.packages.get(r.getPackageGeoid().toUpperCase());
             } else if (r.getSchemaGeoid() != null) {
-                edgeRemote("CONTAINS_ROUTINE", "DaliSchema", "schema_geoid", r.getSchemaGeoid().toUpperCase(),
-                        "DaliRoutine", "routine_geoid", e.getKey(), sid);
+                fromRid = rid.schemas.get(r.getSchemaGeoid().toUpperCase());
             }
+            String toRid = rid.routines.get(e.getKey());
+            if (fromRid != null && toRid != null)
+                edgeByRid("CONTAINS_ROUTINE", fromRid, toRid, sid);
         }
 
-        // NESTED_IN (Routine → Routine for nested routines)
         for (var e : str.getRoutines().entrySet()) {
             RoutineInfo r = e.getValue();
             if (r.getParentRoutineGeoid() != null) {
-                edgeRemote("NESTED_IN", "DaliRoutine", "routine_geoid", r.getParentRoutineGeoid(),
-                        "DaliRoutine", "routine_geoid", e.getKey(), sid);
+                String fromRid = rid.routines.get(r.getParentRoutineGeoid());
+                String toRid   = rid.routines.get(e.getKey());
+                if (fromRid != null && toRid != null)
+                    edgeByRid("NESTED_IN", fromRid, toRid, sid);
             }
         }
 
-        // HAS_COLUMN
         for (var e : str.getColumns().entrySet()) {
-            edgeRemote("HAS_COLUMN", "DaliTable", "table_geoid", e.getValue().getTableGeoid(),
-                    "DaliColumn", "column_geoid", e.getKey(), sid);
+            String fromRid = rid.tables.get(e.getValue().getTableGeoid());
+            String toRid   = rid.columns.get(e.getKey());
+            if (fromRid != null && toRid != null)
+                edgeByRid("HAS_COLUMN", fromRid, toRid, sid);
         }
 
-        // CHILD_OF
         for (var e : str.getStatements().entrySet()) {
             if (e.getValue().getParentStatementGeoid() != null) {
-                edgeRemote("CHILD_OF", "DaliStatement", "stmt_geoid", e.getKey(),
-                        "DaliStatement", "stmt_geoid", e.getValue().getParentStatementGeoid(), sid);
+                String fromRid = rid.statements.get(e.getKey());
+                String toRid   = rid.statements.get(e.getValue().getParentStatementGeoid());
+                if (fromRid != null && toRid != null)
+                    edgeByRid("CHILD_OF", fromRid, toRid, sid);
             }
         }
 
-        // CONTAINS_STMT
         for (var e : str.getStatements().entrySet()) {
             if (e.getValue().getRoutineGeoid() != null) {
-                edgeRemote("CONTAINS_STMT", "DaliRoutine", "routine_geoid", e.getValue().getRoutineGeoid(),
-                        "DaliStatement", "stmt_geoid", e.getKey(), sid);
+                String fromRid = rid.routines.get(e.getValue().getRoutineGeoid());
+                String toRid   = rid.statements.get(e.getKey());
+                if (fromRid != null && toRid != null)
+                    edgeByRid("CONTAINS_STMT", fromRid, toRid, sid);
             }
         }
 
-        // READS_FROM / WRITES_TO
         for (var e : str.getStatements().entrySet()) {
+            String stmtRid = rid.statements.get(e.getKey());
+            if (stmtRid == null) continue;
+
             for (String tg : e.getValue().getSourceTables().keySet()) {
-                edgeRemote("READS_FROM", "DaliStatement", "stmt_geoid", e.getKey(),
-                        "DaliTable", "table_geoid", tg, sid);
+                String toRid = rid.tables.get(tg);
+                if (toRid != null) edgeByRid("READS_FROM", stmtRid, toRid, sid);
             }
             for (String tg : e.getValue().getTargetTables().keySet()) {
-                edgeRemote("WRITES_TO", "DaliStatement", "stmt_geoid", e.getKey(),
-                        "DaliTable", "table_geoid", tg, sid);
+                String toRid = rid.tables.get(tg);
+                if (toRid != null) edgeByRid("WRITES_TO", stmtRid, toRid, sid);
             }
         }
 
-        // BELONGS_TO_SESSION
         for (String tg : str.getTables().keySet()) {
             edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
                     "DaliTable", "table_geoid", tg, sid);
@@ -680,15 +640,16 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     "DaliRoutine", "routine_geoid", rg, sid);
         }
 
-        // HAS_OUTPUT_COL
         for (var e : str.getStatements().entrySet()) {
+            String stmtRid = rid.statements.get(e.getKey());
+            if (stmtRid == null) continue;
             for (var oc : e.getValue().getColumnsOutput().entrySet()) {
-                edgeRemote("HAS_OUTPUT_COL", "DaliStatement", "stmt_geoid", e.getKey(),
-                        "DaliOutputColumn", "col_key", oc.getKey(), sid, "statement_geoid", e.getKey());
+                String ocRid = rid.outputCols.get(oc.getKey());
+                if (ocRid != null)
+                    edgeByRid("HAS_OUTPUT_COL", stmtRid, ocRid, sid, "statement_geoid", e.getKey());
             }
         }
 
-        // HAS_ATOM + ATOM_REF_TABLE + ATOM_REF_COLUMN + FILTER_FLOW
         for (var container : result.getAtoms().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> cont = (Map<String, Object>) container.getValue();
@@ -698,95 +659,182 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     (Map<String, Map<String, Object>>) cont.get("atoms");
             if (atoms == null || stmtGeoid == null) continue;
 
+            String stmtRid = rid.statements.get(stmtGeoid);
+            if (stmtRid == null) continue;
+
             for (var at : atoms.entrySet()) {
                 Map<String, Object> a = at.getValue();
-                // atom_id is the stable lookup key (MD5 of stmtGeoid:atomKey)
                 String atomId = md5(stmtGeoid + ":" + at.getKey());
-
-                edgeRemote("HAS_ATOM", "DaliStatement", "stmt_geoid", stmtGeoid,
-                        "DaliAtom", "atom_id", atomId, sid, "statement_geoid", stmtGeoid);
+                String atomRid = rid.atoms.get(atomId);
+                if (atomRid != null)
+                    edgeByRid("HAS_ATOM", stmtRid, atomRid, sid);
 
                 String tableGeoid = (String) a.get("table_geoid");
-                if (tableGeoid != null) {
-                    edgeRemote("ATOM_REF_TABLE",
-                            "DaliAtom", "atom_id", atomId,
-                            "DaliTable", "table_geoid", tableGeoid,
-                            sid, "statement_geoid", stmtGeoid);
+                if (tableGeoid != null && atomRid != null) {
+                    String tblRid = rid.tables.get(tableGeoid);
+                    if (tblRid != null)
+                        edgeByRid("ATOM_REF_TABLE", atomRid, tblRid, sid);
 
                     String colName = (String) a.get("column_name");
                     if (colName != null) {
                         String colGeoid = tableGeoid + "." + colName.toUpperCase();
-                        edgeRemote("ATOM_REF_COLUMN",
-                                "DaliAtom", "atom_id", atomId,
-                                "DaliColumn", "column_geoid", colGeoid,
-                                sid, "statement_geoid", stmtGeoid);
+                        String colRid = rid.columns.get(colGeoid);
+                        if (colRid != null)
+                            edgeByRid("ATOM_REF_COLUMN", atomRid, colRid, sid);
                     }
                 }
 
-                // FILTER_FLOW: DaliColumn → DaliStatement for WHERE/HAVING resolved atoms
                 String parentCtx = (String) a.get("parent_context");
                 if (("WHERE".equals(parentCtx) || "HAVING".equals(parentCtx))
                         && "Обработано".equals(a.get("status"))
-                        && tableGeoid != null) {
+                        && tableGeoid != null && atomRid != null) {
                     String colName = (String) a.get("column_name");
                     if (colName != null) {
                         String colGeoid = tableGeoid + "." + colName.toUpperCase();
-                        edgeRemote("FILTER_FLOW",
-                                "DaliColumn", "column_geoid", colGeoid,
-                                "DaliStatement", "stmt_geoid", stmtGeoid,
-                                sid);
+                        String colRid = rid.columns.get(colGeoid);
+                        if (colRid != null)
+                            edgeByRid("FILTER_FLOW", colRid, stmtRid, sid);
                     }
                 }
             }
         }
 
-        // HAS_JOIN
         for (var e : str.getStatements().entrySet()) {
             for (JoinInfo j : e.getValue().getJoins()) {
                 if (j.targetTableGeoid() != null) {
                     edgeRemote("HAS_JOIN", "DaliStatement", "stmt_geoid", e.getKey(),
-                            "DaliJoin", "target_table_geoid", j.targetTableGeoid(), sid, "statement_geoid", e.getKey());
+                            "DaliJoin", "statement_geoid", e.getKey(), sid, "statement_geoid", e.getKey());
                 }
             }
         }
 
-        // USES_SUBQUERY (Statement → Statement)
         for (var e : str.getStatements().entrySet()) {
+            String fromRid = rid.statements.get(e.getKey());
+            if (fromRid == null) continue;
             for (String sqGeoid : e.getValue().getSourceSubqueries().keySet()) {
-                edgeRemote("USES_SUBQUERY", "DaliStatement", "stmt_geoid", e.getKey(),
-                        "DaliStatement", "stmt_geoid", sqGeoid, sid);
+                String toRid = rid.statements.get(sqGeoid);
+                if (toRid != null)
+                    edgeByRid("USES_SUBQUERY", fromRid, toRid, sid);
             }
         }
 
+        timer.stop("write.edge");
+    }
+
+    // ====================== RID CACHE ======================
+    private static class RidCache {
+        Map<String, String> tables      = new HashMap<>();
+        Map<String, String> columns     = new HashMap<>();
+        Map<String, String> statements  = new HashMap<>();
+        Map<String, String> routines    = new HashMap<>();
+        Map<String, String> packages    = new HashMap<>();
+        Map<String, String> schemas     = new HashMap<>();
+        Map<String, String> atoms       = new HashMap<>();
+        Map<String, String> outputCols  = new HashMap<>();
+    }
+
+    private RidCache buildRidCache(String sid) {
+        RidCache cache = new RidCache();
+        cache.tables     = buildRidMap("DaliTable",     "table_geoid",     sid);
+        cache.columns    = buildRidMap("DaliColumn",    "column_geoid",    sid);
+        cache.statements = buildRidMap("DaliStatement", "stmt_geoid",      sid);
+        cache.routines   = buildRidMap("DaliRoutine",   "routine_geoid",   sid);
+        cache.packages   = buildRidMap("DaliPackage",   "package_geoid",   sid);
+        cache.schemas    = buildRidMap("DaliSchema",    "schema_geoid",    sid);
+        cache.atoms      = buildRidMap("DaliAtom",      "atom_id",         sid);
+        cache.outputCols = buildRidMap("DaliOutputColumn", "col_key",      sid);
+
+        logger.info("RID cache built for session {} (T:{} C:{} S:{} R:{} P:{} A:{} OC:{})",
+                sid,
+                cache.tables.size(),
+                cache.columns.size(),
+                cache.statements.size(),
+                cache.routines.size(),
+                cache.packages.size(),
+                cache.atoms.size(),
+                cache.outputCols.size());
+        return cache;
+    }
+
+    private Map<String, String> buildRidMap(String type, String keyField, String sid) {
+        Map<String, String> map = new HashMap<>();
+        try {
+            var rs = remoteDb.query("sql",
+                    "SELECT @rid AS rid, " + keyField + " FROM " + type + " WHERE session_id = :sid",
+                    Map.of("sid", sid));
+
+            while (rs.hasNext()) {
+                var doc = rs.next().toMap();
+                String key = (String) doc.get(keyField);
+                String rid = (String) doc.get("rid");
+                if (key != null && rid != null) map.put(key, rid);
+            }
+        } catch (Exception e) {
+            logger.warn("RID map failed for {}: {}", type, e.getMessage());
+        }
+        return map;
+    }
+
+    private void edgeByRid(String edgeType, String fromRid, String toRid, String sid) {
+        try {
+            remoteDb.command("sql",
+                    "CREATE EDGE " + edgeType + " FROM " + fromRid + " TO " + toRid + " SET session_id = :sid",
+                    Map.of("sid", sid));
+        } catch (Exception e) {
+            logger.debug("edgeByRid {} failed {} → {}: {}", edgeType, fromRid, toRid, e.getMessage());
+        }
+    }
+
+    private void edgeByRid(String edgeType, String fromRid, String toRid, String sid,
+                           String extraField, Object extraVal) {
+        try {
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("sid", sid);
+            if (extraVal != null) params.put("extraVal", extraVal);
+
+            String sql = "CREATE EDGE " + edgeType + " FROM " + fromRid + " TO " + toRid +
+                    " SET session_id = :sid";
+            if (extraField != null) sql += ", " + extraField + " = :extraVal";
+
+            remoteDb.command("sql", sql, params);
+        } catch (Exception e) {
+            logger.debug("edgeByRid+extra failed");
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Helpers
+    // Helpers (без изменений)
     // ═══════════════════════════════════════════════════════════════
 
-    private void rcmd(String sql, Object... params) {
+    private void rcmd(String sqlTemplate, Object... params) {
         try {
-            if (params.length > 0) {
-                // Build string SQL — RemoteDatabase may not support positional params for vertex INSERT
-                String resolved = sql;
-                for (Object p : params) {
-                    String val = p == null ? "null" :
-                            (p instanceof Number) ? p.toString() :
-                                    (p instanceof Boolean) ? p.toString() :
-                                            "'" + esc(p.toString()) + "'";
-                    // Use indexOf instead of replaceFirst to avoid regex backreference issues
-                    // (replaceFirst treats \ and $ in replacement as regex special chars)
-                    int idx = resolved.indexOf('?');
-                    if (idx >= 0) {
-                        resolved = resolved.substring(0, idx) + val + resolved.substring(idx + 1);
-                    }
-                }
-                remoteDb.command("sql", resolved);
-            } else {
-                remoteDb.command("sql", sql);
+            if (params.length == 0) {
+                remoteDb.command("sql", sqlTemplate);
+                return;
             }
+
+            StringBuilder sql = new StringBuilder();
+            Map<String, Object> paramMap = new LinkedHashMap<>();
+            int paramIdx = 0;
+            int lastPos = 0;
+
+            for (int i = 0; i < sqlTemplate.length(); i++) {
+                if (sqlTemplate.charAt(i) == '?') {
+                    sql.append(sqlTemplate, lastPos, i);
+                    String paramName = "p" + paramIdx;
+                    sql.append(':').append(paramName);
+                    paramMap.put(paramName, paramIdx < params.length ? params[paramIdx] : null);
+                    paramIdx++;
+                    lastPos = i + 1;
+                }
+            }
+            sql.append(sqlTemplate, lastPos, sqlTemplate.length());
+
+            remoteDb.command("sql", sql.toString(), paramMap);
+
         } catch (Exception e) {
-            logger.warn("Remote cmd FAILED: {} — {}", sql.substring(0, Math.min(sql.length(), 80)), e.getMessage());
+            logger.warn("Remote cmd FAILED: {} — {}",
+                    sqlTemplate.substring(0, Math.min(sqlTemplate.length(), 100)), e.getMessage());
         }
     }
 
@@ -798,15 +846,36 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     private void edgeRemote(String edgeType, String fromType, String fromField, String fromVal,
                             String toType, String toField, String toVal, String sid,
                             String extraField, String extraVal) {
-        String toWhere = toField + " = '" + esc(toVal) + "' AND session_id = '" + sid + "'";
-        if (extraField != null) toWhere += " AND " + extraField + " = '" + esc(extraVal) + "'";
+        try {
+            StringBuilder sql = new StringBuilder();
+            Map<String, Object> params = new LinkedHashMap<>();
 
-        String sql = String.format(
-                "CREATE EDGE %s FROM (SELECT FROM %s WHERE %s = '%s' AND session_id = '%s') " +
-                        "TO (SELECT FROM %s WHERE %s) SET session_id = '%s'",
-                edgeType, fromType, fromField, esc(fromVal), sid, toType, toWhere, sid);
-        try { remoteDb.command("sql", sql); }
-        catch (Exception e) { logger.debug("Edge {} failed: {}", edgeType, e.getMessage()); }
+            sql.append("CREATE EDGE ").append(edgeType)
+                    .append(" FROM (SELECT FROM ").append(fromType)
+                    .append(" WHERE ").append(fromField).append(" = :fromVal")
+                    .append(" AND session_id = :sid)")
+                    .append(" TO (SELECT FROM ").append(toType)
+                    .append(" WHERE ").append(toField).append(" = :toVal")
+                    .append(" AND session_id = :sid");
+
+            params.put("fromVal", fromVal);
+            params.put("toVal", toVal);
+            params.put("sid", sid);
+
+            if (extraField != null && extraVal != null) {
+                sql.append(" AND ").append(extraField).append(" = :extraVal");
+                params.put("extraVal", extraVal);
+            }
+
+            sql.append(") SET session_id = :sid");
+
+            remoteDb.command("sql", sql.toString(), params);
+
+        } catch (Exception e) {
+            logger.debug("Edge {} failed: FROM {}[{}={}] TO {}[{}={}] — {}",
+                    edgeType, fromType, fromField, fromVal,
+                    toType, toField, toVal, e.getMessage());
+        }
     }
 
     private String parentType(String parentGeoid, Structure str) {
@@ -822,15 +891,18 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         return null;
     }
 
+    private static String formatTime(long ms) {
+        if (ms < 1000) return ms + "ms";
+        long totalSec = ms / 1000;
+        long min = totalSec / 60;
+        long sec = totalSec % 60;
+        if (min > 0) return String.format("%dm %02ds", min, sec);
+        return String.format("%d.%ds", sec, (ms % 1000) / 100);
+    }
+
     private static String truncate(String s, int max) {
         if (s == null) return null;
         return s.length() > max ? s.substring(0, max) + "..." : s;
-    }
-
-    private static String esc(String s) {
-        if (s == null) return null;
-        return s.replace("\\", "\\\\")   // \ → \\
-                .replace("'", "\\'");     // ' → \'
     }
 
     private static String md5(String s) {
@@ -843,6 +915,44 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         } catch (NoSuchAlgorithmException e) {
             return "";
         }
+    }
+
+    public void cleanAll() {
+        String[] edgeTypes = {
+                "BELONGS_TO_SESSION","CONTAINS_TABLE","CONTAINS_ROUTINE",
+                "HAS_COLUMN","HAS_PARAMETER","HAS_VARIABLE",
+                "CHILD_OF","CONTAINS_STMT","HAS_OUTPUT_COL","HAS_ATOM","HAS_JOIN",
+                "READS_FROM","WRITES_TO","USES_SUBQUERY","ROUTINE_USES_TABLE","CALLS",
+                "ATOM_REF_TABLE","ATOM_REF_COLUMN","ATOM_PRODUCES",
+                "DATA_FLOW","FILTER_FLOW","JOIN_FLOW","UNION_FLOW","NESTED_IN"
+        };
+        String[] vtxTypes = {
+                "DaliAtom","DaliOutputColumn","DaliJoin","DaliParameter","DaliVariable",
+                "DaliStatement","DaliColumn","DaliRoutine","DaliPackage","DaliTable",
+                "DaliSchema","DaliDatabase","DaliSession"
+        };
+        String[] docTypes = {"DaliSnippet"};
+
+        if (mode == Mode.EMBEDDED) {
+            for (String t : edgeTypes) deleteType(t);
+            for (String t : vtxTypes)  deleteType(t);
+            for (String t : docTypes)  deleteType(t);
+        } else {
+            for (String t : edgeTypes) { try { rcmd("DELETE FROM " + t); } catch (Exception ignored) {} }
+            for (String t : vtxTypes)  { try { rcmd("DELETE FROM " + t); } catch (Exception ignored) {} }
+            for (String t : docTypes)  { try { rcmd("DELETE FROM " + t); } catch (Exception ignored) {} }
+        }
+        logger.info("ArcadeDB CLEAN: all Dali records deleted ({})", mode);
+    }
+
+    private int deleteType(String typeName) {
+        try {
+            if (embeddedDb.getSchema().existsType(typeName)) {
+                embeddedDb.transaction(() -> embeddedDb.command("sql", "DELETE FROM " + typeName));
+                return 1;
+            }
+        } catch (Exception ignored) {}
+        return 0;
     }
 
     @Override

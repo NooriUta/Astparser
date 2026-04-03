@@ -192,7 +192,10 @@ public class StructureAndLineageBuilder {
 
     public void ensureSchema(String name, String dbGeoid) {
         if (name != null && !name.isBlank()) {
-            schemas.putIfAbsent(name.toUpperCase(), Map.of("name", name.toUpperCase(), "db", dbGeoid));
+            Map<String, Object> schemaData = new LinkedHashMap<>();
+            schemaData.put("name", name.toUpperCase());
+            schemaData.put("db", dbGeoid);
+            schemas.putIfAbsent(name.toUpperCase(), schemaData);
         }
     }
 

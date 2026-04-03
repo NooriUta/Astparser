@@ -10,20 +10,22 @@ import org.slf4j.LoggerFactory;
  * Создаёт схему ArcadeDB — все Dali vertex/edge/document types.
  *
  * 13 Vertex types (все сущности — vertex, участвуют в граф-навигации):
- *   DaliSession, DaliDatabase, DaliSchema, DaliPackage, DaliTable, DaliColumn,
- *   DaliRoutine, DaliStatement, DaliAtom, DaliOutputColumn, DaliJoin,
+ *   DaliSession, DaliDatabase, DaliSchema, DaliTable, DaliColumn,
+ *   DaliRoutine (base), DaliPackage (EXTENDS DaliRoutine),
+ *   DaliStatement, DaliAtom, DaliOutputColumn, DaliJoin,
  *   DaliParameter, DaliVariable
  *
  * 1 Document type (вспомогательный контент, не участвует в граф-навигации):
  *   DaliSnippet — SQL-текст statement, хранится отдельно от DaliStatement
  *   чтобы избежать проблем с экранированием при remote INSERT
  *
- * 24 Edge types (structural + usage + atom resolution + flow)
+ * 23 Edge types (structural + usage + atom resolution + flow)
+ *   Note: CONTAINS_PACKAGE removed in v6 — packages use CONTAINS_ROUTINE (IS-A)
  */
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 5;
+    private static final int SCHEMA_VERSION = 6;
 
     private SchemaInitializer() {}
 
@@ -53,10 +55,11 @@ public final class SchemaInitializer {
         c += vtx(schema, "DaliSession");
         c += vtx(schema, "DaliDatabase");
         c += vtx(schema, "DaliSchema");
-        c += vtx(schema, "DaliPackage");
         c += vtx(schema, "DaliTable");
         c += vtx(schema, "DaliColumn");
         c += vtx(schema, "DaliRoutine");
+        // DaliPackage EXTENDS DaliRoutine (ADR-012: IS-A relationship)
+        c += vtxExtends(schema, "DaliPackage", "DaliRoutine");
         c += vtx(schema, "DaliStatement");
         c += vtx(schema, "DaliAtom");
         c += vtx(schema, "DaliOutputColumn");
@@ -72,10 +75,10 @@ public final class SchemaInitializer {
                 "READS_FROM", "WRITES_TO", "USES_SUBQUERY", "ROUTINE_USES_TABLE", "CALLS",
                 "ATOM_REF_TABLE", "ATOM_REF_COLUMN", "ATOM_PRODUCES",
                 "DATA_FLOW", "FILTER_FLOW", "JOIN_FLOW", "UNION_FLOW",
-                "NESTED_IN", "CONTAINS_PACKAGE"
+                "NESTED_IN"
         }) { c += edg(schema, e); }
 
-        // DaliJoin: conditions_b64 property (Base64-encoded conditions text)
+        // DaliJoin: conditions_b64 property (legacy, kept for backward compat with older DBs)
         if (schema.existsType("DaliJoin")
                 && !schema.getType("DaliJoin").existsProperty("conditions_b64")) {
             schema.getType("DaliJoin").createProperty("conditions_b64", com.arcadedb.schema.Type.STRING);
@@ -86,11 +89,13 @@ public final class SchemaInitializer {
 
         // Meta version
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");
-        db.command("sql", "DELETE FROM DaliMeta");
-        db.newDocument("DaliMeta")
-                .set("schema_version", SCHEMA_VERSION)
-                .set("created_at", System.currentTimeMillis())
-                .save();
+        db.transaction(() -> {
+            db.command("sql", "DELETE FROM DaliMeta");
+            db.newDocument("DaliMeta")
+                    .set("schema_version", SCHEMA_VERSION)
+                    .set("created_at", System.currentTimeMillis())
+                    .save();
+        });
 
         logger.info("ArcadeDB schema v{}: {} types created", SCHEMA_VERSION, c);
     }
@@ -101,10 +106,11 @@ public final class SchemaInitializer {
                 "CREATE VERTEX TYPE DaliSession IF NOT EXISTS",
                 "CREATE VERTEX TYPE DaliDatabase IF NOT EXISTS",
                 "CREATE VERTEX TYPE DaliSchema IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliPackage IF NOT EXISTS",
                 "CREATE VERTEX TYPE DaliTable IF NOT EXISTS",
                 "CREATE VERTEX TYPE DaliColumn IF NOT EXISTS",
                 "CREATE VERTEX TYPE DaliRoutine IF NOT EXISTS",
+                // DaliPackage EXTENDS DaliRoutine — must come AFTER DaliRoutine
+                "CREATE VERTEX TYPE DaliPackage IF NOT EXISTS EXTENDS DaliRoutine",
                 "CREATE VERTEX TYPE DaliStatement IF NOT EXISTS",
                 "CREATE VERTEX TYPE DaliAtom IF NOT EXISTS",
                 "CREATE VERTEX TYPE DaliOutputColumn IF NOT EXISTS",
@@ -135,7 +141,6 @@ public final class SchemaInitializer {
                 "CREATE EDGE TYPE JOIN_FLOW IF NOT EXISTS",
                 "CREATE EDGE TYPE UNION_FLOW IF NOT EXISTS",
                 "CREATE EDGE TYPE NESTED_IN IF NOT EXISTS",
-                "CREATE EDGE TYPE CONTAINS_PACKAGE IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliSnippet IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliMeta IF NOT EXISTS",
         };
@@ -143,6 +148,19 @@ public final class SchemaInitializer {
 
     private static int vtx(Schema s, String n) {
         if (!s.existsType(n)) { s.createVertexType(n); return 1; } return 0;
+    }
+    /** Creates vertex type with inheritance (EXTENDS parent). Adds supertype if type already exists. */
+    private static int vtxExtends(Schema s, String n, String parent) {
+        if (!s.existsType(n)) {
+            s.createVertexType(n).addSuperType(s.getType(parent));
+            return 1;
+        }
+        // Existing type — ensure supertype is set (schema upgrade v5→v6)
+        var type = s.getType(n);
+        if (!s.getType(parent).isSuperTypeOf(n)) {
+            try { type.addSuperType(s.getType(parent)); } catch (Exception ignored) {}
+        }
+        return 0;
     }
     private static int edg(Schema s, String n) {
         if (!s.existsType(n)) { s.createEdgeType(n); return 1; } return 0;

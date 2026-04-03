@@ -51,10 +51,11 @@ public class MetricsCollector {
     }
 
     public void printReport() {
-        long elapsedSeconds = Duration.between(startTime, Instant.now()).getSeconds();
+        long elapsedMs = Duration.between(startTime, Instant.now()).toMillis();
         long totalFiles = totalFilesProcessed.sum();
-        double avgTime = totalFiles == 0 ? 0.0 : (double) totalProcessingTime.get() / totalFiles;
-        double throughput = totalFiles == 0 ? 0.0 : totalFiles / (double) Math.max(1, elapsedSeconds);
+        double avgTimeMs = totalFiles == 0 ? 0.0 : (double) totalProcessingTime.get() / totalFiles;
+        long elapsedSeconds = Math.max(1, elapsedMs / 1000);
+        double throughput = totalFiles == 0 ? 0.0 : totalFiles / (double) elapsedSeconds;
 
         logger.info("========================================");
         logger.info("HOUND Processing Report");
@@ -65,11 +66,11 @@ public class MetricsCollector {
         logger.info("Total nodes created   : {}", totalNodesCreated.sum());
         logger.info("Total relationships   : {}", totalRelationshipsCreated.sum());
         logger.info("Total errors          : {}", totalErrors.sum());
-        logger.info("Total processing time : {} ms", totalProcessingTime.get());
-        logger.info("Average time per file : {} ms", String.format("%.1f", avgTime));
-        logger.info("Min processing time   : {} ms", minProcessingTime.get() == Long.MAX_VALUE ? 0 : minProcessingTime.get());
-        logger.info("Max processing time   : {} ms", maxProcessingTime.get());
-        logger.info("Elapsed time          : {} seconds", elapsedSeconds);
+        logger.info("Total processing time : {}", formatTime(totalProcessingTime.get()));
+        logger.info("Average time per file : {}", formatTime((long) avgTimeMs));
+        logger.info("Min processing time   : {}", formatTime(minProcessingTime.get() == Long.MAX_VALUE ? 0 : minProcessingTime.get()));
+        logger.info("Max processing time   : {}", formatTime(maxProcessingTime.get()));
+        logger.info("Elapsed time          : {}", formatTime(elapsedMs));
         logger.info("Throughput            : {} files/sec", String.format("%.2f", throughput));
 
         if (!languageMetrics.isEmpty()) {
@@ -77,15 +78,24 @@ public class MetricsCollector {
             logger.info("Language Breakdown:");
             for (var entry : languageMetrics.entrySet()) {
                 LanguageMetrics m = entry.getValue();
-                logger.info("  {} → processed={}, nodes={}, rels={}, avgTime={} ms",
+                logger.info("  {} → processed={}, nodes={}, rels={}, avgTime={}",
                         entry.getKey(),
                         m.filesProcessed.sum(),
                         m.nodesCreated.sum(),
                         m.relationshipsCreated.sum(),
-                        String.format("%.1f", m.getAverageTime()));
+                        formatTime((long) m.getAverageTime()));
             }
         }
         logger.info("========================================");
+    }
+
+    private static String formatTime(long ms) {
+        if (ms < 1000) return ms + "ms";
+        long totalSec = ms / 1000;
+        long min = totalSec / 60;
+        long sec = totalSec % 60;
+        if (min > 0) return String.format("%dm %02ds", min, sec);
+        return String.format("%d.%ds", sec, (ms % 1000) / 100);
     }
 
     private static class LanguageMetrics {

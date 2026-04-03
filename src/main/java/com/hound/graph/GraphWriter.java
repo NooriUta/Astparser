@@ -45,8 +45,8 @@ public class GraphWriter implements AutoCloseable {
             }
 
             long duration = System.currentTimeMillis() - startTime;
-            logger.info("Written to graph '{}': {} nodes, {} relationships in {} ms",
-                    graphName, result.nodes().size(), result.relationships().size(), duration);
+            logger.info("Written to graph '{}': {} nodes, {} rels [{}]",
+                    graphName, result.nodes().size(), result.relationships().size(), formatTime(duration));
 
         } catch (Exception e) {
             logger.error("Error writing to graph '{}'", graphName, e);
@@ -61,6 +61,15 @@ public class GraphWriter implements AutoCloseable {
         if (root == null) return;
         AstCollector.CollectionResult result = AstCollector.collect(root);
         writeResult(result);
+    }
+
+    private static String formatTime(long ms) {
+        if (ms < 1000) return ms + "ms";
+        long totalSec = ms / 1000;
+        long min = totalSec / 60;
+        long sec = totalSec % 60;
+        if (min > 0) return String.format("%dm %02ds", min, sec);
+        return String.format("%d.%ds", sec, (ms % 1000) / 100);
     }
 
     @Override

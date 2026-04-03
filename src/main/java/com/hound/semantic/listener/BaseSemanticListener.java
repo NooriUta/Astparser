@@ -40,6 +40,8 @@ public abstract class BaseSemanticListener {
 
     // ====================== current-контекст ======================
     public final Map<String, Object> current = new HashMap<>();
+    // Routine stack: каждый элемент = {parentRoutine, parentRoutineType}
+    public final Deque<String[]> routineStack = new ArrayDeque<>();
 
     // ====================== Конструктор ======================
     public BaseSemanticListener(UniversalSemanticEngine engine) {
@@ -268,6 +270,12 @@ public abstract class BaseSemanticListener {
         else
             geoid = routineType + ":" + cleanName;
 
+        // Save parent routine for restore on exit (аналог parent_statement)
+        routineStack.push(new String[]{
+                (String) current.get("routine"),
+                (String) current.get("routine_type")
+        });
+
         current.put("routine", geoid);
         current.put("routine_type", routineType);
 
@@ -424,8 +432,15 @@ public abstract class BaseSemanticListener {
     }
 
     public void exitRoutine() {
-        current.put("routine",      null);
-        current.put("routine_type", null);
+        // Restore parent routine from stack (аналог exitStatement → parent_statement)
+        if (!routineStack.isEmpty()) {
+            String[] parent = routineStack.pop();
+            current.put("routine",      parent[0]);
+            current.put("routine_type", parent[1]);
+        } else {
+            current.put("routine",      null);
+            current.put("routine_type", null);
+        }
     }
 
     // =========================================================================

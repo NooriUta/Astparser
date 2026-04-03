@@ -76,13 +76,22 @@ public class FileProcessor implements Runnable {
 
             long duration = System.currentTimeMillis() - startTime;
 
-            logger.info("Successfully processed {} | dialect: {} | time: {} ms",
-                    fileName, dialect, duration);
+            logger.info("Successfully processed {} | dialect: {} | time: {}",
+                    fileName, dialect, formatTime(duration));
 
         } catch (IOException e) {
             logger.error("Failed to read file: {}", fileName, e);
         } catch (Exception e) {
             logger.error("Error processing file: {}", fileName, e);
         }
+    }
+
+    private static String formatTime(long ms) {
+        if (ms < 1000) return ms + "ms";
+        long totalSec = ms / 1000;
+        long min = totalSec / 60;
+        long sec = totalSec % 60;
+        if (min > 0) return String.format("%dm %02ds", min, sec);
+        return String.format("%d.%ds", sec, (ms % 1000) / 100);
     }
 }

@@ -311,8 +311,19 @@ public class UniversalSemanticEngine {
     }
 
     public void onRoutineExit() {
-        // Pop the routine scope
-        ScopeContext popped = scopeManager.pop();
+        // Pop scopes until we find and remove the routine scope.
+        // Routine scopes have statementType == null (created by ScopeContext.forRoutine).
+        // This handles cases where statement scopes inside the routine
+        // weren't properly closed (e.g., push/pop mismatch).
+        ScopeContext popped = null;
+        while (!scopeManager.isEmpty()) {
+            popped = scopeManager.pop();
+            if (popped.getStatementType() == null) {
+                break;
+            }
+            logger.warn("Routine EXIT: auto-closing orphan statement scope [{}]",
+                    popped.getStatementGeoid());
+        }
         logger.debug("Routine EXIT: {}",
                 popped != null ? popped.getRoutineGeoid() : "?");
     }
