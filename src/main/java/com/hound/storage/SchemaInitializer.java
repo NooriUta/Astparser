@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 4;
+    private static final int SCHEMA_VERSION = 5;
 
     private SchemaInitializer() {}
 
@@ -71,7 +71,8 @@ public final class SchemaInitializer {
                 "CHILD_OF", "CONTAINS_STMT", "HAS_OUTPUT_COL", "HAS_ATOM", "HAS_JOIN",
                 "READS_FROM", "WRITES_TO", "USES_SUBQUERY", "ROUTINE_USES_TABLE", "CALLS",
                 "ATOM_REF_TABLE", "ATOM_REF_COLUMN", "ATOM_PRODUCES",
-                "DATA_FLOW", "FILTER_FLOW", "JOIN_FLOW", "UNION_FLOW"
+                "DATA_FLOW", "FILTER_FLOW", "JOIN_FLOW", "UNION_FLOW",
+                "NESTED_IN", "CONTAINS_PACKAGE"
         }) { c += edg(schema, e); }
 
         // DaliJoin: conditions_b64 property (Base64-encoded conditions text)
@@ -133,6 +134,8 @@ public final class SchemaInitializer {
                 "CREATE EDGE TYPE FILTER_FLOW IF NOT EXISTS",
                 "CREATE EDGE TYPE JOIN_FLOW IF NOT EXISTS",
                 "CREATE EDGE TYPE UNION_FLOW IF NOT EXISTS",
+                "CREATE EDGE TYPE NESTED_IN IF NOT EXISTS",
+                "CREATE EDGE TYPE CONTAINS_PACKAGE IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliSnippet IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliMeta IF NOT EXISTS",
         };

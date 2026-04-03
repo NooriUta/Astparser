@@ -31,6 +31,7 @@ public class ScopeContext {
     private String packageGeoid;
     private String parentStatement;
     private String targetTable;
+    private String alias;
 
     private boolean isInDmlTarget = false;
     private boolean isInJoinContext = false;
@@ -66,6 +67,7 @@ public class ScopeContext {
                 : routineGeoid != null ? routineGeoid
                 : null;
 
+        ctx.alias = alias;
         ctx.statementGeoid = buildStatementGeoid(type, lineStart, general, alias);
         return ctx;
     }
@@ -152,6 +154,7 @@ public class ScopeContext {
     public String getPackageGeoid()    { return packageGeoid; }
     public String getParentStatement() { return parentStatement; }
     public String getTargetTable()     { return targetTable; }
+    public String getAlias()           { return alias; }
     public boolean isInDmlTarget()      { return isInDmlTarget; }
     public boolean isInJoinContext()     { return isInJoinContext; }
     public boolean isInValuesClause()   { return isInValuesClause; }

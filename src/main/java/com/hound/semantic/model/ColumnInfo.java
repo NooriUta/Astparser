@@ -44,4 +44,8 @@ public class ColumnInfo {
     public void addUsedInStatement(String statementGeoid) {
         if (statementGeoid != null) usedInStatements.add(statementGeoid);
     }
+
+    public void addUsedInRoutine(String routineGeoid) {
+        if (routineGeoid != null) usedInRoutines.add(routineGeoid);
+    }
 }

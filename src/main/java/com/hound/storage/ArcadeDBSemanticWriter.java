@@ -75,6 +75,20 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         long ms = System.currentTimeMillis() - t0;
         Structure s = result.getStructure();
+
+        // B2.SC1 — schema/package diagnostics
+        logger.info("DIAG: schemas={} packages={} routines={}",
+                s != null ? s.getSchemas().size() : 0,
+                s != null ? s.getPackages().size() : 0,
+                s != null ? s.getRoutines().size() : 0);
+
+        // B2.OC3 — output column verification
+        int oc = 0;
+        if (s != null) {
+            for (var e : s.getStatements().entrySet()) oc += e.getValue().getColumnsOutput().size();
+        }
+        logger.info("DIAG OutputColumns to write: {}", oc);
+
         logger.info("Saved to ArcadeDB ({}): session={}, tables={}, cols={}, routines={}, " +
                         "stmts={}, atoms={}, joins={}, lineage={} ({}ms)",
                 mode, sid,
@@ -133,6 +147,25 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 schV.put(e.getKey(), v);
             }
 
+            // 3b. Packages → DaliPackage + CONTAINS_PACKAGE
+            Map<String, MutableVertex> pkgV = new LinkedHashMap<>();
+            for (var e : str.getPackages().entrySet()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> pkg = (Map<String, Object>) e.getValue();
+                MutableVertex v = embeddedDb.newVertex("DaliPackage")
+                        .set("session_id", sid)
+                        .set("package_geoid", e.getKey())
+                        .set("package_name", pkg.get("package_name"))
+                        .set("schema_geoid", pkg.get("schema_geoid"))
+                        .save();
+                pkgV.put(e.getKey(), v);
+                String sg = (String) pkg.get("schema_geoid");
+                if (sg != null && !sg.isEmpty()) {
+                    MutableVertex sv2 = schV.get(sg.toUpperCase());
+                    if (sv2 != null) sv2.newEdge("CONTAINS_PACKAGE", v, true);
+                }
+            }
+
             // 4. Tables → DaliTable + BELONGS_TO_SESSION + CONTAINS_TABLE
             Map<String, MutableVertex> tblV = new LinkedHashMap<>();
             for (var e : str.getTables().entrySet()) {
@@ -188,9 +221,26 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .save();
                 rtV.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
-                if (r.getSchemaGeoid() != null) {
+                // CONTAINS_ROUTINE: from Package or Schema
+                if (r.getPackageGeoid() != null) {
+                    MutableVertex pv = pkgV.get(r.getPackageGeoid().toUpperCase());
+                    if (pv != null) pv.newEdge("CONTAINS_ROUTINE", v, true);
+                } else if (r.getSchemaGeoid() != null) {
                     MutableVertex sv2 = schV.get(r.getSchemaGeoid().toUpperCase());
                     if (sv2 != null) sv2.newEdge("CONTAINS_ROUTINE", v, true);
+                }
+            }
+
+            // 6b. NESTED_IN edges for nested routines
+            for (var e : str.getRoutines().entrySet()) {
+                RoutineInfo r = e.getValue();
+                if (r.getParentRoutineGeoid() != null) {
+                    MutableVertex parent = rtV.get(r.getParentRoutineGeoid());
+                    MutableVertex child = rtV.get(e.getKey());
+                    if (parent != null && child != null) {
+                        parent.newEdge("NESTED_IN", child, true)
+                                .set("session_id", sid).save();
+                    }
                 }
             }
 
@@ -329,9 +379,11 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
                 for (var at : atoms.entrySet()) {
                     Map<String, Object> a = at.getValue();
+                    String atomId = md5(stmtGeoid + ":" + at.getKey());
                     MutableVertex aV = embeddedDb.newVertex("DaliAtom")
                             .set("session_id", sid)
                             .set("statement_geoid", stmtGeoid)
+                            .set("atom_id", atomId)
                             .set("atom_text", at.getKey())
                             .set("atom_context", a.get("atom_context"))
                             .set("parent_context", a.get("parent_context"))
@@ -430,6 +482,14 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             Map<String, Object> sc = (Map<String, Object>) e.getValue();
             rcmd("INSERT INTO DaliSchema SET session_id=?, schema_geoid=?, schema_name=?, database_geoid=?",
                     sid, e.getKey(), sc.get("name"), sc.get("db"));
+        }
+
+        // Packages
+        for (var e : str.getPackages().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> pkg = (Map<String, Object>) e.getValue();
+            rcmd("INSERT INTO DaliPackage SET session_id=?, package_geoid=?, package_name=?, schema_geoid=?",
+                    sid, e.getKey(), pkg.get("package_name"), pkg.get("schema_geoid"));
         }
 
         // Tables
@@ -535,6 +595,17 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         // ═══════ Edges via SQL ═══════
 
+        // CONTAINS_PACKAGE (Schema → Package)
+        for (var e : str.getPackages().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> pkg = (Map<String, Object>) e.getValue();
+            String sg = (String) pkg.get("schema_geoid");
+            if (sg != null && !sg.isEmpty()) {
+                edgeRemote("CONTAINS_PACKAGE", "DaliSchema", "schema_geoid", sg.toUpperCase(),
+                        "DaliPackage", "package_geoid", e.getKey(), sid);
+            }
+        }
+
         // CONTAINS_TABLE (Schema → Table)
         for (var e : str.getTables().entrySet()) {
             String sg = e.getValue().schemaGeoid();
@@ -544,11 +615,23 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        // CONTAINS_ROUTINE (Schema → Routine)
+        // CONTAINS_ROUTINE (Package → Routine or Schema → Routine)
         for (var e : str.getRoutines().entrySet()) {
-            String sg = e.getValue().getSchemaGeoid();
-            if (sg != null) {
-                edgeRemote("CONTAINS_ROUTINE", "DaliSchema", "schema_geoid", sg.toUpperCase(),
+            RoutineInfo r = e.getValue();
+            if (r.getPackageGeoid() != null) {
+                edgeRemote("CONTAINS_ROUTINE", "DaliPackage", "package_geoid", r.getPackageGeoid().toUpperCase(),
+                        "DaliRoutine", "routine_geoid", e.getKey(), sid);
+            } else if (r.getSchemaGeoid() != null) {
+                edgeRemote("CONTAINS_ROUTINE", "DaliSchema", "schema_geoid", r.getSchemaGeoid().toUpperCase(),
+                        "DaliRoutine", "routine_geoid", e.getKey(), sid);
+            }
+        }
+
+        // NESTED_IN (Routine → Routine for nested routines)
+        for (var e : str.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            if (r.getParentRoutineGeoid() != null) {
+                edgeRemote("NESTED_IN", "DaliRoutine", "routine_geoid", r.getParentRoutineGeoid(),
                         "DaliRoutine", "routine_geoid", e.getKey(), sid);
             }
         }

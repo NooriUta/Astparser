@@ -17,25 +17,6 @@ public class AtomProcessor {
 
     private static final Logger logger = LoggerFactory.getLogger(AtomProcessor.class);
 
-    // ═══════ Constants — port from Python ═══════
-
-    private static final Set<String> CONSTANT_TYPES = Set.of(
-            "CHAR_STRING", "UNSIGNED_INTEGER", "NUMERIC_LITERAL",
-            "DATE_LITERAL", "TIMESTAMP_LITERAL", "NULL", "SYSDATE",
-            "NULL_", "TRUE", "MINVALUE", "DEFAULT", "APPROXIMATE_NUM_LIT",
-            "CURRENT_DATE", "FALSE"
-    );
-
-    private static final Set<String> IDENTIFIER_TYPES = Set.of(
-            "DELIMITED_ID", "REGULAR_ID", "ID", "NAME", "VALUE", "BRANCH",
-            "CLIENT", "SYSTEM", "TYPE", "OTHER", "ROLE", "DESCRIPTION",
-            "OWNERSHIP", "SUBTYPE", "SCALE", "USER", "OWNER", "DATA"
-    );
-
-    private static final Set<String> SYSTEM_PSEUDO_COLUMNS = Set.of(
-            "LEVEL", "UNBOUNDED", "ROWID", "ROW_NUMBER", "ROWNUM"
-    );
-
     // ═══════ State ═══════
 
     // statement_geoid → { atom_key → atom_data }
@@ -157,8 +138,8 @@ public class AtomProcessor {
             return;
         }
 
-        // --- Простая ссылка на колонку (1 токен, тип REGULAR_ID/DELIMITED_ID/ID) ---
-        if (tokens.size() == 1 && isIdentifierType(tokenDetails.get(0).get("type"))) {
+        // --- Простая ссылка на колонку (1 токен, identifier) ---
+        if (tokens.size() == 1 && getCanonical(tokenDetails.get(0)).isIdentifier()) {
             atomData.put("is_column_reference", true);
             atomData.put("column_name", tokens.get(0));
             return;
@@ -166,9 +147,9 @@ public class AtomProcessor {
 
         // --- Квалифицированная ссылка table.column (3 токена: ID.PERIOD.ID) ---
         if (tokens.size() == 3
-                && isIdentifierType(tokenDetails.get(0).get("type"))
-                && "PERIOD".equals(tokenDetails.get(1).get("type"))
-                && isIdentifierType(tokenDetails.get(2).get("type"))) {
+                && getCanonical(tokenDetails.get(0)).isIdentifier()
+                && getCanonical(tokenDetails.get(1)) == CanonicalTokenType.PERIOD
+                && getCanonical(tokenDetails.get(2)).isIdentifier()) {
             atomData.put("is_column_reference", true);
             atomData.put("table_name", tokens.get(0));
             atomData.put("column_name", tokens.get(2));
@@ -177,11 +158,11 @@ public class AtomProcessor {
 
         // --- Полностью квалифицированная schema.table.column (5 токенов) ---
         if (tokens.size() == 5
-                && isIdentifierType(tokenDetails.get(0).get("type"))
-                && "PERIOD".equals(tokenDetails.get(1).get("type"))
-                && isIdentifierType(tokenDetails.get(2).get("type"))
-                && "PERIOD".equals(tokenDetails.get(3).get("type"))
-                && isIdentifierType(tokenDetails.get(4).get("type"))) {
+                && getCanonical(tokenDetails.get(0)).isIdentifier()
+                && getCanonical(tokenDetails.get(1)) == CanonicalTokenType.PERIOD
+                && getCanonical(tokenDetails.get(2)).isIdentifier()
+                && getCanonical(tokenDetails.get(3)) == CanonicalTokenType.PERIOD
+                && getCanonical(tokenDetails.get(4)).isIdentifier()) {
             atomData.put("is_column_reference", true);
             atomData.put("table_name", tokens.get(2));   // table — средний элемент
             atomData.put("column_name", tokens.get(4));
@@ -190,29 +171,32 @@ public class AtomProcessor {
 
         // --- Вызов функции: ID LEFT_PAREN ... ---
         if (tokens.size() >= 3
-                && isIdentifierType(tokenDetails.get(0).get("type"))
-                && "LEFT_PAREN".equals(tokenDetails.get(1).get("type"))) {
+                && getCanonical(tokenDetails.get(0)).isIdentifier()
+                && getCanonical(tokenDetails.get(1)) == CanonicalTokenType.LEFT_PAREN) {
             atomData.put("is_function_call", true);
             atomData.put("function_name", tokens.get(0));
             return;
         }
 
         // --- Константы (1 токен) ---
-        if (tokens.size() == 1 && CONSTANT_TYPES.contains(tokenDetails.get(0).get("type"))) {
+        if (tokens.size() == 1 && getCanonical(tokenDetails.get(0)).isConstant()) {
             atomData.put("is_constant", true);
             return;
         }
 
-        // --- DATE 'string' (ANSI date literal) ---
+        // --- DATE 'string' (ANSI date literal) — IDENTIFIER followed by STRING_LITERAL ---
         if (tokenDetails.size() >= 2
-                && "DATE".equals(tokenDetails.get(0).get("type"))
-                && "CHAR_STRING".equals(tokenDetails.get(1).get("type"))) {
-            atomData.put("is_constant", true);
-            return;
+                && getCanonical(tokenDetails.get(0)).isIdentifier()
+                && getCanonical(tokenDetails.get(1)) == CanonicalTokenType.STRING_LITERAL) {
+            String firstText = tokenDetails.get(0).get("text");
+            if (firstText != null && "DATE".equalsIgnoreCase(firstText)) {
+                atomData.put("is_constant", true);
+                return;
+            }
         }
 
         // --- Системные псевдоколонки ---
-        if (tokens.size() == 1 && SYSTEM_PSEUDO_COLUMNS.contains(tokens.get(0).toUpperCase())) {
+        if (tokens.size() == 1 && getCanonical(tokenDetails.get(0)).isSystemPseudoColumn()) {
             atomData.put("is_constant", true);
             return;
         }
@@ -235,9 +219,9 @@ public class AtomProcessor {
         }
     }
 
-    private boolean isIdentifierType(String type) {
-        if (type == null) return false;
-        return IDENTIFIER_TYPES.contains(type) || type.endsWith("_LETTER");
+    /** Parses canonical token type from the "type" field in tokenDetails. */
+    private static CanonicalTokenType getCanonical(Map<String, String> td) {
+        return CanonicalTokenType.fromString(td.get("type"));
     }
 
     // =========================================================================
@@ -255,7 +239,10 @@ public class AtomProcessor {
 
         logger.debug("Resolving {} atoms for statement {}", stmtAtoms.size(), statementGeoid);
 
+        int total = 0, resolved = 0, constants = 0, functions = 0, failed = 0;
+
         for (var entry : stmtAtoms.entrySet()) {
+            total++;
             Map<String, Object> atomData = entry.getValue();
 
             // Пропускаем уже обработанные
@@ -264,11 +251,13 @@ public class AtomProcessor {
             // Пропускаем константы
             if (Boolean.TRUE.equals(atomData.get("is_constant"))) {
                 atomData.put("status", "constant");
+                constants++;
                 continue;
             }
             // Пропускаем вызовы функций
             if (Boolean.TRUE.equals(atomData.get("is_function_call"))) {
                 atomData.put("status", "function_call");
+                functions++;
                 continue;
             }
 
@@ -292,8 +281,10 @@ public class AtomProcessor {
                     builder.addColumn(tableGeoid, columnName, (String) atomData.get("atom_text"), null);
                 }
 
+                resolved++;
                 logger.debug("Atom resolved: {} → table={}, column={}", entry.getKey(), tableGeoid, columnName);
             } else {
+                failed++;
                 String parentCtx = (String) atomData.get("parent_context");
                 if ("SELECT".equals(parentCtx) || "INSERT".equals(parentCtx)
                         || "UPDATE".equals(parentCtx) || "MERGE".equals(parentCtx)) {
@@ -305,6 +296,10 @@ public class AtomProcessor {
                 }
             }
         }
+
+        // B2.AR3 — atom resolution audit
+        logger.info("DIAG Atoms [{}]: total={} resolved={} const={} func={} failed={}",
+                statementGeoid, total, resolved, constants, functions, failed);
     }
 
     /**
@@ -349,7 +344,7 @@ public class AtomProcessor {
 
             // Подсчёт точек
             long dotCount = tokenDetails.stream()
-                    .filter(td -> "PERIOD".equals(td.get("type"))).count();
+                    .filter(td -> getCanonical(td) == CanonicalTokenType.PERIOD).count();
 
             // schema.table.column (>= 2 точки, >= 5 токенов)
             if (dotCount >= 2 && tokens.size() >= 5) {
@@ -387,22 +382,23 @@ public class AtomProcessor {
                 return result;
             }
 
-            // DATE 'string' (ANSI date constant)
-            if ("DATE".equalsIgnoreCase(tokenDetails.get(0).get("type"))
+            // DATE 'string' (ANSI date constant) — IDENTIFIER followed by STRING_LITERAL
+            if (getCanonical(tokenDetails.get(0)).isIdentifier()
                     && tokenDetails.size() >= 2
-                    && "CHAR_STRING".equals(tokenDetails.get(1).get("type"))) {
-                result.put("resolved", true);
-                result.put("reason", "Заглушка для константы ANSI Дата");
-                return result;
+                    && getCanonical(tokenDetails.get(1)) == CanonicalTokenType.STRING_LITERAL) {
+                String firstText = tokenDetails.get(0).get("text");
+                if (firstText != null && "DATE".equalsIgnoreCase(firstText)) {
+                    result.put("resolved", true);
+                    result.put("reason", "Заглушка для константы ANSI Дата");
+                    return result;
+                }
             }
         }
 
         // ═══ 2. SIMPLE ATOMS (1 token, identifier) ═══
-        String firstTokenType = tokenDetails.get(0).get("type");
+        CanonicalTokenType firstCanonical = getCanonical(tokenDetails.get(0));
 
-        if (!isComplex && tokens.size() == 1
-                && (isIdentifierType(firstTokenType)
-                    || (firstTokenType != null && firstTokenType.endsWith("_LETTER")))) {
+        if (!isComplex && tokens.size() == 1 && firstCanonical.isIdentifier()) {
 
             // 2a. Проверка routine variables/parameters
             if (scopeManager != null) {
@@ -410,8 +406,21 @@ public class AtomProcessor {
                 if (currentRoutine != null && builder != null) {
                     RoutineInfo routineInfo = builder.getRoutines().get(currentRoutine);
                     if (routineInfo != null) {
-                        // TODO: RoutineInfo needs hasVariable/hasParameter methods
-                        // when implemented, resolve as routine_var / routine_param
+                        String atomUpper = tokens.get(0).toUpperCase();
+                        if (routineInfo.hasVariable(atomUpper)) {
+                            result.put("resolved", true);
+                            result.put("is_routine_var", true);
+                            result.put("reference_type", "routine_variable");
+                            result.put("reason", "Variable of " + currentRoutine);
+                            return result;
+                        }
+                        if (routineInfo.hasParameter(atomUpper)) {
+                            result.put("resolved", true);
+                            result.put("is_routine_param", true);
+                            result.put("reference_type", "routine_parameter");
+                            result.put("reason", "Parameter of " + currentRoutine);
+                            return result;
+                        }
                     }
                 }
             }
@@ -471,14 +480,14 @@ public class AtomProcessor {
         }
 
         // ═══ 3. CONSTANTS ═══
-        if (!isComplex && tokens.size() == 1 && CONSTANT_TYPES.contains(firstTokenType)) {
+        if (!isComplex && tokens.size() == 1 && firstCanonical.isConstant()) {
             result.put("resolved", true);
-            result.put("reason", "Константа: " + firstTokenType);
+            result.put("reason", "Константа: " + firstCanonical);
             return result;
         }
 
         // ═══ 4. SYSTEM PSEUDO-COLUMNS ═══
-        if (tokens.size() == 1 && SYSTEM_PSEUDO_COLUMNS.contains(tokens.get(0).toUpperCase())) {
+        if (tokens.size() == 1 && firstCanonical.isSystemPseudoColumn()) {
             result.put("resolved", true);
             result.put("reason", "Системная псевдоколонка: " + tokens.get(0));
             return result;

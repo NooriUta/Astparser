@@ -72,26 +72,46 @@ public class StatementInfo {
     // ═══════ Source / Target tables ═══════
 
     public void addSourceTable(String tableGeoid, String tableAlias) {
-        Map<String, Object> entry = sourceTables.computeIfAbsent(tableGeoid,
-                k -> new LinkedHashMap<>(Map.of("geoid", tableGeoid, "aliases", new ArrayList<String>())));
+        addSourceTable(tableGeoid, tableAlias, null, null);
+    }
+
+    public void addSourceTable(String tableGeoid, String tableAlias, String tableName, String tableType) {
+        Map<String, Object> entry = sourceTables.computeIfAbsent(tableGeoid, k -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("table_stmt", tableGeoid);
+            m.put("table_name", tableName != null ? tableName : tableGeoid);
+            m.put("table_alias", new ArrayList<String>());
+            m.put("table_type", tableType != null ? tableType : "table");
+            return m;
+        });
         if (tableAlias != null) {
             @SuppressWarnings("unchecked")
-            List<String> aliasList = (List<String>) entry.computeIfAbsent("aliases", k -> new ArrayList<>());
-            if (!aliasList.contains(tableAlias.toUpperCase())) {
-                aliasList.add(tableAlias.toUpperCase());
-            }
+            var aliases = (List<String>) entry.get("table_alias");
+            if (aliases == null) { aliases = new ArrayList<>(); entry.put("table_alias", aliases); }
+            String upper = tableAlias.toUpperCase();
+            if (!aliases.contains(upper)) aliases.add(upper);
         }
     }
 
     public void addTargetTable(String tableGeoid, String tableAlias) {
-        Map<String, Object> entry = targetTables.computeIfAbsent(tableGeoid,
-                k -> new LinkedHashMap<>(Map.of("geoid", tableGeoid, "aliases", new ArrayList<String>())));
+        addTargetTable(tableGeoid, tableAlias, null, null);
+    }
+
+    public void addTargetTable(String tableGeoid, String tableAlias, String tableName, String tableType) {
+        Map<String, Object> entry = targetTables.computeIfAbsent(tableGeoid, k -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("table_stmt", tableGeoid);
+            m.put("table_name", tableName != null ? tableName : tableGeoid);
+            m.put("table_alias", new ArrayList<String>());
+            m.put("table_type", tableType != null ? tableType : "table");
+            return m;
+        });
         if (tableAlias != null) {
             @SuppressWarnings("unchecked")
-            List<String> aliasList = (List<String>) entry.computeIfAbsent("aliases", k -> new ArrayList<>());
-            if (!aliasList.contains(tableAlias.toUpperCase())) {
-                aliasList.add(tableAlias.toUpperCase());
-            }
+            var aliases = (List<String>) entry.get("table_alias");
+            if (aliases == null) { aliases = new ArrayList<>(); entry.put("table_alias", aliases); }
+            String upper = tableAlias.toUpperCase();
+            if (!aliases.contains(upper)) aliases.add(upper);
         }
     }
 

@@ -167,6 +167,7 @@ public class HoundApplication {
         UniversalSemanticEngine engine = new UniversalSemanticEngine();
         Object listener = createListener(config.language, engine);
         parseAndWalk(sql, config.language, listener);
+        engine.resolvePendingColumns();
 
         long duration = System.currentTimeMillis() - startTime;
         SemanticResult result = engine.getResult(

@@ -559,6 +559,18 @@ public abstract class BaseSemanticListener {
         engine.onRoutineExit();
     }
 
+    public void onRoutineParameter(String name, String type, String mode) {
+        engine.onRoutineParameter(name, type, mode);
+    }
+
+    public void onRoutineVariable(String name, String type) {
+        engine.onRoutineVariable(name, type);
+    }
+
+    public void onRoutineReturnType(String returnType) {
+        engine.onRoutineReturnType(returnType);
+    }
+
     public void onTableReference(String tableName, String tableAlias, int line, int endLine) {
         String role = isInDmlTarget() ? "TARGET" : "SOURCE";
         processTableReference(tableName, tableAlias);
@@ -682,8 +694,14 @@ public abstract class BaseSemanticListener {
         current.put("column_output_start_col", col);
     }
 
+    public void onOutputColumnExit(int startLine, int startCol, int endLine, int endCol,
+                                    String expressionText) {
+        onOutputColumnExit(startLine, startCol, endLine, endCol, expressionText, false);
+    }
+
     @SuppressWarnings("unchecked")
-    public void onOutputColumnExit(int startLine, int startCol, int endLine, int endCol, String expressionText) {
+    public void onOutputColumnExit(int startLine, int startCol, int endLine, int endCol,
+                                    String expressionText, boolean isTableStar) {
         String stmt = currentStatement();
         if (stmt == null) return;
 
@@ -692,21 +710,23 @@ public abstract class BaseSemanticListener {
         var stmtInfo = engine.getBuilder().getStatements().get(stmt);
         if (stmtInfo == null) return;
 
+        String colName = alias != null ? alias : expressionText;
         int order = stmtInfo.getColumnsOutput().size() + 1;
         Map<String, Object> columnInfo = new LinkedHashMap<>();
         columnInfo.put("order", order);
-        columnInfo.put("name", alias != null ? alias : expressionText);
+        columnInfo.put("name", colName);
         columnInfo.put("expression", expressionText);
         columnInfo.put("alias", alias);
+        columnInfo.put("source_type", isTableStar ? "table_star" : "expression");
 
-        stmtInfo.addColumnOutput(alias != null ? alias : expressionText, columnInfo);
+        stmtInfo.addColumnOutput(colName, columnInfo);
 
         // Position-based atom binding
         engine.getAtomProcessor().bindAtomsToOutputColumn(
                 stmt, startLine, startCol, endLine, endCol, order);
 
         current.put("column_alias", null);
-        current.put("column_output", null);
+        current.put("column_output", columnInfo);
     }
 
     // ═══ JOIN complete (port from Python exitJoin_clause) ═══

@@ -18,6 +18,7 @@ public class StructureAndLineageBuilder {
 
     private final Map<String, Object> databases = new LinkedHashMap<>();
     private final Map<String, Object> schemas = new LinkedHashMap<>();
+    private final Map<String, Object> packages = new LinkedHashMap<>();
     private final Map<String, TableInfo> tables = new LinkedHashMap<>();
     private final Map<String, ColumnInfo> columns = new LinkedHashMap<>();
     private final Map<String, StatementInfo> statements = new LinkedHashMap<>();
@@ -32,13 +33,25 @@ public class StructureAndLineageBuilder {
      */
     public String ensureTable(String tableName, String schemaGeoid) {
         String upperName = tableName.toUpperCase();
-        String geoid = (schemaGeoid != null && !schemaGeoid.isBlank())
-                ? schemaGeoid.toUpperCase() + "." + upperName
+        String resolvedSchema = schemaGeoid;
+
+        // Auto-detect schema from qualified name: "BUDM_RMS.TABLE" → schema "BUDM_RMS"
+        if (upperName.contains(".") && (resolvedSchema == null || resolvedSchema.isBlank())) {
+            String[] parts = upperName.split("\\.", 2);
+            resolvedSchema = parts[0];
+            upperName = parts[1];
+            ensureSchema(resolvedSchema, null);
+        }
+
+        String geoid = (resolvedSchema != null && !resolvedSchema.isBlank())
+                ? resolvedSchema.toUpperCase() + "." + upperName
                 : upperName;
 
+        String finalUpperName = upperName;
+        String finalSchema = resolvedSchema;
         tables.computeIfAbsent(geoid, k -> {
             logger.debug("New table registered: {}", geoid);
-            return new TableInfo(geoid, upperName, schemaGeoid, "TABLE");
+            return new TableInfo(geoid, finalUpperName, finalSchema, "TABLE");
         });
         return geoid;
     }
@@ -65,6 +78,8 @@ public class StructureAndLineageBuilder {
             return new ColumnInfo(geoid, tableGeoid, upperCol, expression, alias, false, 0);
         });
     }
+
+    public Map<String, ColumnInfo> getColumns() { return columns; }
 
     // ═══════ Statements ═══════
 
@@ -131,10 +146,24 @@ public class StructureAndLineageBuilder {
 
         routines.computeIfAbsent(geoid, k -> {
             logger.debug("New routine registered: {} {} [{}]", routineType, upperName, geoid);
-            return new RoutineInfo(geoid, upperName, routineType, packageGeoid, schemaGeoid);
+            return new RoutineInfo(geoid, upperName, routineType, packageGeoid, schemaGeoid, parentRoutineGeoid);
         });
         return geoid;
     }
+
+    // ═══════ Packages ═══════
+
+    public void ensurePackage(String name, String schemaGeoid) {
+        if (name == null || name.isBlank()) return;
+        String upper = name.toUpperCase();
+        String geoid = (schemaGeoid != null && !schemaGeoid.isBlank())
+                ? schemaGeoid + "." + upper : upper;
+        packages.putIfAbsent(geoid, Map.of(
+                "package_name", upper,
+                "schema_geoid", schemaGeoid != null ? schemaGeoid : ""));
+    }
+
+    public Map<String, Object> getPackages() { return packages; }
 
 
     // ═══════ Lineage ═══════
@@ -150,7 +179,7 @@ public class StructureAndLineageBuilder {
     // ═══════ Structure ═══════
 
     public Structure getStructure() {
-        return new Structure(databases, schemas, tables, columns, routines, statements);
+        return new Structure(databases, schemas, packages, tables, columns, routines, statements);
     }
 
     // ═══════ Schemas / Databases ═══════
@@ -167,11 +196,177 @@ public class StructureAndLineageBuilder {
         }
     }
 
+    // ═══════ Aggregators (порт Python get_structure / get_lineage) ═══════
+
+    /**
+     * Сериализация таблиц → List<Map>.
+     * Порт Python: serialize_tables()
+     */
+    public List<Map<String, Object>> serializeTables() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var entry : tables.entrySet()) {
+            TableInfo t = entry.getValue();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("geoid", t.geoid());
+            m.put("table_name", t.tableName());
+            m.put("schema_geoid", t.schemaGeoid());
+            m.put("table_type", t.tableType());
+            m.put("aliases", new ArrayList<>(t.aliases()));
+            m.put("column_count", t.columnCount());
+            result.add(m);
+        }
+        return result;
+    }
+
+    /**
+     * Сериализация колонок → List<Map>.
+     */
+    public List<Map<String, Object>> serializeColumns() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var entry : columns.entrySet()) {
+            ColumnInfo c = entry.getValue();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("geoid", c.getGeoid());
+            m.put("table_geoid", c.getTableGeoid());
+            m.put("column_name", c.getColumnName());
+            m.put("expression", c.getExpression());
+            m.put("alias", c.getAlias());
+            m.put("is_output", c.isOutput());
+            m.put("order", c.getOrder());
+            m.put("used_in_statements", new ArrayList<>(c.getUsedInStatements()));
+            m.put("used_in_routines", new ArrayList<>(c.getUsedInRoutines()));
+            result.add(m);
+        }
+        return result;
+    }
+
+    /**
+     * Сериализация routines → List<Map>.
+     */
+    public List<Map<String, Object>> serializeRoutines() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var entry : routines.entrySet()) {
+            RoutineInfo r = entry.getValue();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("geoid", r.getGeoid());
+            m.put("name", r.getName());
+            m.put("routine_type", r.getRoutineType());
+            m.put("package_geoid", r.getPackageGeoid());
+            m.put("schema_geoid", r.getSchemaGeoid());
+            m.put("return_type", r.getReturnType());
+
+            List<Map<String, String>> params = new ArrayList<>();
+            for (var p : r.getTypedParameters()) {
+                params.add(Map.of("name", p.name(), "type", p.type(), "mode", p.mode()));
+            }
+            m.put("parameters", params);
+
+            List<Map<String, String>> vars = new ArrayList<>();
+            for (var v : r.getTypedVariables()) {
+                vars.add(Map.of("name", v.name(), "type", v.type()));
+            }
+            m.put("variables", vars);
+            result.add(m);
+        }
+        return result;
+    }
+
+    /**
+     * Сериализация statements → List<Map>.
+     */
+    public List<Map<String, Object>> serializeStatements() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var entry : statements.entrySet()) {
+            StatementInfo s = entry.getValue();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("geoid", s.getGeoid());
+            m.put("type", s.getType());
+            m.put("snippet", s.getSnippet());
+            m.put("line_start", s.getLineStart());
+            m.put("line_end", s.getLineEnd());
+            m.put("parent_statement", s.getParentStatementGeoid());
+            m.put("routine_geoid", s.getRoutineGeoid());
+            m.put("alias", s.getAlias());
+            m.put("source_tables", new ArrayList<>(s.getSourceTables().values()));
+            m.put("target_tables", new ArrayList<>(s.getTargetTables().values()));
+            m.put("child_statements", new ArrayList<>(s.getChildStatements()));
+            m.put("columns_output", new ArrayList<>(s.getColumnsOutput().values()));
+            m.put("joins_count", s.getJoins().size());
+            result.add(m);
+        }
+        return result;
+    }
+
+    /**
+     * Построение tables_usage — сводная таблица использования (source/target) по statement'ам.
+     * Порт Python: build_tables_usage()
+     */
+    public List<Map<String, Object>> buildTablesUsage() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var stEntry : statements.entrySet()) {
+            StatementInfo s = stEntry.getValue();
+            for (var srcEntry : s.getSourceTables().entrySet()) {
+                Map<String, Object> usage = new LinkedHashMap<>();
+                usage.put("statement_geoid", s.getGeoid());
+                usage.put("statement_type", s.getType());
+                usage.put("table_geoid", srcEntry.getKey());
+                usage.put("role", "SOURCE");
+                usage.put("table_info", srcEntry.getValue());
+                result.add(usage);
+            }
+            for (var tgtEntry : s.getTargetTables().entrySet()) {
+                Map<String, Object> usage = new LinkedHashMap<>();
+                usage.put("statement_geoid", s.getGeoid());
+                usage.put("statement_type", s.getType());
+                usage.put("table_geoid", tgtEntry.getKey());
+                usage.put("role", "TARGET");
+                usage.put("table_info", tgtEntry.getValue());
+                result.add(usage);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Полная структура — единый dict для Arrow/JSON сериализации.
+     * Порт Python: get_structure()
+     */
+    public Map<String, Object> getFullStructure() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("databases", new ArrayList<>(databases.values()));
+        result.put("schemas", new ArrayList<>(schemas.values()));
+        result.put("tables", serializeTables());
+        result.put("columns", serializeColumns());
+        result.put("routines", serializeRoutines());
+        result.put("statements", serializeStatements());
+        result.put("tables_usage", buildTablesUsage());
+        return result;
+    }
+
+    /**
+     * Полный lineage — список edges для Arrow/JSON сериализации.
+     * Порт Python: get_lineage()
+     */
+    public List<Map<String, Object>> getFullLineage() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (LineageEdge e : lineageEdges) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("source", e.sourceGeoid());
+            m.put("target", e.targetGeoid());
+            m.put("type", e.relationType());
+            m.put("statement_geoid", e.statementGeoid());
+            m.put("usage_context", e.usageContext());
+            result.add(m);
+        }
+        return result;
+    }
+
     // ═══════ Clear ═══════
 
     public void clear() {
         databases.clear();
         schemas.clear();
+        packages.clear();
         tables.clear();
         columns.clear();
         statements.clear();

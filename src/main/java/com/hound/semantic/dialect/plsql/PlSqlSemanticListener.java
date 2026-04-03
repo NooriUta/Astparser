@@ -4,6 +4,7 @@ package com.hound.semantic.dialect.plsql;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParserBaseListener;
+import com.hound.semantic.engine.CanonicalTokenType;
 import com.hound.semantic.listener.BaseSemanticListener;
 import com.hound.semantic.engine.UniversalSemanticEngine;
 import org.antlr.v4.runtime.ParserRuleContext;
@@ -40,11 +41,11 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // ═══════ Create procedure (toplevel) ═══════
     @Override
     public void enterCreate_procedure_body(PlSqlParser.Create_procedure_bodyContext ctx) {
-        // create_procedure_body: CREATE ... PROCEDURE procedure_name ...
         String name = ctx.procedure_name() != null
                 ? BaseSemanticListener.cleanIdentifier(ctx.procedure_name().getText())
                 : "UNKNOWN";
         base.onRoutineEnter(name, "PROCEDURE", base.currentSchema(), null, getStartLine(ctx));
+        extractParameters(ctx.parameter());
     }
 
     @Override
@@ -55,11 +56,11 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // ═══════ Procedure body (в package) ═══════
     @Override
     public void enterProcedure_body(PlSqlParser.Procedure_bodyContext ctx) {
-        // procedure_body: PROCEDURE identifier ...
         String name = ctx.identifier() != null
                 ? BaseSemanticListener.cleanIdentifier(ctx.identifier().getText())
                 : "UNKNOWN";
         base.onRoutineEnter(name, "PROCEDURE", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        extractParameters(ctx.parameter());
     }
 
     @Override
@@ -70,11 +71,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // ═══════ Create function (toplevel) ═══════
     @Override
     public void enterCreate_function_body(PlSqlParser.Create_function_bodyContext ctx) {
-        // create_function_body: CREATE ... FUNCTION function_name ...
         String name = ctx.function_name() != null
                 ? BaseSemanticListener.cleanIdentifier(ctx.function_name().getText())
                 : "UNKNOWN";
         base.onRoutineEnter(name, "FUNCTION", base.currentSchema(), null, getStartLine(ctx));
+        extractParameters(ctx.parameter());
+        if (ctx.type_spec() != null) {
+            base.onRoutineReturnType(ctx.type_spec().getText());
+        }
     }
 
     @Override
@@ -85,16 +89,28 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // ═══════ Function body (в package) ═══════
     @Override
     public void enterFunction_body(PlSqlParser.Function_bodyContext ctx) {
-        // function_body: FUNCTION identifier ...
         String name = ctx.identifier() != null
                 ? BaseSemanticListener.cleanIdentifier(ctx.identifier().getText())
                 : "UNKNOWN";
         base.onRoutineEnter(name, "FUNCTION", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        extractParameters(ctx.parameter());
+        if (ctx.type_spec() != null) {
+            base.onRoutineReturnType(ctx.type_spec().getText());
+        }
     }
 
     @Override
     public void exitFunction_body(PlSqlParser.Function_bodyContext ctx) {
         base.onRoutineExit();
+    }
+
+    // ═══════ Variable declarations ═══════
+    @Override
+    public void enterVariable_declaration(PlSqlParser.Variable_declarationContext ctx) {
+        if (ctx == null || ctx.identifier() == null) return;
+        String varName = BaseSemanticListener.cleanIdentifier(ctx.identifier().getText());
+        String varType = ctx.type_spec() != null ? ctx.type_spec().getText() : "UNKNOWN";
+        base.onRoutineVariable(varName, varType);
     }
 
     // =========================================================================
@@ -138,6 +154,13 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void enterSelect_statement(PlSqlParser.Select_statementContext ctx) {
         base.onStatementEnter("SELECT", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        // Mark the inner subquery position so enterSubquery skips double-scope push.
+        // Grammar: select_statement → select_only_statement → with_clause? subquery
+        if (ctx.select_only_statement() != null && ctx.select_only_statement().subquery() != null) {
+            var sq = ctx.select_only_statement().subquery();
+            base.setIsFirstSubq(sq.start.getLine());
+            base.setIsFirstSubqp(sq.start.getCharPositionInLine());
+        }
     }
 
     @Override
@@ -557,10 +580,17 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void exitSelect_list_elements(PlSqlParser.Select_list_elementsContext ctx) {
         if (ctx == null) return;
-        base.onOutputColumnExit(
-                getStartLine(ctx), getStartCol(ctx),
-                getEndLine(ctx), getEndCol(ctx),
-                extract(ctx));
+        String expr = extract(ctx);
+        boolean isTableStar = false;
+        try {
+            if (ctx.tableview_name() != null && ctx.ASTERISK() != null) {
+                isTableStar = true;
+                expr = ctx.tableview_name().getText() + ".*";
+            }
+        } catch (Exception ignored) {}
+
+        base.onOutputColumnExit(getStartLine(ctx), getStartCol(ctx),
+                getEndLine(ctx), getEndCol(ctx), expr, isTableStar);
     }
 
     // =========================================================================
@@ -670,17 +700,16 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         collectTerminals(ctx, terminals);
         for (TerminalNode tn : terminals) {
             Token token = tn.getSymbol();
-            String tokenName = PlSqlLexer.VOCABULARY.getSymbolicName(token.getType());
-            if (tokenName == null) {
-                tokenName = String.valueOf(token.getType());
-            }
-            // Пропускаем пробелы (если попали в дерево)
-            if ("SPACES".equals(tokenName) || "WS".equals(tokenName)) continue;
+            String rawName = PlSqlLexer.VOCABULARY.getSymbolicName(token.getType());
+            if (rawName == null) rawName = String.valueOf(token.getType());
+
+            CanonicalTokenType canonical = PlSqlTokenMapper.map(rawName);
+            if (canonical == CanonicalTokenType.WHITESPACE) continue;
 
             tokens.add(token.getText());
             tokenDetails.add(Map.of(
                     "text", token.getText(),
-                    "type", tokenName,
+                    "type", canonical.name(),
                     "position", token.getLine() + ":" + token.getCharPositionInLine()
             ));
         }
@@ -860,5 +889,21 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
                 || upper.startsWith("(WITH") || text.length() > 200;
     }
 
-
+    /**
+     * Порт Python: _init_routine_parameters()
+     * Извлекает параметры из списка ParameterContext.
+     */
+    private void extractParameters(List<PlSqlParser.ParameterContext> params) {
+        if (params == null) return;
+        for (PlSqlParser.ParameterContext p : params) {
+            if (p.parameter_name() == null) continue;
+            String name = BaseSemanticListener.cleanIdentifier(p.parameter_name().getText());
+            String type = p.type_spec() != null ? p.type_spec().getText() : "UNKNOWN";
+            String mode = "IN";
+            if (p.IN() != null && !p.IN().isEmpty() && p.OUT() != null && !p.OUT().isEmpty()) mode = "IN OUT";
+            else if (p.OUT() != null && !p.OUT().isEmpty()) mode = "OUT";
+            else if (p.INOUT() != null && !p.INOUT().isEmpty()) mode = "IN OUT";
+            base.onRoutineParameter(name, type, mode);
+        }
+    }
 }

@@ -82,7 +82,44 @@ public class UniversalSemanticEngine {
     public void onStatementExit() {
         String stmt = scopeManager.currentStatement();
         if (stmt != null) {
+            StatementInfo si = builder.getStatements().get(stmt);
+
+            // B2.OC1 — diagnostics
+            if (si != null) {
+                logger.info("DIAG EXIT [{}] type={} outputCols={} atoms={}",
+                        stmt, si.getType(), si.getColumnsOutput().size(),
+                        atomProcessor.getAtomsForStatement(stmt).size());
+            }
+
+            // 1. Resolve star subquery columns
+            resolveStarSubqueryColumnsForStmt(stmt);
+            // 2. Atoms resolution
             atomProcessor.resolveAtomsOnStatementExit(stmt);
+            // 3. Post-process joins (check unresolved sources)
+            postProcessJoins(stmt);
+            // 4. UNION column merging
+            ScopeContext current = scopeManager.peek();
+            if (current != null && current.isUnion()) {
+                mergeUnionColumns(stmt);
+            }
+
+            // B2.SQ1+SQ2 — subquery source registration in parent
+            if (si != null && !si.getSourceSubqueries().isEmpty()) {
+                logger.info("DIAG SUBQUERY [{}]: {} sources", stmt, si.getSourceSubqueries().size());
+            }
+            if (current != null) {
+                String type = current.getStatementType();
+                if ("SUBQUERY".equals(type) || "CTE".equals(type) || "USUBQUERY".equals(type)) {
+                    String parentStmt = current.getParentStatement();
+                    if (parentStmt != null) {
+                        StatementInfo parentInfo = builder.getStatements().get(parentStmt);
+                        if (parentInfo != null) {
+                            String alias = current.getAlias();
+                            parentInfo.addSourceSubquery(stmt, alias, type);
+                        }
+                    }
+                }
+            }
         }
         ScopeContext popped = scopeManager.pop();
         logger.debug("Statement EXIT: {} [{}]",
@@ -122,12 +159,15 @@ public class UniversalSemanticEngine {
         if (currentStmt != null) {
             var stmtInfo = builder.getStatements().get(currentStmt);
             if (stmtInfo != null) {
+                TableInfo tbl = builder.getTables().get(tableGeoid);
+                String tblName = tbl != null ? tbl.tableName() : tableName;
+                String tblType = tbl != null ? tbl.tableType() : "table";
                 if ("TARGET".equals(role)) {
-                    stmtInfo.addTargetTable(tableGeoid, alias);
+                    stmtInfo.addTargetTable(tableGeoid, alias, tblName, tblType);
                     scopeManager.peek().setTargetTable(tableGeoid);
                     builder.addLineageEdge(currentStmt, tableGeoid, "WRITES_TO", currentStmt);
                 } else {
-                    stmtInfo.addSourceTable(tableGeoid, alias);
+                    stmtInfo.addSourceTable(tableGeoid, alias, tblName, tblType);
                     builder.addLineageEdge(tableGeoid, currentStmt, "READS_FROM", currentStmt);
                 }
             }
@@ -182,9 +222,15 @@ public class UniversalSemanticEngine {
             }
         }
 
-        // Add column to structure
+        // Add column to structure + usage tracking
         if (tableGeoid != null) {
             builder.addColumn(tableGeoid, columnPart, null, null);
+            String colGeoid = tableGeoid + "." + columnPart.toUpperCase();
+            ColumnInfo colInfo = builder.getColumns().get(colGeoid);
+            if (colInfo != null) {
+                colInfo.addUsedInStatement(currentStmt);
+                colInfo.addUsedInRoutine(scopeManager.currentRoutine());
+            }
         }
 
         // Register as atom
@@ -248,6 +294,9 @@ public class UniversalSemanticEngine {
      */
     public void onRoutineEnter(String name, String routineType, String schemaGeoid,
                                String packageGeoid, int lineStart) {
+        if (packageGeoid != null && !packageGeoid.isBlank()) {
+            builder.ensurePackage(packageGeoid, schemaGeoid);
+        }
         // currentRoutine() = geoid parent routine (для вложенности)
         String parentRoutine = scopeManager.currentRoutine();
         String geoid = builder.addRoutine(name, routineType, schemaGeoid, packageGeoid,
@@ -266,6 +315,30 @@ public class UniversalSemanticEngine {
         ScopeContext popped = scopeManager.pop();
         logger.debug("Routine EXIT: {}",
                 popped != null ? popped.getRoutineGeoid() : "?");
+    }
+
+    public void onRoutineParameter(String name, String type, String mode) {
+        String routine = scopeManager.currentRoutine();
+        if (routine != null) {
+            RoutineInfo ri = builder.getRoutines().get(routine);
+            if (ri != null) ri.addTypedParameter(name, type, mode);
+        }
+    }
+
+    public void onRoutineVariable(String name, String type) {
+        String routine = scopeManager.currentRoutine();
+        if (routine != null) {
+            RoutineInfo ri = builder.getRoutines().get(routine);
+            if (ri != null) ri.addTypedVariable(name, type);
+        }
+    }
+
+    public void onRoutineReturnType(String returnType) {
+        String routine = scopeManager.currentRoutine();
+        if (routine != null) {
+            RoutineInfo ri = builder.getRoutines().get(routine);
+            if (ri != null) ri.setReturnType(returnType);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -360,16 +433,77 @@ public class UniversalSemanticEngine {
     // Post-walk resolution
     // ═══════════════════════════════════════════════════════════════
 
+    /** Вызывается из onStatementExit для текущего statement */
+    private void resolveStarSubqueryColumnsForStmt(String stmtGeoid) {
+        StatementInfo si = builder.getStatements().get(stmtGeoid);
+        if (si != null) resolveStarSubqueryColumns(stmtGeoid, si);
+    }
+
+    private void postProcessJoins(String stmtGeoid) {
+        StatementInfo si = builder.getStatements().get(stmtGeoid);
+        if (si == null) return;
+        for (JoinInfo j : si.getJoins()) {
+            if (j.sourceTableGeoid() == null && j.sourceTableAlias() != null) {
+                ResolvedRef ref = nameResolver.resolve(j.sourceTableAlias(), "any", stmtGeoid);
+                if (ref.isResolved()) {
+                    logger.debug("Post-resolved JOIN source: {} → {}", j.sourceTableAlias(), ref.getGeoid());
+                }
+            }
+        }
+    }
+
+    private void mergeUnionColumns(String stmtGeoid) {
+        StatementInfo si = builder.getStatements().get(stmtGeoid);
+        if (si == null) return;
+        for (String childGeoid : si.getChildStatements()) {
+            StatementInfo child = builder.getStatements().get(childGeoid);
+            if (child != null && child.getColumnsOutput() != null) {
+                for (var ce : child.getColumnsOutput().entrySet()) {
+                    si.getColumnsOutput().putIfAbsent(ce.getKey(), ce.getValue());
+                }
+            }
+        }
+    }
+
     /**
      * Порт Python: resolve_pending_columns()
      * Вызывается ПОСЛЕ полного walk AST.
      * Разрешает columns, которые не могли быть resolved inline.
      */
+    private final List<Map<String, String>> pendingColumns = new ArrayList<>();
+
+    public void addPendingColumn(String columnRef, String statementGeoid) {
+        pendingColumns.add(Map.of("ref", columnRef, "stmt", statementGeoid));
+    }
+
     public void resolvePendingColumns() {
+        // 1. Star subquery columns
         for (var entry : builder.getStatements().entrySet()) {
-            StatementInfo stmtInfo = entry.getValue();
-            resolveStarSubqueryColumns(entry.getKey(), stmtInfo);
+            resolveStarSubqueryColumns(entry.getKey(), entry.getValue());
         }
+        // 2. Pending column refs
+        logger.debug("Resolving {} pending columns", pendingColumns.size());
+        var resolved = new ArrayList<Integer>();
+        for (int i = 0; i < pendingColumns.size(); i++) {
+            var p = pendingColumns.get(i);
+            String[] parts = p.get("ref").split("\\.", 2);
+            String tPart = parts.length > 1 ? parts[0] : null;
+            String cPart = parts.length > 1 ? parts[1] : parts[0];
+            String tGeoid = null;
+            if (tPart != null) {
+                var ref = nameResolver.resolve(tPart, "any", p.get("stmt"));
+                if (ref.isResolved()) tGeoid = ref.getGeoid();
+            } else {
+                var ref = nameResolver.resolveImplicitTable(p.get("stmt"));
+                if (ref.isResolved()) tGeoid = ref.getGeoid();
+            }
+            if (tGeoid != null) {
+                builder.addColumn(tGeoid, cPart, null, null);
+                resolved.add(i);
+            }
+        }
+        for (int i = resolved.size() - 1; i >= 0; i--) pendingColumns.remove((int) resolved.get(i));
+        logger.debug("Pending remaining: {}", pendingColumns.size());
     }
 
     /**
