@@ -115,6 +115,10 @@ public abstract class BaseSemanticListener {
     public String currentSchema()        { return (String) current.get("schema"); }
     public String currentPackage()       { return (String) current.get("package"); }
     public String parentStatement()      { return (String) current.get("parent_statement"); }
+    public String currentTable()         { return (String) current.get("table"); }
+    public String currentTableAlias()    { return (String) current.get("table_alias"); }
+
+    public void setCurrentTableAlias(String alias) { current.put("table_alias", alias); }
 
     public boolean isInDmlTarget()   { return Boolean.TRUE.equals(current.get("in_dml_target")); }
     public boolean isInJoinContext() { return Boolean.TRUE.equals(current.get("in_join_context")); }
@@ -488,7 +492,8 @@ public abstract class BaseSemanticListener {
     // =========================================================================
 
     @SuppressWarnings("unchecked")
-    public void addAtom(String text, int line, int col, int endLine, int endCol, boolean isComplex) {
+    public void addAtom(String text, int line, int col, int endLine, int endCol, boolean isComplex,
+                        List<String> tokens, List<Map<String, String>> tokenDetails, int nestedAtomCount) {
         String parentCtx = getCurrentParentContext();
         Map<String, Object> atomContext = new LinkedHashMap<>();
         atomContext.put("text", text);
@@ -499,6 +504,9 @@ public abstract class BaseSemanticListener {
         atomContext.put("is_column_reference", false);
         atomContext.put("status", null);
         atomContext.put("output_column_sequence", null);
+        atomContext.put("tokens", tokens);
+        atomContext.put("token_details", tokenDetails);
+        atomContext.put("nested_atoms_count", nestedAtomCount);
 
         String atomKey = text + "~" + line + ":" + col;
         String stmt = currentStatement();
@@ -510,7 +518,8 @@ public abstract class BaseSemanticListener {
             if (unattached != null) unattached.put(atomKey, atomContext);
         }
         current.put("atom_context", atomContext);
-        engine.onAtom(text, line, col, endLine, endCol, parentCtx != null ? parentCtx : "UNKNOWN");
+        engine.onAtom(text, line, col, endLine, endCol, parentCtx != null ? parentCtx : "UNKNOWN",
+                      isComplex, tokens, tokenDetails, nestedAtomCount);
     }
 
     // =========================================================================
@@ -635,8 +644,80 @@ public abstract class BaseSemanticListener {
         current.put("column_alias", alias != null ? cleanIdentifier(alias) : null);
     }
 
-    public void onAtom(String text, int line, int col, int endLine, int endCol, boolean isComplex) {
-        addAtom(text, line, col, endLine, endCol, isComplex);
+    public void onAtom(String text, int line, int col, int endLine, int endCol, boolean isComplex,
+                       List<String> tokens, List<Map<String, String>> tokenDetails, int nestedAtomCount) {
+        addAtom(text, line, col, endLine, endCol, isComplex, tokens, tokenDetails, nestedAtomCount);
+    }
+
+    // ═══ Output column binding (port from Python exitSelect_list_elements) ═══
+
+    public void onOutputColumnEnter(int line, int col) {
+        current.put("column_output_start_line", line);
+        current.put("column_output_start_col", col);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void onOutputColumnExit(int startLine, int startCol, int endLine, int endCol, String expressionText) {
+        String stmt = currentStatement();
+        if (stmt == null) return;
+
+        String alias = (String) current.get("column_alias");
+
+        var stmtInfo = engine.getBuilder().getStatements().get(stmt);
+        if (stmtInfo == null) return;
+
+        int order = stmtInfo.getColumnsOutput().size() + 1;
+        Map<String, Object> columnInfo = new LinkedHashMap<>();
+        columnInfo.put("order", order);
+        columnInfo.put("name", alias != null ? alias : expressionText);
+        columnInfo.put("expression", expressionText);
+        columnInfo.put("alias", alias);
+
+        stmtInfo.addColumnOutput(alias != null ? alias : expressionText, columnInfo);
+
+        // Position-based atom binding
+        engine.getAtomProcessor().bindAtomsToOutputColumn(
+                stmt, startLine, startCol, endLine, endCol, order);
+
+        current.put("column_alias", null);
+        current.put("column_output", null);
+    }
+
+    // ═══ JOIN complete (port from Python exitJoin_clause) ═══
+
+    public void onJoinComplete(String joinType, List<String> conditions, String sourceAlias, int lineStart) {
+        String currentStmt = currentStatement();
+        if (currentStmt == null) return;
+
+        // Target = table being joined (set by enterTable_ref_aux within join)
+        String targetName = currentTable();
+        String targetAlias = currentTableAlias();
+
+        // Resolve source
+        String sourceGeoid = null;
+        String sourceType = "table";
+        if (sourceAlias != null && !sourceAlias.isBlank()) {
+            var resolved = engine.getNameResolver().resolve(sourceAlias, "any", currentStmt);
+            if (resolved.isResolved()) {
+                sourceGeoid = resolved.getGeoid();
+                sourceType = resolved.getType().toLowerCase();
+            }
+        }
+
+        // Resolve target
+        String targetGeoid = null;
+        String targetType = "table";
+        if (targetName != null && !targetName.isBlank()) {
+            var resolved = engine.getNameResolver().resolve(targetName, "any", currentStmt);
+            if (resolved.isResolved()) {
+                targetGeoid = resolved.getGeoid();
+                targetType = resolved.getType().toLowerCase();
+            }
+        }
+
+        String conditionText = conditions != null ? String.join(" AND ", conditions) : "";
+        engine.onJoinComplete(joinType, targetGeoid, targetAlias, targetType,
+                sourceGeoid, sourceAlias, sourceType, conditionText, lineStart);
     }
 
     // =========================================================================

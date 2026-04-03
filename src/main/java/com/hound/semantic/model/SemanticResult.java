@@ -37,6 +37,21 @@ public class SemanticResult {
     public List<LineageEdge> getLineage() { return lineage; }
     public Map<String, Object> getAtoms() { return atoms; }
 
+    /**
+     * Arrow Flight compatible serialization.
+     */
+    public Map<String, Object> toArrowCompatibleMap() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("structure", structure);
+        result.put("lineage", lineage);
+        result.put("atoms", atoms);
+        result.put("session_id", sessionId);
+        result.put("file_path", filePath);
+        result.put("dialect", dialect);
+        result.put("processing_time_ms", processingTimeMs);
+        return result;
+    }
+
     @Override
     public String toString() {
         return "SemanticResult{" +

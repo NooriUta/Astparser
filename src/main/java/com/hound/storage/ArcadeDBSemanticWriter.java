@@ -491,16 +491,21 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
             for (var at : atoms.entrySet()) {
                 Map<String, Object> a = at.getValue();
-                rcmd("INSERT INTO DaliAtom SET session_id=?, statement_geoid=?, atom_text=?, " +
+                // atom_text may contain SQL string literals with quotes (e.g. 'Y', 'PENDING')
+                // → store as Base64 to avoid SQL parsing errors; use atom_id (MD5) for edge lookups
+                String atomId = md5(stmtGeoid + ":" + at.getKey());
+                String atomTextB64 = Base64.getEncoder()
+                        .encodeToString(at.getKey().getBytes(StandardCharsets.UTF_8));
+                rcmd("INSERT INTO DaliAtom SET session_id=?, statement_geoid=?, atom_id=?, atom_text_b64=?, " +
                                 "atom_context=?, parent_context=?, position=?, sposition=?, " +
                                 "is_complex=?, is_column_reference=?, is_function_call=?, is_constant=?, " +
-                                "is_routine_param=?, is_routine_var=?, table_name=?, column_name=?, " +
+                                "is_routine_param=?, is_routine_var=?, table_name=?, " +
                                 "table_geoid=?, status=?, output_column_sequence=?, nested_atoms_count=?",
-                        sid, stmtGeoid, at.getKey(),
+                        sid, stmtGeoid, atomId, atomTextB64,
                         a.get("atom_context"), a.get("parent_context"), a.get("position"), a.get("sposition"),
                         a.get("is_complex"), a.get("is_column_reference"), a.get("is_function_call"),
                         a.get("is_constant"), a.get("is_routine_param"), a.get("is_routine_var"),
-                        a.get("table_name"), a.get("column_name"),
+                        a.get("table_name"),
                         a.get("table_geoid"), a.get("status"),
                         a.get("output_column_sequence"), a.get("nested_atoms_count"));
             }
@@ -600,13 +605,16 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
             for (var at : atoms.entrySet()) {
                 Map<String, Object> a = at.getValue();
+                // atom_id is the stable lookup key (MD5 of stmtGeoid:atomKey)
+                String atomId = md5(stmtGeoid + ":" + at.getKey());
+
                 edgeRemote("HAS_ATOM", "DaliStatement", "stmt_geoid", stmtGeoid,
-                        "DaliAtom", "atom_text", at.getKey(), sid, "statement_geoid", stmtGeoid);
+                        "DaliAtom", "atom_id", atomId, sid, "statement_geoid", stmtGeoid);
 
                 String tableGeoid = (String) a.get("table_geoid");
                 if (tableGeoid != null) {
                     edgeRemote("ATOM_REF_TABLE",
-                            "DaliAtom", "atom_text", at.getKey(),
+                            "DaliAtom", "atom_id", atomId,
                             "DaliTable", "table_geoid", tableGeoid,
                             sid, "statement_geoid", stmtGeoid);
 
@@ -614,7 +622,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     if (colName != null) {
                         String colGeoid = tableGeoid + "." + colName.toUpperCase();
                         edgeRemote("ATOM_REF_COLUMN",
-                                "DaliAtom", "atom_text", at.getKey(),
+                                "DaliAtom", "atom_id", atomId,
                                 "DaliColumn", "column_geoid", colGeoid,
                                 sid, "statement_geoid", stmtGeoid);
                     }
@@ -721,7 +729,16 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private static String esc(String s) {
         if (s == null) return "";
-        return s.replace("'", "''");  // ArcadeDB SQL: double-quote, not backslash-escape
+        // 1. Strip SQL line comments (-- ... \n) that break ArcadeDB string literals
+        s = s.replaceAll("--[^\n\r]*", "");
+        // 2. Normalize whitespace: replace newlines/tabs with spaces, collapse multiple spaces
+        s = s.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ');
+        s = s.replaceAll(" {2,}", " ").trim();
+        // 3. Escape backslashes and single quotes for ArcadeDB SQL
+        //    ArcadeDB remote mode uses backslash-escaping, NOT '' doubling
+        s = s.replace("\\", "\\\\");
+        s = s.replace("'", "\\'");
+        return s;
     }
 
     private static String md5(String s) {

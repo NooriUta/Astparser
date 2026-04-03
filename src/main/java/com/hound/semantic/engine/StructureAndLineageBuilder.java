@@ -81,6 +81,10 @@ public class StructureAndLineageBuilder {
         return statements;
     }
 
+    public Map<String, RoutineInfo> getRoutines() {
+        return routines;
+    }
+
     // ═══════ Routines ═══════
 
     /** Backward-compatible (без parentRoutine) */

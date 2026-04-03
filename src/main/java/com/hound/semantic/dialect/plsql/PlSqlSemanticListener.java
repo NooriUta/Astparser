@@ -1,14 +1,20 @@
 // src/main/java/com/hound/semantic/dialect/plsql/PlSqlSemanticListener.java
 package com.hound.semantic.dialect.plsql;
 
+import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParserBaseListener;
 import com.hound.semantic.listener.BaseSemanticListener;
 import com.hound.semantic.engine.UniversalSemanticEngine;
 import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.tree.ParseTree;
+import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.lang.reflect.Method;
-import java.util.List;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * PlSqlSemanticListener — Java-аналог Python PlSqlAnalyzerListener.
@@ -207,6 +213,52 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         base.setIsFirstSubqp(null);
     }
 
+    // ═══════ OPEN FOR (ref cursor) ═══════
+
+    @Override
+    public void enterOpen_for_statement(PlSqlParser.Open_for_statementContext ctx) {
+        if (ctx == null) return;
+        PlSqlParser.Select_statementContext selectCtx = ctx.select_statement();
+        if (selectCtx != null) {
+            base.setIsFirstSubq(selectCtx.getStart().getLine());
+            base.setIsFirstSubqp(selectCtx.getStart().getCharPositionInLine());
+            base.onStatementEnter("REF CURSOR", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        }
+    }
+
+    @Override
+    public void exitOpen_for_statement(PlSqlParser.Open_for_statementContext ctx) {
+        if (ctx != null && ctx.select_statement() != null) {
+            base.onStatementExit();
+            base.setIsFirstSubq(null);
+            base.setIsFirstSubqp(null);
+        }
+    }
+
+    // ═══════ LOOP с cursor (FOR rec IN SELECT) ═══════
+
+    @Override
+    public void enterLoop_statement(PlSqlParser.Loop_statementContext ctx) {
+        if (ctx == null || ctx.cursor_loop_param() == null) return;
+        PlSqlParser.Cursor_loop_paramContext cursorParam = ctx.cursor_loop_param();
+        PlSqlParser.Select_statementContext selectCtx = cursorParam.select_statement();
+        if (selectCtx != null) {
+            base.setIsFirstSubq(selectCtx.getStart().getLine());
+            base.setIsFirstSubqp(selectCtx.getStart().getCharPositionInLine());
+            base.onStatementEnter("DINAMIC_CURSOR", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        }
+    }
+
+    @Override
+    public void exitLoop_statement(PlSqlParser.Loop_statementContext ctx) {
+        if (ctx != null && ctx.cursor_loop_param() != null
+                && ctx.cursor_loop_param().select_statement() != null) {
+            base.onStatementExit();
+            base.setIsFirstSubq(null);
+            base.setIsFirstSubqp(null);
+        }
+    }
+
     // =========================================================================
     // CTE / WITH clause
     // =========================================================================
@@ -295,6 +347,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (tableName != null && !tableName.isBlank()) {
             base.onTableReference(tableName, tableAlias, getStartLine(ctx), getEndLine(ctx));
             base.setCurrentTable(tableName);
+            base.setCurrentTableAlias(tableAlias);
         }
 
         base.setSubqueryAlias(tableAlias);
@@ -349,7 +402,86 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void exitJoin_clause(PlSqlParser.Join_clauseContext ctx) {
+        if (ctx == null) {
+            base.onJoinExit();
+            return;
+        }
+
+        // Порт Python: exitJoin_clause — полная обработка
+
+        // 1. Join type
+        String joinType = extractJoinType(ctx);
+
+        // 2. Conditions
+        List<String> conditions = new ArrayList<>();
+        try {
+            var onParts = ctx.join_on_part();
+            if (onParts != null) {
+                for (var onPart : onParts) {
+                    if (onPart.condition() != null) {
+                        conditions.add(extract(onPart.condition()));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Grammar may not have join_on_part, fallback
+        }
+
+        // 3. Source table determination через regex условий
+        String targetName = base.currentTable();
+        String targetAlias = base.currentTableAlias();
+        String filterAlias = targetAlias != null ? targetAlias : targetName;
+        String sourceAlias = determineJoinSourceFromConditions(conditions, filterAlias);
+
+        // 4. Complete join registration
+        base.onJoinComplete(joinType, conditions, sourceAlias, getStartLine(ctx));
         base.onJoinExit();
+    }
+
+    /**
+     * Определяет тип JOIN из контекста.
+     * Порт Python: _get_join_type()
+     */
+    private String extractJoinType(PlSqlParser.Join_clauseContext ctx) {
+        String text = extract(ctx).toUpperCase();
+        int joinIdx = text.indexOf("JOIN");
+        if (joinIdx < 0) {
+            if (text.contains("CROSS APPLY")) return "CROSS APPLY";
+            if (text.contains("OUTER APPLY")) return "OUTER APPLY";
+            return "JOIN";
+        }
+        String prefix = text.substring(0, joinIdx);
+        if (prefix.contains("NATURAL")) return "NATURAL JOIN";
+        if (prefix.contains("CROSS")) return "CROSS JOIN";
+        StringBuilder type = new StringBuilder();
+        if (prefix.contains("FULL"))   type.append("FULL ");
+        if (prefix.contains("LEFT"))   type.append("LEFT ");
+        if (prefix.contains("RIGHT"))  type.append("RIGHT ");
+        if (prefix.contains("OUTER"))  type.append("OUTER ");
+        if (prefix.contains("INNER"))  type.append("INNER ");
+        type.append("JOIN");
+        return type.toString().trim();
+    }
+
+    /**
+     * Порт Python: _determine_join_source_table()
+     * Определяет source table из ON conditions.
+     */
+    private String determineJoinSourceFromConditions(List<String> conditions, String targetRef) {
+        Set<String> usedAliases = new LinkedHashSet<>();
+        Pattern p = Pattern.compile("\\b([a-zA-Z_]\\w*)\\.\\w+\\b");
+        for (String condition : conditions) {
+            Matcher m = p.matcher(condition);
+            while (m.find()) {
+                usedAliases.add(m.group(1).toUpperCase());
+            }
+        }
+        // Убираем alias/name target таблицы
+        if (targetRef != null) {
+            usedAliases.remove(targetRef.toUpperCase());
+        }
+        // Оставшийся alias = source
+        return usedAliases.isEmpty() ? null : usedAliases.iterator().next();
     }
 
     // =========================================================================
@@ -364,6 +496,25 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void exitSelected_list(PlSqlParser.Selected_listContext ctx) {
         base.onSelectedListExit();
+    }
+
+    // =========================================================================
+    // Output column binding (select_list_elements)
+    // =========================================================================
+
+    @Override
+    public void enterSelect_list_elements(PlSqlParser.Select_list_elementsContext ctx) {
+        if (ctx == null) return;
+        base.onOutputColumnEnter(getStartLine(ctx), getStartCol(ctx));
+    }
+
+    @Override
+    public void exitSelect_list_elements(PlSqlParser.Select_list_elementsContext ctx) {
+        if (ctx == null) return;
+        base.onOutputColumnExit(
+                getStartLine(ctx), getStartCol(ctx),
+                getEndLine(ctx), getEndCol(ctx),
+                extract(ctx));
     }
 
     // =========================================================================
@@ -448,9 +599,77 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterAtom(PlSqlParser.AtomContext ctx) {
         if (ctx == null) return;
         String text = ctx.getText() != null ? ctx.getText() : "";
-        boolean isComplex = ctx.getStop() != null && ctx.getStart() != null
-                && ctx.getStop().getTokenIndex() > ctx.getStart().getTokenIndex();
-        base.onAtom(text, getStartLine(ctx), getStartCol(ctx), getEndLine(ctx), getEndCol(ctx), isComplex);
+
+        // Извлечение token details — ПОРТ из Python enterAtom
+        List<String> tokens = new ArrayList<>();
+        List<Map<String, String>> tokenDetails = new ArrayList<>();
+        collectTerminalTokens(ctx, tokens, tokenDetails);
+
+        boolean isComplex = tokens.size() > 1;
+        int nestedAtomCount = countNestedAtoms(ctx);
+
+        base.onAtom(text, getStartLine(ctx), getStartCol(ctx),
+                getEndLine(ctx), getEndCol(ctx), isComplex,
+                tokens, tokenDetails, nestedAtomCount);
+    }
+
+    /**
+     * Собирает все terminal-токены из поддерева контекста.
+     * Аналог Python: итерация по токенам от ctx.start до ctx.stop.
+     */
+    private void collectTerminalTokens(ParserRuleContext ctx,
+                                        List<String> tokens,
+                                        List<Map<String, String>> tokenDetails) {
+        List<TerminalNode> terminals = new ArrayList<>();
+        collectTerminals(ctx, terminals);
+        for (TerminalNode tn : terminals) {
+            Token token = tn.getSymbol();
+            String tokenName = PlSqlLexer.VOCABULARY.getSymbolicName(token.getType());
+            if (tokenName == null) {
+                tokenName = String.valueOf(token.getType());
+            }
+            // Пропускаем пробелы (если попали в дерево)
+            if ("SPACES".equals(tokenName) || "WS".equals(tokenName)) continue;
+
+            tokens.add(token.getText());
+            tokenDetails.add(Map.of(
+                    "text", token.getText(),
+                    "type", tokenName,
+                    "position", token.getLine() + ":" + token.getCharPositionInLine()
+            ));
+        }
+    }
+
+    private void collectTerminals(ParseTree tree, List<TerminalNode> result) {
+        if (tree instanceof TerminalNode) {
+            result.add((TerminalNode) tree);
+        } else {
+            for (int i = 0; i < tree.getChildCount(); i++) {
+                collectTerminals(tree.getChild(i), result);
+            }
+        }
+    }
+
+    /**
+     * Подсчитывает вложенные AtomContext в поддереве (не считая сам ctx).
+     */
+    private int countNestedAtoms(PlSqlParser.AtomContext ctx) {
+        int count = 0;
+        for (int i = 0; i < ctx.getChildCount(); i++) {
+            count += countNestedAtomsRecursive(ctx.getChild(i));
+        }
+        return count;
+    }
+
+    private int countNestedAtomsRecursive(ParseTree tree) {
+        int count = 0;
+        if (tree instanceof PlSqlParser.AtomContext) {
+            count++;
+        }
+        for (int i = 0; i < tree.getChildCount(); i++) {
+            count += countNestedAtomsRecursive(tree.getChild(i));
+        }
+        return count;
     }
 
     // =========================================================================

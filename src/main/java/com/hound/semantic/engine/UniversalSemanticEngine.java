@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.Map;
 
 /**
  * UniversalSemanticEngine — главный оркестратор семантического анализа.
@@ -280,10 +281,13 @@ public class UniversalSemanticEngine {
     // Atom
     // ═══════════════════════════════════════════════════════════════
 
-    public void onAtom(String text, int line, int col, int endLine, int endCol, String context) {
+    public void onAtom(String text, int line, int col, int endLine, int endCol, String context,
+                       boolean isComplex, List<String> tokens,
+                       List<Map<String, String>> tokenDetails, int nestedAtomCount) {
         String currentStmt = scopeManager.currentStatement();
         String parentContext = scopeManager.getActiveClause();
-        atomProcessor.registerAtom(text, line, col, endLine, endCol, context, currentStmt, parentContext);
+        atomProcessor.registerAtom(text, line, col, endLine, endCol, context, currentStmt, parentContext,
+                isComplex, tokens, tokenDetails, nestedAtomCount);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -328,6 +332,53 @@ public class UniversalSemanticEngine {
     public SemanticResult getResult(String sessionId, String filePath, String dialect, long processingTimeMs) {
         return new SemanticResult(sessionId, filePath, dialect, processingTimeMs,
                 builder.getStructure(), builder.getLineageEdges(), atomProcessor.getAtoms());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Post-walk resolution
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Порт Python: resolve_pending_columns()
+     * Вызывается ПОСЛЕ полного walk AST.
+     * Разрешает columns, которые не могли быть resolved inline.
+     */
+    public void resolvePendingColumns() {
+        for (var entry : builder.getStatements().entrySet()) {
+            StatementInfo stmtInfo = entry.getValue();
+            resolveStarSubqueryColumns(entry.getKey(), stmtInfo);
+        }
+    }
+
+    /**
+     * Порт Python: resolve_star_subquery_columns()
+     * Восстановление columns из подзапросов при SELECT *.
+     */
+    private void resolveStarSubqueryColumns(String stmtGeoid, StatementInfo stmtInfo) {
+        var outputCols = stmtInfo.getColumnsOutput();
+        if (outputCols == null || outputCols.isEmpty()) return;
+
+        for (var colEntry : new ArrayList<>(outputCols.entrySet())) {
+            Map<String, Object> colInfo = colEntry.getValue();
+            String colName = (String) colInfo.get("name");
+            if (!"*".equals(colName)) continue;
+
+            // SELECT * — берём columns из source tables/subqueries
+            for (String sourceGeoid : stmtInfo.getSourceTableGeoids()) {
+                var sourceStmt = builder.getStatements().get(sourceGeoid);
+                if (sourceStmt != null && sourceStmt.getColumnsOutput() != null) {
+                    for (var srcCol : sourceStmt.getColumnsOutput().entrySet()) {
+                        String newColName = srcCol.getKey();
+                        if (!outputCols.containsKey(newColName)) {
+                            Map<String, Object> newCol = new LinkedHashMap<>(srcCol.getValue());
+                            newCol.put("source_type", "subquery_star");
+                            newCol.put("source_subquery", sourceGeoid);
+                            outputCols.put(newColName, newCol);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     public void clear() {
