@@ -481,13 +481,18 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // HELPERS
     // =========================================================================
 
-    private String extract(ParserRuleContext ctx) {
-        if (ctx == null) return "";
-        try {
-            String t = ctx.getText();
-            return t != null && t.length() > 300 ? t.substring(0, 300) + "..." : t;
-        } catch (Exception e) { return ""; }
-    }
+
+       private String extract(ParserRuleContext ctx) {
+           if (ctx == null || ctx.getStart() == null || ctx.getStop() == null) return "";
+           try {
+               return ctx.getStart().getInputStream()
+                       .getText(new org.antlr.v4.runtime.misc.Interval(
+                               ctx.getStart().getStartIndex(),
+                               ctx.getStop().getStopIndex()));
+           } catch (Exception e) {
+               return "";
+           }
+       }
 
     private int getStartLine(ParserRuleContext ctx) {
         return (ctx != null && ctx.getStart() != null) ? ctx.getStart().getLine() : 0;
