@@ -28,11 +28,15 @@ import org.slf4j.LoggerFactory;
  *   Always active (not only --diag mode). Triggers on: quotes, $, :, (), space, dot
  *   in schema name — helps trace where incorrect schema names originate.
  *
+ * Schema v13 additions (HASH indexes):
+ *   UNIQUE → UNIQUE_HASH, NOTUNIQUE → NOTUNIQUE_HASH for all point-lookup indexes.
+ *   SQL syntax confirmed: UNIQUE_HASH / NOTUNIQUE_HASH (not "HASH" standalone).
+ *   Compound UNIQUE also supports UNIQUE_HASH. NULL_STRATEGY SKIP works with all HASH variants.
+ *   Added session_id NOTUNIQUE_HASH for all 10 vertex types that carry session_id.
+ *   Added DaliStatement(short_name) NOTUNIQUE_HASH (was created manually, now managed).
+ *
  * Schema v12 additions (NULL_STRATEGY SKIP):
- *   All UNIQUE and NOTUNIQUE (LSM_TREE) indexes rebuilt with NULL_STRATEGY SKIP —
- *   null keys are silently skipped instead of indexed as a shared bucket entry.
- *   ArcadeDB Java API (24.11.1): Schema.INDEX_TYPE = {LSM_TREE, FULL_TEXT, HSNW}.
- *   HASH does not exist — LSM_TREE is the only available type for lookup indexes.
+ *   All UNIQUE and NOTUNIQUE (LSM_TREE) indexes rebuilt with NULL_STRATEGY SKIP.
  *
  * Schema v11 additions (S1.FT):
  *   FULLTEXT indexes: table_name_ft, column_name_ft, routine_name_ft, package_name_ft,
@@ -286,11 +290,19 @@ public final class SchemaInitializer {
         tryCreateFullTextIndex(db, schema, "DaliParameter", "DaliParameter[param_name_ft]", "param_name");
         tryCreateFullTextIndex(db, schema, "DaliVariable",  "DaliVariable[var_name_ft]",    "var_name");
 
-        // ── Schema v10: NOTUNIQUE session_id indexes for per-session query performance (S1.IDX) ──
+        // ── Schema v10→v13: NOTUNIQUE_HASH session_id indexes — all vertex types with session_id ──
         tryCreateNonUniqueIndex(db, schema, "DaliStatement",   "DaliStatement[session_id]",   "session_id");
         tryCreateNonUniqueIndex(db, schema, "DaliRoutine",     "DaliRoutine[session_id]",     "session_id");
         tryCreateNonUniqueIndex(db, schema, "DaliAtom",        "DaliAtom[session_id]",        "session_id");
         tryCreateNonUniqueIndex(db, schema, "DaliJoin",        "DaliJoin[session_id]",        "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliTable",       "DaliTable[session_id]",       "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliColumn",      "DaliColumn[session_id]",      "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliParameter",   "DaliParameter[session_id]",   "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliVariable",    "DaliVariable[session_id]",    "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliOutputColumn","DaliOutputColumn[session_id]","session_id");
+
+        // ── Schema v13: NOTUNIQUE_HASH for point-lookup fields ──
+        tryCreateNonUniqueIndex(db, schema, "DaliStatement",   "DaliStatement[short_name]",   "short_name");
 
         // Meta version
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");
@@ -375,12 +387,12 @@ public final class SchemaInitializer {
                 "DROP INDEX IF EXISTS `DaliSchema[canonical_geoid]`",
                 "DROP INDEX IF EXISTS `DaliSchema[db_name]`",
                 "DROP INDEX IF EXISTS `DaliDatabase[db_name]`",
-                // v9: compound UNIQUE indexes for canonical vertex deduplication (v12: +NULL_STRATEGY SKIP)
-                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_geoid) UNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliSchema (db_name, schema_geoid) UNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (db_name, table_geoid) UNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (db_name, column_geoid) UNIQUE NULL_STRATEGY SKIP",
+                // v9: compound UNIQUE_HASH indexes for canonical vertex deduplication (v13: LSM→HASH)
+                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliSchema (db_name, schema_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (db_name, table_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (db_name, column_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
                 // v10: STRING property declarations for full-text search + reliable indexing
                 "CREATE PROPERTY DaliTable.table_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliTable.table_geoid IF NOT EXISTS STRING",
@@ -440,11 +452,18 @@ public final class SchemaInitializer {
                 "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT",
                 "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT",
                 "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT",
-                // v10: NOTUNIQUE session_id indexes for per-session query performance (v12: +NULL_STRATEGY SKIP)
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
+                // v10→v13: NOTUNIQUE_HASH session_id — all vertex types carrying session_id
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliParameter (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliVariable (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                // v13: point-lookup HASH indexes
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (short_name) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
         };
     }
 
@@ -458,16 +477,16 @@ public final class SchemaInitializer {
         }
     }
 
-    /** Creates a single-field UNIQUE index with NULL_STRATEGY SKIP. */
+    /** Creates a single-field UNIQUE_HASH index with NULL_STRATEGY SKIP. */
     private static void tryCreateUniqueIndex(Database db, Schema schema,
                                               String typeName, String indexName, String propName) {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") UNIQUE NULL_STRATEGY SKIP");
-            logger.debug("UNIQUE index ensured: {}", indexName);
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") UNIQUE_HASH NULL_STRATEGY SKIP");
+            logger.debug("UNIQUE_HASH index ensured: {}", indexName);
         } catch (Exception e) {
-            logger.debug("UNIQUE index {} skipped: {}", indexName, e.getMessage());
+            logger.debug("UNIQUE_HASH index {} skipped: {}", indexName, e.getMessage());
         }
     }
 
@@ -493,30 +512,30 @@ public final class SchemaInitializer {
         }
     }
 
-    /** Creates a single-field NOTUNIQUE index with NULL_STRATEGY SKIP. */
+    /** Creates a single-field NOTUNIQUE_HASH index with NULL_STRATEGY SKIP. */
     private static void tryCreateNonUniqueIndex(Database db, Schema schema,
                                                 String typeName, String indexName, String propName) {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") NOTUNIQUE NULL_STRATEGY SKIP");
-            logger.debug("NOTUNIQUE index ensured: {}", indexName);
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") NOTUNIQUE_HASH NULL_STRATEGY SKIP");
+            logger.debug("NOTUNIQUE_HASH index ensured: {}", indexName);
         } catch (Exception e) {
-            logger.debug("NOTUNIQUE index {} skipped: {}", indexName, e.getMessage());
+            logger.debug("NOTUNIQUE_HASH index {} skipped: {}", indexName, e.getMessage());
         }
     }
 
-    /** Creates a compound (two-field) UNIQUE index with NULL_STRATEGY SKIP. */
+    /** Creates a compound (two-field) UNIQUE_HASH index with NULL_STRATEGY SKIP. */
     private static void tryCreateCompoundUniqueIndex(Database db, Schema schema,
                                                       String typeName, String indexName,
                                                       String field1, String field2) {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + field1 + ", " + field2 + ") UNIQUE NULL_STRATEGY SKIP");
-            logger.debug("Compound UNIQUE index ensured: {}", indexName);
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + field1 + ", " + field2 + ") UNIQUE_HASH NULL_STRATEGY SKIP");
+            logger.debug("Compound UNIQUE_HASH index ensured: {}", indexName);
         } catch (Exception e) {
-            logger.debug("Compound UNIQUE index {} skipped: {}", indexName, e.getMessage());
+            logger.debug("Compound UNIQUE_HASH index {} skipped: {}", indexName, e.getMessage());
         }
     }
 
