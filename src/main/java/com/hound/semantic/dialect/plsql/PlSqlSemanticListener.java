@@ -173,13 +173,36 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         base.onSchemaExit();
     }
 
+    // STAB-13 Part A: schema_object_name is used in DDL (PACKAGE BODY, DROP PACKAGE, etc.)
+    // where schema_name is not available in the grammar rule.
+    @Override
+    public void enterSchema_object_name(PlSqlParser.Schema_object_nameContext ctx) {
+        if (ctx == null || ctx.id_expression() == null) return;
+        String schemaName = BaseSemanticListener.cleanIdentifier(ctx.id_expression().getText());
+        if (schemaName != null && !schemaName.isBlank()) base.onSchemaEnter(schemaName);
+    }
+
+    @Override
+    public void exitSchema_object_name(PlSqlParser.Schema_object_nameContext ctx) {
+        // No reset — DDL constructs manage their own schema lifecycle
+    }
+
     // =========================================================================
     // DML statements
     // =========================================================================
 
     @Override
     public void enterSelect_statement(PlSqlParser.Select_statementContext ctx) {
-        base.onStatementEnter("SELECT", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        // STAB-13 Part B: if this SELECT is in a FROM position (inline subquery FROM (SELECT...) alias),
+        // pass the alias so it gets registered on the parent scope for alias resolution.
+        List<String> aliasStack = base.subqueryAliasStack();
+        String inlineAlias = (!aliasStack.isEmpty() && "FROM".equals(base.getCurrentParentContext()))
+                ? aliasStack.get(aliasStack.size() - 1) : null;
+        if (inlineAlias != null && !inlineAlias.isBlank()) {
+            base.onStatementEnter("SELECT", extract(ctx), getStartLine(ctx), getEndLine(ctx), inlineAlias);
+        } else {
+            base.onStatementEnter("SELECT", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        }
         // Mark the inner subquery position so enterSubquery skips double-scope push.
         // Grammar: select_statement → select_only_statement → with_clause? subquery
         if (ctx.select_only_statement() != null && ctx.select_only_statement().subquery() != null) {

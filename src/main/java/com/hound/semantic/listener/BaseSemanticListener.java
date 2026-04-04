@@ -558,6 +558,12 @@ public abstract class BaseSemanticListener {
         engine.onStatementEnter(type, snippet, lineStart, lineEnd, null);
     }
 
+    /** STAB-13 Part B: variant with explicit alias (for inline FROM subqueries). */
+    public void onStatementEnter(String type, String snippet, int lineStart, int lineEnd, String alias) {
+        initStatement(type, snippet, lineStart, lineEnd, alias);
+        engine.onStatementEnter(type, snippet, lineStart, lineEnd, alias);
+    }
+
     public void onStatementExit() {
         exitStatement();
         engine.onStatementExit();

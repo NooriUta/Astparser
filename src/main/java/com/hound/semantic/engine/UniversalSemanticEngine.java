@@ -109,12 +109,15 @@ public class UniversalSemanticEngine {
             }
             if (current != null) {
                 String type = current.getStatementType();
-                if ("SUBQUERY".equals(type) || "CTE".equals(type) || "USUBQUERY".equals(type)) {
+                String alias = current.getAlias();
+                // STAB-13 Part B: aliased SELECT scopes (FROM (SELECT ...) t) are also source subqueries
+                boolean isInlineSelect = "SELECT".equals(type) && alias != null && !alias.isBlank();
+                if ("SUBQUERY".equals(type) || "CTE".equals(type) || "USUBQUERY".equals(type)
+                        || isInlineSelect) {
                     String parentStmt = current.getParentStatement();
                     if (parentStmt != null) {
                         StatementInfo parentInfo = builder.getStatements().get(parentStmt);
                         if (parentInfo != null) {
-                            String alias = current.getAlias();
                             parentInfo.addSourceSubquery(stmt, alias, type);
                         }
                     }
