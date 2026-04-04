@@ -22,12 +22,16 @@ import org.slf4j.LoggerFactory;
  * 23 Edge types (structural + usage + atom resolution + flow)
  *   Note: CONTAINS_PACKAGE removed in v6 — packages use CONTAINS_ROUTINE (IS-A)
  *
+ * Schema v12 additions (NULL_STRATEGY SKIP):
+ *   All UNIQUE and NOTUNIQUE (LSM_TREE) indexes rebuilt with NULL_STRATEGY SKIP —
+ *   null keys are silently skipped instead of indexed as a shared bucket entry.
+ *   ArcadeDB Java API (24.11.1): Schema.INDEX_TYPE = {LSM_TREE, FULL_TEXT, HSNW}.
+ *   HASH does not exist — LSM_TREE is the only available type for lookup indexes.
+ *
  * Schema v11 additions (S1.FT):
  *   FULLTEXT indexes: table_name_ft, column_name_ft, routine_name_ft, package_name_ft,
  *                     schema_name_ft, database_name_ft, snippet_ft, atom_text_ft,
  *                     param_name_ft, var_name_ft
- *   (v10 in commit 1986433 landed properties + NOTUNIQUE but missed FT index creation
- *    on existing DBs already at v10 — version bump forces re-run of tryCreateFullTextIndex)
  *
  * Schema v10 additions (S1.IDX):
  *   NOTUNIQUE indexes on session_id for DaliStatement, DaliRoutine, DaliAtom, DaliJoin
@@ -67,7 +71,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 11;
+    private static final int SCHEMA_VERSION = 12;
 
     private SchemaInitializer() {}
 
@@ -138,6 +142,10 @@ public final class SchemaInitializer {
         // DaliResolutionLog — диагностический лог попыток resolution (STAB-1)
         // Используется только в режиме --diag. Не vertex — не участвует в граф-навигации.
         if (!schema.existsType("DaliResolutionLog")) schema.createDocumentType("DaliResolutionLog");
+
+        // DaliSchemaLog — лог подозрительных имён схем с backtrace (S1.SCH)
+        // Фиксируется всегда (не только в --diag): кавычки, $, :, скобки, пробелы в именах.
+        if (!schema.existsType("DaliSchemaLog")) schema.createDocumentType("DaliSchemaLog");
 
         // ── Schema v7 additions: namespace / canonical properties (ADR-014) ──
 
@@ -359,12 +367,12 @@ public final class SchemaInitializer {
                 "DROP INDEX IF EXISTS `DaliSchema[canonical_geoid]`",
                 "DROP INDEX IF EXISTS `DaliSchema[db_name]`",
                 "DROP INDEX IF EXISTS `DaliDatabase[db_name]`",
-                // v9: compound UNIQUE indexes for canonical vertex deduplication
-                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS ON DaliSchema (db_name, schema_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (db_name, table_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (db_name, column_geoid) UNIQUE",
+                // v9: compound UNIQUE indexes for canonical vertex deduplication (v12: +NULL_STRATEGY SKIP)
+                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_geoid) UNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliSchema (db_name, schema_geoid) UNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (db_name, table_geoid) UNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (db_name, column_geoid) UNIQUE NULL_STRATEGY SKIP",
                 // v10: STRING property declarations for full-text search + reliable indexing
                 "CREATE PROPERTY DaliTable.table_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliTable.table_geoid IF NOT EXISTS STRING",
@@ -424,11 +432,11 @@ public final class SchemaInitializer {
                 "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT",
                 "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT",
                 "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT",
-                // v10: NOTUNIQUE session_id indexes for per-session query performance (S1.IDX)
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE",
-                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE",
-                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE",
-                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE",
+                // v10: NOTUNIQUE session_id indexes for per-session query performance (v12: +NULL_STRATEGY SKIP)
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
         };
     }
 
@@ -442,13 +450,13 @@ public final class SchemaInitializer {
         }
     }
 
-    /** Creates a single-field UNIQUE index. Safe to call on schema upgrade (IF NOT EXISTS). */
+    /** Creates a single-field UNIQUE index with NULL_STRATEGY SKIP. */
     private static void tryCreateUniqueIndex(Database db, Schema schema,
                                               String typeName, String indexName, String propName) {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") UNIQUE");
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") UNIQUE NULL_STRATEGY SKIP");
             logger.debug("UNIQUE index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("UNIQUE index {} skipped: {}", indexName, e.getMessage());
@@ -477,27 +485,27 @@ public final class SchemaInitializer {
         }
     }
 
-    /** Creates a single-field NOTUNIQUE index. Used for per-session query acceleration. */
+    /** Creates a single-field NOTUNIQUE index with NULL_STRATEGY SKIP. */
     private static void tryCreateNonUniqueIndex(Database db, Schema schema,
                                                 String typeName, String indexName, String propName) {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") NOTUNIQUE");
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") NOTUNIQUE NULL_STRATEGY SKIP");
             logger.debug("NOTUNIQUE index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("NOTUNIQUE index {} skipped: {}", indexName, e.getMessage());
         }
     }
 
-    /** Creates a compound (two-field) UNIQUE index. Safe to call on schema upgrade. */
+    /** Creates a compound (two-field) UNIQUE index with NULL_STRATEGY SKIP. */
     private static void tryCreateCompoundUniqueIndex(Database db, Schema schema,
                                                       String typeName, String indexName,
                                                       String field1, String field2) {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + field1 + ", " + field2 + ") UNIQUE");
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + field1 + ", " + field2 + ") UNIQUE NULL_STRATEGY SKIP");
             logger.debug("Compound UNIQUE index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("Compound UNIQUE index {} skipped: {}", indexName, e.getMessage());
