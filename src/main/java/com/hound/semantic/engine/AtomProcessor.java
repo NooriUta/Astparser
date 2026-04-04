@@ -25,6 +25,9 @@ public class AtomProcessor {
     // Unattached atoms (outside any statement)
     private final Map<String, Map<String, Object>> unattachedAtoms = new LinkedHashMap<>();
 
+    // S1.PRE: resolution log — one entry per resolved/unresolved column-reference atom
+    private final List<Map<String, Object>> resolutionLog = new ArrayList<>();
+
     // External dependencies
     private NameResolver nameResolver;
     private StructureAndLineageBuilder builder;
@@ -252,12 +255,14 @@ public class AtomProcessor {
             if (Boolean.TRUE.equals(atomData.get("is_constant"))) {
                 atomData.put("status", "constant");
                 constants++;
+                appendLog(statementGeoid, atomData, null);
                 continue;
             }
             // Пропускаем вызовы функций
             if (Boolean.TRUE.equals(atomData.get("is_function_call"))) {
                 atomData.put("status", "function_call");
                 functions++;
+                appendLog(statementGeoid, atomData, null);
                 continue;
             }
 
@@ -295,6 +300,7 @@ public class AtomProcessor {
                     atomData.put("resolution", resolution);
                 }
             }
+            appendLog(statementGeoid, atomData, resolution);
         }
 
         // B2.AR3 — atom resolution audit
@@ -711,8 +717,31 @@ public class AtomProcessor {
         return unattachedAtoms;
     }
 
+    /** S1.PRE: one entry per processed atom — used to write DaliResolutionLog. */
+    public List<Map<String, Object>> getResolutionLog() {
+        return Collections.unmodifiableList(resolutionLog);
+    }
+
+    /** Appends one DaliResolutionLog entry. raw_input captures the exact atom text
+     *  as collected by the listener — including any accidentally-grabbed brackets
+     *  or schema prefixes (the primary use-case for this log). */
+    private void appendLog(String stmtGeoid, Map<String, Object> atomData,
+                           Map<String, Object> resolution) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("statement_geoid", stmtGeoid);
+        entry.put("raw_input",        atomData.get("atom_text"));
+        entry.put("result_kind",      atomData.get("status"));
+        entry.put("is_function_call", Boolean.TRUE.equals(atomData.get("is_function_call")));
+        entry.put("atom_context",     atomData.get("atom_context"));
+        entry.put("parent_context",   atomData.get("parent_context"));
+        entry.put("note",     resolution != null ? resolution.get("reason")         : null);
+        entry.put("strategy", resolution != null ? resolution.get("reference_type") : null);
+        resolutionLog.add(entry);
+    }
+
     public void clear() {
         atomsByStatement.clear();
         unattachedAtoms.clear();
+        resolutionLog.clear();
     }
 }

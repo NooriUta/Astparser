@@ -779,6 +779,48 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
+            // ── DaliResolutionLog: per-atom diagnostic (S1.PRE) ──
+            for (Map<String, Object> logEntry : result.getResolutionLog()) {
+                embeddedDb.newDocument("DaliResolutionLog")
+                        .set("session_id",       sid)
+                        .set("statement_geoid",  logEntry.get("statement_geoid"))
+                        .set("raw_input",        logEntry.get("raw_input"))
+                        .set("result_kind",      logEntry.get("result_kind"))
+                        .set("is_function_call", logEntry.get("is_function_call"))
+                        .set("atom_context",     logEntry.get("atom_context"))
+                        .set("parent_context",   logEntry.get("parent_context"))
+                        .set("note",             logEntry.get("note"))
+                        .set("strategy",         logEntry.get("strategy"))
+                        .save();
+            }
+
+            // ── CALLS edges: intra-file routine calls (CALLS-1) ──
+            for (var callerEntry : result.getCalledRoutines().entrySet()) {
+                MutableVertex callerV = rtV.get(callerEntry.getKey());
+                if (callerV == null) continue;
+                for (Map<String, String> call : callerEntry.getValue()) {
+                    String calleeName = call.get("name");
+                    if (calleeName == null) continue;
+                    MutableVertex calleeV = null;
+                    for (var rtEntry : rtV.entrySet()) {
+                        String geoid = rtEntry.getKey().toUpperCase();
+                        if (geoid.endsWith(":" + calleeName.toUpperCase())
+                                || geoid.equals(calleeName.toUpperCase())) {
+                            calleeV = rtEntry.getValue();
+                            break;
+                        }
+                    }
+                    if (calleeV != null) {
+                        callerV.newEdge("CALLS", calleeV, true)
+                                .set("session_id",   sid)
+                                .set("caller_geoid", callerEntry.getKey())
+                                .set("callee_name",  calleeName)
+                                .set("line_start",   call.get("line"))
+                                .save();
+                    }
+                }
+            }
+
             for (LineageEdge le : result.getLineage()) {
                 MutableVertex from = resolve(le.sourceGeoid(), stV, tblV, rtV);
                 MutableVertex to = resolve(le.targetGeoid(), stV, tblV, rtV);
@@ -1193,6 +1235,46 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 String toRid = rid.statements.get(sqGeoid);
                 if (toRid != null)
                     edgeByRid("USES_SUBQUERY", fromRid, toRid, sid);
+            }
+        }
+
+        // ── DaliResolutionLog: per-atom diagnostic (S1.PRE) ──
+        for (Map<String, Object> logEntry : result.getResolutionLog()) {
+            rcmd("INSERT INTO DaliResolutionLog SET session_id=?, statement_geoid=?, raw_input=?, " +
+                 "result_kind=?, is_function_call=?, atom_context=?, parent_context=?, note=?, strategy=?",
+                 sid, logEntry.get("statement_geoid"), logEntry.get("raw_input"),
+                 logEntry.get("result_kind"), logEntry.get("is_function_call"),
+                 logEntry.get("atom_context"), logEntry.get("parent_context"),
+                 logEntry.get("note"), logEntry.get("strategy"));
+        }
+
+        // ── CALLS edges: intra-file routine calls (CALLS-1) ──
+        for (var callerEntry : result.getCalledRoutines().entrySet()) {
+            String callerRid = rid.routines.get(callerEntry.getKey());
+            if (callerRid == null) continue;
+            for (Map<String, String> call : callerEntry.getValue()) {
+                String calleeName = call.get("name");
+                if (calleeName == null) continue;
+                String calleeRid = null;
+                for (var rtEntry : rid.routines.entrySet()) {
+                    String geoid = rtEntry.getKey().toUpperCase();
+                    if (geoid.endsWith(":" + calleeName.toUpperCase())
+                            || geoid.equals(calleeName.toUpperCase())) {
+                        calleeRid = rtEntry.getValue();
+                        break;
+                    }
+                }
+                if (calleeRid != null) {
+                    try {
+                        remoteDb.command("sql",
+                            "CREATE EDGE CALLS FROM " + callerRid + " TO " + calleeRid +
+                            " SET session_id = :sid, caller_geoid = :caller, callee_name = :callee, line_start = :line",
+                            Map.of("sid", sid, "caller", callerEntry.getKey(),
+                                   "callee", calleeName, "line", call.get("line")));
+                    } catch (Exception e) {
+                        logger.debug("CALLS edge failed: {}", e.getMessage());
+                    }
+                }
             }
         }
 

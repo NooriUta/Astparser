@@ -17,9 +17,15 @@ public class SemanticResult {
     private final Structure structure;
     private final List<LineageEdge> lineage;
     private final Map<String, Object> atoms;
+    // S1.PRE: per-atom resolution diagnostics (raw_input, result_kind, note, strategy, …)
+    private final List<Map<String, Object>> resolutionLog;
+    // CALLS-1: callerGeoid → [{name, line, type}] for CALLS edge materialization
+    private final Map<String, List<Map<String, String>>> calledRoutines;
 
     public SemanticResult(String sessionId, String filePath, String dialect, long processingTimeMs,
-                          Structure structure, List<LineageEdge> lineage, Map<String, Object> atoms) {
+                          Structure structure, List<LineageEdge> lineage, Map<String, Object> atoms,
+                          List<Map<String, Object>> resolutionLog,
+                          Map<String, List<Map<String, String>>> calledRoutines) {
         this.sessionId = sessionId;
         this.filePath = filePath;
         this.dialect = dialect;
@@ -27,6 +33,8 @@ public class SemanticResult {
         this.structure = structure;
         this.lineage = lineage != null ? lineage : List.of();
         this.atoms = atoms != null ? atoms : Map.of();
+        this.resolutionLog = resolutionLog != null ? resolutionLog : List.of();
+        this.calledRoutines = calledRoutines != null ? calledRoutines : Map.of();
     }
 
     public String getSessionId() { return sessionId; }
@@ -36,6 +44,8 @@ public class SemanticResult {
     public Structure getStructure() { return structure; }
     public List<LineageEdge> getLineage() { return lineage; }
     public Map<String, Object> getAtoms() { return atoms; }
+    public List<Map<String, Object>> getResolutionLog() { return resolutionLog; }
+    public Map<String, List<Map<String, String>>> getCalledRoutines() { return calledRoutines; }
 
     /**
      * Arrow Flight compatible serialization.

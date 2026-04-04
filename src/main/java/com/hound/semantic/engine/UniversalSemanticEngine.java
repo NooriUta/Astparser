@@ -494,13 +494,16 @@ public class UniversalSemanticEngine {
                 0,
                 builder.getStructure(),
                 builder.getLineageEdges(),
-                atomProcessor.getAtoms()
+                atomProcessor.getAtoms(),
+                atomProcessor.getResolutionLog(),
+                calledRoutines
         );
     }
 
     public SemanticResult getResult(String sessionId, String filePath, String dialect, long processingTimeMs) {
         return new SemanticResult(sessionId, filePath, dialect, processingTimeMs,
-                builder.getStructure(), builder.getLineageEdges(), atomProcessor.getAtoms());
+                builder.getStructure(), builder.getLineageEdges(), atomProcessor.getAtoms(),
+                atomProcessor.getResolutionLog(), calledRoutines);
     }
 
     // ═══════════════════════════════════════════════════════════════

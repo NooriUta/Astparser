@@ -22,6 +22,9 @@ import org.slf4j.LoggerFactory;
  * 23 Edge types (structural + usage + atom resolution + flow)
  *   Note: CONTAINS_PACKAGE removed in v6 — packages use CONTAINS_ROUTINE (IS-A)
  *
+ * Schema v10 additions (S1.IDX):
+ *   NOTUNIQUE indexes on session_id for DaliStatement, DaliRoutine, DaliAtom, DaliJoin
+ *
  * Schema v7 additions (ADR-014 — Namespace / Folder-as-Database):
  *   DaliTable.canonical_geoid  — DB_NAME::SCHEMA.TABLE (globally unique)
  *   DaliTable.db_name          — database name (folder name)
@@ -57,7 +60,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 9;
+    private static final int SCHEMA_VERSION = 10;
 
     private SchemaInitializer() {}
 
@@ -200,6 +203,73 @@ public final class SchemaInitializer {
         tryCreateCompoundUniqueIndex(db, schema, "DaliTable",   "DaliTable[db_name+table_geoid]",    "db_name", "table_geoid");
         tryCreateCompoundUniqueIndex(db, schema, "DaliColumn",  "DaliColumn[db_name+column_geoid]",  "db_name", "column_geoid");
 
+        // ── Schema v10: declare STRING properties for full-text search + reliable indexing ──
+        // Name/search fields — required for CREATE INDEX ... FULL_TEXT
+        declareStringProp(schema, "DaliTable",       "table_name");
+        declareStringProp(schema, "DaliTable",       "table_geoid");
+        declareStringProp(schema, "DaliTable",       "table_type");
+        declareStringProp(schema, "DaliTable",       "session_id");
+        declareStringProp(schema, "DaliColumn",      "column_name");
+        declareStringProp(schema, "DaliColumn",      "column_geoid");
+        declareStringProp(schema, "DaliColumn",      "expression");
+        declareStringProp(schema, "DaliColumn",      "alias");
+        declareStringProp(schema, "DaliColumn",      "session_id");
+        declareStringProp(schema, "DaliRoutine",     "routine_name");
+        declareStringProp(schema, "DaliRoutine",     "routine_geoid");
+        declareStringProp(schema, "DaliRoutine",     "routine_type");
+        declareStringProp(schema, "DaliRoutine",     "session_id");
+        declareStringProp(schema, "DaliSchema",      "schema_name");
+        declareStringProp(schema, "DaliSchema",      "schema_geoid");
+        declareStringProp(schema, "DaliDatabase",    "database_name");
+        declareStringProp(schema, "DaliDatabase",    "database_geoid");
+        declareStringProp(schema, "DaliStatement",   "snippet");
+        declareStringProp(schema, "DaliStatement",   "stmt_geoid");
+        declareStringProp(schema, "DaliStatement",   "type");
+        declareStringProp(schema, "DaliStatement",   "short_name");
+        declareStringProp(schema, "DaliStatement",   "session_id");
+        declareStringProp(schema, "DaliAtom",        "atom_text");
+        declareStringProp(schema, "DaliAtom",        "atom_id");
+        declareStringProp(schema, "DaliAtom",        "atom_context");
+        declareStringProp(schema, "DaliAtom",        "parent_context");
+        declareStringProp(schema, "DaliAtom",        "status");
+        declareStringProp(schema, "DaliAtom",        "session_id");
+        declareStringProp(schema, "DaliJoin",        "join_type");
+        declareStringProp(schema, "DaliJoin",        "session_id");
+        declareStringProp(schema, "DaliParameter",   "param_name");
+        declareStringProp(schema, "DaliParameter",   "param_type");
+        declareStringProp(schema, "DaliParameter",   "param_mode");
+        declareStringProp(schema, "DaliParameter",   "session_id");
+        declareStringProp(schema, "DaliVariable",    "var_name");
+        declareStringProp(schema, "DaliVariable",    "var_type");
+        declareStringProp(schema, "DaliVariable",    "session_id");
+        declareStringProp(schema, "DaliOutputColumn","name");
+        declareStringProp(schema, "DaliOutputColumn","expression");
+        declareStringProp(schema, "DaliOutputColumn","alias");
+        declareStringProp(schema, "DaliOutputColumn","session_id");
+        declareStringProp(schema, "DaliApplication", "app_name");
+        declareStringProp(schema, "DaliPackage",     "package_name");
+        declareStringProp(schema, "DaliSession",     "session_id");
+        declareStringProp(schema, "DaliSession",     "file_path");
+        declareStringProp(schema, "DaliSession",     "dialect");
+
+        // ── Schema v10: FULLTEXT indexes for object name search ──
+        tryCreateFullTextIndex(db, schema, "DaliTable",     "DaliTable[table_name_ft]",     "table_name");
+        tryCreateFullTextIndex(db, schema, "DaliColumn",    "DaliColumn[column_name_ft]",   "column_name");
+        tryCreateFullTextIndex(db, schema, "DaliRoutine",   "DaliRoutine[routine_name_ft]", "routine_name");
+        tryCreateFullTextIndex(db, schema, "DaliSchema",    "DaliSchema[schema_name_ft]",   "schema_name");
+        tryCreateFullTextIndex(db, schema, "DaliDatabase",  "DaliDatabase[database_name_ft]","database_name");
+        tryCreateFullTextIndex(db, schema, "DaliStatement", "DaliStatement[snippet_ft]",    "snippet");
+        tryCreateFullTextIndex(db, schema, "DaliAtom",      "DaliAtom[atom_text_ft]",       "atom_text");
+        tryCreateFullTextIndex(db, schema, "DaliPackage",  "DaliPackage[package_name_ft]",  "package_name");
+        tryCreateFullTextIndex(db, schema, "DaliParameter", "DaliParameter[param_name_ft]", "param_name");
+        tryCreateFullTextIndex(db, schema, "DaliVariable",  "DaliVariable[var_name_ft]",    "var_name");
+
+        // ── Schema v10: NOTUNIQUE session_id indexes for per-session query performance (S1.IDX) ──
+        tryCreateNonUniqueIndex(db, schema, "DaliStatement",   "DaliStatement[session_id]",   "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliRoutine",     "DaliRoutine[session_id]",     "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliAtom",        "DaliAtom[session_id]",        "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliJoin",        "DaliJoin[session_id]",        "session_id");
+
         // Meta version
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");
         db.transaction(() -> {
@@ -287,6 +357,69 @@ public final class SchemaInitializer {
                 "CREATE INDEX IF NOT EXISTS `DaliSchema[db_name+schema_geoid]` ON DaliSchema (db_name, schema_geoid) UNIQUE",
                 "CREATE INDEX IF NOT EXISTS `DaliTable[db_name+table_geoid]` ON DaliTable (db_name, table_geoid) UNIQUE",
                 "CREATE INDEX IF NOT EXISTS `DaliColumn[db_name+column_geoid]` ON DaliColumn (db_name, column_geoid) UNIQUE",
+                // v10: STRING property declarations for full-text search + reliable indexing
+                "CREATE PROPERTY DaliTable.table_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliTable.table_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliTable.table_type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliTable.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliColumn.column_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliColumn.column_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliColumn.expression IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliColumn.alias IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliColumn.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliRoutine.routine_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliRoutine.routine_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliRoutine.routine_type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliRoutine.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSchema.schema_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSchema.schema_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliDatabase.database_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliDatabase.database_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliStatement.snippet IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliStatement.stmt_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliStatement.type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliStatement.short_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliStatement.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.atom_text IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.atom_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.atom_context IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.parent_context IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.status IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliJoin.join_type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliJoin.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliParameter.param_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliParameter.param_type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliParameter.param_mode IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliParameter.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliVariable.var_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliVariable.var_type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliVariable.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliOutputColumn.name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliOutputColumn.expression IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliOutputColumn.alias IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliOutputColumn.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliApplication.app_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliPackage.package_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSession.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSession.file_path IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSession.dialect IF NOT EXISTS STRING",
+                // v10: FULLTEXT indexes for object name search
+                "CREATE INDEX IF NOT EXISTS `DaliTable[table_name_ft]` ON DaliTable (table_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliColumn[column_name_ft]` ON DaliColumn (column_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliRoutine[routine_name_ft]` ON DaliRoutine (routine_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliSchema[schema_name_ft]` ON DaliSchema (schema_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliDatabase[database_name_ft]` ON DaliDatabase (database_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliStatement[snippet_ft]` ON DaliStatement (snippet) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliAtom[atom_text_ft]` ON DaliAtom (atom_text) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliPackage[package_name_ft]` ON DaliPackage (package_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliParameter[param_name_ft]` ON DaliParameter (param_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS `DaliVariable[var_name_ft]` ON DaliVariable (var_name) FULL_TEXT",
+                // v10: NOTUNIQUE session_id indexes for per-session query performance (S1.IDX)
+                "CREATE INDEX IF NOT EXISTS `DaliStatement[session_id]` ON DaliStatement (session_id) NOTUNIQUE",
+                "CREATE INDEX IF NOT EXISTS `DaliRoutine[session_id]` ON DaliRoutine (session_id) NOTUNIQUE",
+                "CREATE INDEX IF NOT EXISTS `DaliAtom[session_id]` ON DaliAtom (session_id) NOTUNIQUE",
+                "CREATE INDEX IF NOT EXISTS `DaliJoin[session_id]` ON DaliJoin (session_id) NOTUNIQUE",
         };
     }
 
@@ -311,6 +444,43 @@ public final class SchemaInitializer {
             logger.debug("UNIQUE index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("UNIQUE index {} skipped: {}", indexName, e.getMessage());
+        }
+    }
+
+    /** Declares a STRING property on a type if it doesn't exist yet.
+     *  Required before CREATE INDEX ... FULL_TEXT can be applied. */
+    private static void declareStringProp(Schema schema, String typeName, String propName) {
+        if (!schema.existsType(typeName)) return;
+        var t = schema.getType(typeName);
+        if (!t.existsProperty(propName))
+            t.createProperty(propName, com.arcadedb.schema.Type.STRING);
+    }
+
+    /** Creates a FULL_TEXT index. Property must be declared as STRING first. */
+    private static void tryCreateFullTextIndex(Database db, Schema schema,
+                                               String typeName, String indexName, String propName) {
+        if (!schema.existsType(typeName)) return;
+        try {
+            db.command("sql",
+                    "CREATE INDEX IF NOT EXISTS `" + indexName + "` ON "
+                    + typeName + " (" + propName + ") FULL_TEXT");
+            logger.debug("FULL_TEXT index ensured: {}", indexName);
+        } catch (Exception e) {
+            logger.debug("FULL_TEXT index {} skipped: {}", indexName, e.getMessage());
+        }
+    }
+
+    /** Creates a single-field NOTUNIQUE index. Used for per-session query acceleration. */
+    private static void tryCreateNonUniqueIndex(Database db, Schema schema,
+                                                String typeName, String indexName, String propName) {
+        if (!schema.existsType(typeName)) return;
+        try {
+            db.command("sql",
+                    "CREATE INDEX IF NOT EXISTS `" + indexName + "` ON "
+                    + typeName + " (" + propName + ") NOTUNIQUE");
+            logger.debug("NOTUNIQUE index ensured: {}", indexName);
+        } catch (Exception e) {
+            logger.debug("NOTUNIQUE index {} skipped: {}", indexName, e.getMessage());
         }
     }
 
