@@ -821,8 +821,9 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         // ── DaliSchema: canonical (namespace) or per-session (ad-hoc) ──
         // Track newly created schemas/tables so we can wire hierarchy edges after RID cache build.
-        Set<String> newSchemaGeoids = new LinkedHashSet<>();
-        Set<String> newTableGeoids  = new LinkedHashSet<>();
+        Set<String> newSchemaGeoids  = new LinkedHashSet<>();
+        Set<String> newTableGeoids   = new LinkedHashSet<>();
+        Set<String> newColumnGeoids  = new LinkedHashSet<>();
         for (var e : str.getSchemas().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> sc = (Map<String, Object>) e.getValue();
@@ -877,6 +878,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
                             c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder());
                     pool.putColumnRid(cg, cg); // placeholder
+                    newColumnGeoids.add(e.getKey()); // will need HAS_COLUMN edge
                 }
             } else {
                 // Ad-hoc mode: per-session column
@@ -1047,11 +1049,23 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        for (var e : str.getColumns().entrySet()) {
-            String fromRid = rid.tables.get(e.getValue().getTableGeoid());
-            String toRid   = rid.columns.get(e.getKey());
-            if (fromRid != null && toRid != null)
-                edgeByRid("HAS_COLUMN", fromRid, toRid, sid);
+        // HAS_COLUMN: DaliTable → DaliColumn (namespace mode: new columns only; ad-hoc: all)
+        if (pool != null) {
+            for (String colGeoid : newColumnGeoids) {
+                ColumnInfo c = str.getColumns().get(colGeoid);
+                if (c == null) continue;
+                String fromRid = rid.tables.get(c.getTableGeoid());
+                String toRid   = rid.columns.get(colGeoid);
+                if (fromRid != null && toRid != null)
+                    edgeByRid("HAS_COLUMN", fromRid, toRid, sid);
+            }
+        } else {
+            for (var e : str.getColumns().entrySet()) {
+                String fromRid = rid.tables.get(e.getValue().getTableGeoid());
+                String toRid   = rid.columns.get(e.getKey());
+                if (fromRid != null && toRid != null)
+                    edgeByRid("HAS_COLUMN", fromRid, toRid, sid);
+            }
         }
 
         for (var e : str.getStatements().entrySet()) {
