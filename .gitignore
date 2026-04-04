@@ -32,3 +32,10 @@ bin/
 /.gradle/
 /build/
 /src/main/resources/grammars/
+
+### Runtime — не коммитить ###
+/data/
+/log/
+/logs/
+/target/
+*.hprof
