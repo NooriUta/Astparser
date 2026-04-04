@@ -119,12 +119,38 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void enterCreate_package_body(PlSqlParser.Create_package_bodyContext ctx) {
-        if (ctx.package_name() == null) return;
-        for (PlSqlParser.Package_nameContext pkgCtx : ctx.package_name()) {
-            String packageName = BaseSemanticListener.cleanIdentifier(pkgCtx.getText());
-            String pkgGeoid = base.initPackage(packageName, base.currentSchema());
-            base.setPackage(pkgGeoid);
+        if (ctx.package_name() == null || ctx.package_name().isEmpty()) return;
+
+        // STAB-12 Step 1: читаем схему напрямую из ctx, не через currentSchema().
+        // Причина: schema — дочерний узел (schema_object_name), enterSchema_name ещё не сработал.
+        // Грамматика: CREATE PACKAGE BODY (schema_object_name PERIOD)? package_name IS ...
+        String schemaName = null;
+        if (ctx.schema_object_name() != null && ctx.PERIOD() != null) {
+            schemaName = BaseSemanticListener.cleanIdentifier(ctx.schema_object_name().getText());
+            // Немедленно регистрируем схему, чтобы initPackage её нашёл
+            if (schemaName != null && !schemaName.isBlank()) {
+                base.onSchemaEnter(schemaName);
+            }
         }
+
+        // Берём последний package_name (грамматика может давать список)
+        var pkgCtxList = ctx.package_name();
+        PlSqlParser.Package_nameContext pkgCtx = pkgCtxList.get(pkgCtxList.size() - 1);
+        String packageName = BaseSemanticListener.cleanIdentifier(pkgCtx.getText());
+
+        // Guard: если packageName содержит "." — распарсить (HR.TEST_PKG без schema_name узла)
+        if (packageName.contains(".")) {
+            String[] parts = packageName.split("\\.", 2);
+            if (schemaName == null) schemaName = parts[0];
+            packageName = parts[1];
+        }
+
+        String effectiveSchema = (schemaName != null && !schemaName.isBlank())
+                ? schemaName
+                : base.currentSchema();  // fallback: PACKAGE BODY без schema-prefix
+
+        String pkgGeoid = base.initPackage(packageName, effectiveSchema);
+        base.setPackage(pkgGeoid);
     }
 
     @Override
