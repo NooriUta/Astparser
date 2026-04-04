@@ -120,6 +120,33 @@ public class UniversalSemanticEngine {
                     }
                 }
             }
+
+            // STAB-8: SUBQUERY/SELECT that is a direct child of CREATE_VIEW
+            //         → copy output columns as view ColumnInfo (HAS_COLUMN edges)
+            if (si != null && currentViewTargetGeoid != null
+                    && ("SELECT".equals(si.getType()) || "SUBQUERY".equals(si.getType()))) {
+                // Guard: only for the direct view body — parent must be CREATE_VIEW
+                String parentGeoid = si.getParentStatementGeoid();
+                StatementInfo parentSi = parentGeoid != null
+                        ? builder.getStatements().get(parentGeoid) : null;
+                if (parentSi != null && "CREATE_VIEW".equals(parentSi.getType())) {
+                    for (var entry : si.getColumnsOutput().entrySet()) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> col = (Map<String, Object>) entry.getValue();
+                        String colName = (String) col.getOrDefault("name", entry.getKey());
+                        if (colName != null && !colName.isBlank() && !"*".equals(colName)) {
+                            builder.addColumn(currentViewTargetGeoid, colName,
+                                    (String) col.get("expression"), (String) col.get("alias"));
+                        }
+                    }
+                    logger.debug("VIEW [{}]: {} output cols from inner SUBQUERY",
+                            currentViewTargetGeoid, si.getColumnsOutput().size());
+                }
+            }
+            // STAB-8: clear view target when CREATE_VIEW statement itself exits
+            if (si != null && "CREATE_VIEW".equals(si.getType())) {
+                currentViewTargetGeoid = null;
+            }
         }
         // STAB-4: уровень 1 — resolve pending columns пока scope ещё открыт
         if (stmt != null) resolvePartialPendingForStatement(stmt);
@@ -128,6 +155,22 @@ public class UniversalSemanticEngine {
         logger.debug("Statement EXIT: {} [{}]",
                 popped != null ? popped.getStatementType() : "?",
                 popped != null ? popped.getStatementGeoid() : "?");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // VIEW declaration (STAB-8)
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Вызывается из enterCreate_view.
+     * Регистрирует view как DaliTable с типом "VIEW" и запоминает geoid
+     * для последующего копирования output columns внутреннего SELECT.
+     */
+    public void onViewDeclaration(String viewName, String schemaGeoid, int line) {
+        if (viewName == null || viewName.isBlank()) return;
+        String viewGeoid = builder.ensureTableWithType(viewName, schemaGeoid, "VIEW");
+        currentViewTargetGeoid = viewGeoid;
+        logger.debug("VIEW declared: '{}' schema='{}' line={}", viewGeoid, schemaGeoid, line);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -539,6 +582,9 @@ public class UniversalSemanticEngine {
 
     /** callerGeoid → список {name, line, type} вызовов */
     private final Map<String, List<Map<String, String>>> calledRoutines = new LinkedHashMap<>();
+
+    // STAB-8: geoid view-а, для которого сейчас обрабатывается внутренний SELECT
+    private String currentViewTargetGeoid = null;
 
     /**
      * Регистрирует вызов процедуры/функции из тела routine.

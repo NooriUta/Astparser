@@ -868,9 +868,35 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void enterCreate_view(PlSqlParser.Create_viewContext ctx) {
         if (ctx == null) return;
-        String viewName = extractViaReflection(ctx, "tableview_name");
-        if (viewName != null) {
-            base.initTable(viewName, null, base.currentSchema(), "VIEW");
+
+        // STAB-8: читаем схему напрямую из ctx (аналог STAB-12 для пакетов).
+        // Грамматика: CREATE VIEW (schema_name PERIOD)? v=id_expression AS ...
+        String schemaName = null;
+        if (ctx.schema_name() != null && ctx.PERIOD() != null) {
+            schemaName = BaseSemanticListener.cleanIdentifier(ctx.schema_name().getText());
+            if (schemaName != null && !schemaName.isBlank()) {
+                base.onSchemaEnter(schemaName);
+            }
+        }
+
+        // ctx.v — labeled field Id_expressionContext для имени view
+        String viewName = null;
+        if (ctx.v != null) {
+            viewName = BaseSemanticListener.cleanIdentifier(ctx.v.getText());
+        }
+        // Fallback: берём первый id_expression из списка
+        if (viewName == null || viewName.isBlank()) {
+            var idList = ctx.id_expression();
+            if (idList != null && !idList.isEmpty()) {
+                viewName = BaseSemanticListener.cleanIdentifier(idList.get(0).getText());
+            }
+        }
+
+        String effectiveSchema = (schemaName != null && !schemaName.isBlank())
+                ? schemaName : base.currentSchema();
+
+        if (viewName != null && !viewName.isBlank()) {
+            base.onViewDeclaration(viewName, effectiveSchema, getStartLine(ctx));
         }
         base.onStatementEnter("CREATE_VIEW", extract(ctx), getStartLine(ctx), getEndLine(ctx));
         base.setIsFirstSubq(null);

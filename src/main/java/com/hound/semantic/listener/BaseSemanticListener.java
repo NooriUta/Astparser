@@ -746,6 +746,15 @@ public abstract class BaseSemanticListener {
     }
     public void onSchemaExit() { current.put("schema", null); }
 
+    /**
+     * STAB-8: вызывается из enterCreate_view до onStatementEnter.
+     * Регистрирует view как DaliTable и помечает как текущий view-target
+     * для копирования output columns внутреннего SELECT.
+     */
+    public void onViewDeclaration(String viewName, String schemaGeoid, int line) {
+        engine.onViewDeclaration(viewName, schemaGeoid, line);
+    }
+
     public void onColumnAlias(String alias) {
         current.put("column_alias", alias != null ? cleanIdentifier(alias) : null);
     }

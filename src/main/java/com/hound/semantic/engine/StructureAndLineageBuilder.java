@@ -80,6 +80,29 @@ public class StructureAndLineageBuilder {
         return geoid;
     }
 
+    /** STAB-8: ensureTable с явным tableType (для VIEW, CTE, TEMP, …). */
+    public String ensureTableWithType(String tableName, String schemaGeoid, String tableType) {
+        String upperName = tableName.toUpperCase();
+        String resolvedSchema = schemaGeoid;
+        if (upperName.contains(".") && (resolvedSchema == null || resolvedSchema.isBlank())) {
+            String[] parts = upperName.split("\\.", 2);
+            resolvedSchema = parts[0];
+            upperName = parts[1];
+            ensureSchema(resolvedSchema, null);
+        }
+        String geoid = (resolvedSchema != null && !resolvedSchema.isBlank())
+                ? resolvedSchema.toUpperCase() + "." + upperName
+                : upperName;
+        String finalUpperName = upperName;
+        String finalSchema = resolvedSchema;
+        String finalType = tableType != null ? tableType : "TABLE";
+        tables.computeIfAbsent(geoid, k -> {
+            logger.debug("New {} registered: {}", finalType, geoid);
+            return new TableInfo(geoid, finalUpperName, finalSchema, finalType);
+        });
+        return geoid;
+    }
+
     public void addTableAlias(String tableGeoid, String alias) {
         TableInfo t = tables.get(tableGeoid);
         if (t != null && alias != null) {
