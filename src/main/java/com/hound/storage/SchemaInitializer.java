@@ -360,11 +360,11 @@ public final class SchemaInitializer {
                 "DROP INDEX IF EXISTS `DaliSchema[db_name]`",
                 "DROP INDEX IF EXISTS `DaliDatabase[db_name]`",
                 // v9: compound UNIQUE indexes for canonical vertex deduplication
-                "CREATE INDEX IF NOT EXISTS `DaliApplication[app_geoid]` ON DaliApplication (app_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS `DaliDatabase[db_geoid]` ON DaliDatabase (db_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS `DaliSchema[db_name+schema_geoid]` ON DaliSchema (db_name, schema_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS `DaliTable[db_name+table_geoid]` ON DaliTable (db_name, table_geoid) UNIQUE",
-                "CREATE INDEX IF NOT EXISTS `DaliColumn[db_name+column_geoid]` ON DaliColumn (db_name, column_geoid) UNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_geoid) UNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliSchema (db_name, schema_geoid) UNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (db_name, table_geoid) UNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (db_name, column_geoid) UNIQUE",
                 // v10: STRING property declarations for full-text search + reliable indexing
                 "CREATE PROPERTY DaliTable.table_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliTable.table_geoid IF NOT EXISTS STRING",
@@ -414,21 +414,21 @@ public final class SchemaInitializer {
                 "CREATE PROPERTY DaliSession.file_path IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliSession.dialect IF NOT EXISTS STRING",
                 // v10: FULLTEXT indexes for object name search
-                "CREATE INDEX IF NOT EXISTS `DaliTable[table_name_ft]` ON DaliTable (table_name) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliColumn[column_name_ft]` ON DaliColumn (column_name) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliRoutine[routine_name_ft]` ON DaliRoutine (routine_name) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliSchema[schema_name_ft]` ON DaliSchema (schema_name) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliDatabase[database_name_ft]` ON DaliDatabase (database_name) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliStatement[snippet_ft]` ON DaliStatement (snippet) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliAtom[atom_text_ft]` ON DaliAtom (atom_text) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliPackage[package_name_ft]` ON DaliPackage (package_name) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliParameter[param_name_ft]` ON DaliParameter (param_name) FULL_TEXT",
-                "CREATE INDEX IF NOT EXISTS `DaliVariable[var_name_ft]` ON DaliVariable (var_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (table_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (column_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (routine_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliSchema (schema_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (database_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (snippet) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliAtom (atom_text) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT",
                 // v10: NOTUNIQUE session_id indexes for per-session query performance (S1.IDX)
-                "CREATE INDEX IF NOT EXISTS `DaliStatement[session_id]` ON DaliStatement (session_id) NOTUNIQUE",
-                "CREATE INDEX IF NOT EXISTS `DaliRoutine[session_id]` ON DaliRoutine (session_id) NOTUNIQUE",
-                "CREATE INDEX IF NOT EXISTS `DaliAtom[session_id]` ON DaliAtom (session_id) NOTUNIQUE",
-                "CREATE INDEX IF NOT EXISTS `DaliJoin[session_id]` ON DaliJoin (session_id) NOTUNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE",
+                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE",
         };
     }
 
@@ -448,8 +448,7 @@ public final class SchemaInitializer {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS `" + indexName + "` ON "
-                    + typeName + " (" + propName + ") UNIQUE");
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") UNIQUE");
             logger.debug("UNIQUE index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("UNIQUE index {} skipped: {}", indexName, e.getMessage());
@@ -471,8 +470,7 @@ public final class SchemaInitializer {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS `" + indexName + "` ON "
-                    + typeName + " (" + propName + ") FULL_TEXT");
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") FULL_TEXT");
             logger.debug("FULL_TEXT index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("FULL_TEXT index {} skipped: {}", indexName, e.getMessage());
@@ -485,8 +483,7 @@ public final class SchemaInitializer {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS `" + indexName + "` ON "
-                    + typeName + " (" + propName + ") NOTUNIQUE");
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") NOTUNIQUE");
             logger.debug("NOTUNIQUE index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("NOTUNIQUE index {} skipped: {}", indexName, e.getMessage());
@@ -500,8 +497,7 @@ public final class SchemaInitializer {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS `" + indexName + "` ON "
-                    + typeName + " (" + field1 + ", " + field2 + ") UNIQUE");
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + field1 + ", " + field2 + ") UNIQUE");
             logger.debug("Compound UNIQUE index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("Compound UNIQUE index {} skipped: {}", indexName, e.getMessage());
