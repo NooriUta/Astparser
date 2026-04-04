@@ -625,6 +625,11 @@ public class UniversalSemanticEngine {
         return calledRoutines;
     }
 
+    /** S1.0: shortcut for diagnostic tests — delegates to AtomProcessor */
+    public List<Map<String, Object>> getResolutionLog() {
+        return atomProcessor.getResolutionLog();
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Pending columns
     // ═══════════════════════════════════════════════════════════════

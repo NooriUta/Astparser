@@ -1241,7 +1241,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         // ── DaliResolutionLog: per-atom diagnostic (S1.PRE) ──
         for (Map<String, Object> logEntry : result.getResolutionLog()) {
             rcmd("INSERT INTO DaliResolutionLog SET session_id=?, statement_geoid=?, raw_input=?, " +
-                 "result_kind=?, is_function_call=?, atom_context=?, parent_context=?, note=?, strategy=?",
+                 "result_kind=?, is_function_call=?, atom_context=?, parent_context=?, note=?, `strategy`=?",
                  sid, logEntry.get("statement_geoid"), logEntry.get("raw_input"),
                  logEntry.get("result_kind"), logEntry.get("is_function_call"),
                  logEntry.get("atom_context"), logEntry.get("parent_context"),

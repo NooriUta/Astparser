@@ -141,6 +141,14 @@ public class AtomProcessor {
             return;
         }
 
+        // --- Bind variables (:name, :1, :X) — check atom text first, regardless of token count ---
+        // BINDVAR may be split into COLON + INTEGER by some parsers, so text check is authoritative
+        String atomText = (String) atomData.get("atom_text");
+        if (atomText != null && atomText.startsWith(":") && atomText.length() > 1) {
+            atomData.put("is_constant", true);
+            return;
+        }
+
         // --- Простая ссылка на колонку (1 токен, identifier) ---
         if (tokens.size() == 1 && getCanonical(tokenDetails.get(0)).isIdentifier()) {
             atomData.put("is_column_reference", true);
@@ -172,6 +180,16 @@ public class AtomProcessor {
             return;
         }
 
+        // --- INTERVAL literals (INTERVAL '20' DAY, INTERVAL '240' HOUR, etc.) ---
+        // INTERVAL keyword maps to UNKNOWN canonical type in PlSqlTokenMapper, check text directly
+        if (tokenDetails.size() >= 1) {
+            String firstText = tokenDetails.get(0).get("text");
+            if (firstText != null && "INTERVAL".equalsIgnoreCase(firstText)) {
+                atomData.put("is_constant", true);
+                return;
+            }
+        }
+
         // --- Вызов функции: ID LEFT_PAREN ... ---
         if (tokens.size() >= 3
                 && getCanonical(tokenDetails.get(0)).isIdentifier()
@@ -187,12 +205,13 @@ public class AtomProcessor {
             return;
         }
 
-        // --- DATE 'string' (ANSI date literal) — IDENTIFIER followed by STRING_LITERAL ---
+        // --- DATE / TIMESTAMP 'string' (ANSI date/timestamp literal) ---
         if (tokenDetails.size() >= 2
                 && getCanonical(tokenDetails.get(0)).isIdentifier()
                 && getCanonical(tokenDetails.get(1)) == CanonicalTokenType.STRING_LITERAL) {
             String firstText = tokenDetails.get(0).get("text");
-            if (firstText != null && "DATE".equalsIgnoreCase(firstText)) {
+            if (firstText != null
+                    && ("DATE".equalsIgnoreCase(firstText) || "TIMESTAMP".equalsIgnoreCase(firstText))) {
                 atomData.put("is_constant", true);
                 return;
             }
@@ -215,6 +234,10 @@ public class AtomProcessor {
         if (text.length() >= 2 && text.startsWith("'") && text.endsWith("'")) {
             atomData.put("is_constant", true);
         } else if (text.matches("-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?")) {
+            atomData.put("is_constant", true);
+        } else if (text.toUpperCase().startsWith("INTERVAL")) {
+            atomData.put("is_constant", true);
+        } else if (text.startsWith(":") && text.length() > 1) {
             atomData.put("is_constant", true);
         }
         if (text.contains("(") && text.contains(")")) {

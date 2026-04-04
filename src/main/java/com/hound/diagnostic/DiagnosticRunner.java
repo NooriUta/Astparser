@@ -85,6 +85,7 @@ public class DiagnosticRunner {
         section10_HealthCheck();
         section11_DrillDown();
         section12_GraphAnalytics();
+        section13_ResolutionLog();
 
         long elapsed = System.currentTimeMillis() - t0;
         println("");
@@ -576,6 +577,56 @@ public class DiagnosticRunner {
                 "SELECT routine_geoid, routine_type FROM DaliRoutine " +
                 "WHERE in('CALLS').size() = 0 AND routine_type != 'PACKAGE' " +
                 "ORDER BY routine_geoid LIMIT 20");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 13. DaliResolutionLog — S1.PRE atom quality audit
+    // ═══════════════════════════════════════════════════════════════
+
+    private void section13_ResolutionLog() {
+        header("13. DALIRESOLUTIONLOG — ATOM QUALITY AUDIT (S1.PRE)");
+
+        query("Всего записей в DaliResolutionLog",
+                "SELECT count(*) as total FROM DaliResolutionLog");
+
+        query("Разбивка по result_kind",
+                "SELECT result_kind, count(*) as cnt FROM DaliResolutionLog " +
+                "GROUP BY result_kind ORDER BY cnt DESC");
+
+        query("Топ-30 нерешённых raw_input (S1.BUG candidates)",
+                "SELECT raw_input, parent_context, count(*) as cnt FROM DaliResolutionLog " +
+                "WHERE result_kind = 'unresolved' " +
+                "GROUP BY raw_input, parent_context ORDER BY cnt DESC LIMIT 30");
+
+        query("Нерешённые по parent_context",
+                "SELECT parent_context, count(*) as cnt FROM DaliResolutionLog " +
+                "WHERE result_kind = 'unresolved' " +
+                "GROUP BY parent_context ORDER BY cnt DESC");
+
+        query("raw_input содержит '(' — неправильный парсинг скобки",
+                "SELECT raw_input, parent_context, note, count(*) as cnt FROM DaliResolutionLog " +
+                "WHERE raw_input LIKE '%(%' " +
+                "GROUP BY raw_input, parent_context, note ORDER BY cnt DESC LIMIT 20");
+
+        query("raw_input содержит '.' — подозрение на schema-prefix",
+                "SELECT raw_input, parent_context, note, count(*) as cnt FROM DaliResolutionLog " +
+                "WHERE raw_input LIKE '%.%' AND result_kind = 'unresolved' " +
+                "GROUP BY raw_input, parent_context, note ORDER BY cnt DESC LIMIT 20");
+
+        query("Нерешённые по note (стратегия разрешения)",
+                "SELECT note, count(*) as cnt FROM DaliResolutionLog " +
+                "WHERE result_kind = 'unresolved' " +
+                "GROUP BY note ORDER BY cnt DESC LIMIT 20");
+
+        query("Нерешённые function_call атомы (unexpected)",
+                "SELECT raw_input, parent_context, count(*) as cnt FROM DaliResolutionLog " +
+                "WHERE result_kind = 'function_call' AND parent_context IN ['SELECT','WHERE','HAVING'] " +
+                "GROUP BY raw_input, parent_context ORDER BY cnt DESC LIMIT 20");
+
+        query("Разбивка unresolved по сессиям (топ проблемные файлы)",
+                "SELECT statement_geoid, count(*) as unresolved_cnt FROM DaliResolutionLog " +
+                "WHERE result_kind = 'unresolved' " +
+                "GROUP BY statement_geoid ORDER BY unresolved_cnt DESC LIMIT 20");
     }
 
     // ═══════════════════════════════════════════════════════════════

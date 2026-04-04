@@ -59,6 +59,9 @@ public enum CanonicalTokenType {
     OPERATOR,
     SQL_KEYWORD,
 
+    // ═══════ Bind variables ═══════
+    BIND_VARIABLE,
+
     // ═══════ Special ═══════
     WHITESPACE,
     UNKNOWN;
@@ -71,7 +74,8 @@ public enum CanonicalTokenType {
         return switch (this) {
             case STRING_LITERAL, INTEGER_LITERAL, NUMERIC_LITERAL, APPROX_NUM_LITERAL,
                  DATE_LITERAL, TIMESTAMP_LITERAL,
-                 NULL, TRUE, FALSE, DEFAULT, SYSDATE, CURRENT_DATE, MINVALUE -> true;
+                 NULL, TRUE, FALSE, DEFAULT, SYSDATE, CURRENT_DATE, MINVALUE,
+                 BIND_VARIABLE -> true;
             default -> false;
         };
     }

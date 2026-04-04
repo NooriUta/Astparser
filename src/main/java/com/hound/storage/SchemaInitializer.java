@@ -22,6 +22,13 @@ import org.slf4j.LoggerFactory;
  * 23 Edge types (structural + usage + atom resolution + flow)
  *   Note: CONTAINS_PACKAGE removed in v6 — packages use CONTAINS_ROUTINE (IS-A)
  *
+ * Schema v11 additions (S1.FT):
+ *   FULLTEXT indexes: table_name_ft, column_name_ft, routine_name_ft, package_name_ft,
+ *                     schema_name_ft, database_name_ft, snippet_ft, atom_text_ft,
+ *                     param_name_ft, var_name_ft
+ *   (v10 in commit 1986433 landed properties + NOTUNIQUE but missed FT index creation
+ *    on existing DBs already at v10 — version bump forces re-run of tryCreateFullTextIndex)
+ *
  * Schema v10 additions (S1.IDX):
  *   NOTUNIQUE indexes on session_id for DaliStatement, DaliRoutine, DaliAtom, DaliJoin
  *
@@ -60,7 +67,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 10;
+    private static final int SCHEMA_VERSION = 11;
 
     private SchemaInitializer() {}
 
@@ -224,6 +231,7 @@ public final class SchemaInitializer {
         declareStringProp(schema, "DaliDatabase",    "database_geoid");
         declareStringProp(schema, "DaliStatement",   "snippet");
         declareStringProp(schema, "DaliStatement",   "stmt_geoid");
+        declareStringProp(schema, "DaliStatement",   "statement_geoid");
         declareStringProp(schema, "DaliStatement",   "type");
         declareStringProp(schema, "DaliStatement",   "short_name");
         declareStringProp(schema, "DaliStatement",   "session_id");
@@ -377,6 +385,7 @@ public final class SchemaInitializer {
                 "CREATE PROPERTY DaliDatabase.database_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.snippet IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.stmt_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliStatement.statement_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.type IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.short_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.session_id IF NOT EXISTS STRING",

@@ -176,6 +176,9 @@ public final class PlSqlTokenMapper {
             Map.entry("BAR",             CanonicalTokenType.OPERATOR),
             Map.entry("CONCATENATION_OP", CanonicalTokenType.OPERATOR),
 
+            // Bind variables (:1, :name, :X)
+            Map.entry("BINDVAR",  CanonicalTokenType.BIND_VARIABLE),
+
             // SQL keywords (structural, not identifiers)
             Map.entry("AND",      CanonicalTokenType.SQL_KEYWORD),
             Map.entry("OR",       CanonicalTokenType.SQL_KEYWORD),

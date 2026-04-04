@@ -294,10 +294,20 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         // Регистрируем USING source
         String sourceAlias = extractAlias(ctx.table_alias());
         if (ctx.tableview_name() != null) {
+            // Case A: USING direct_table alias
             String sourceName = BaseSemanticListener.cleanIdentifier(ctx.tableview_name().getText());
             if (sourceName != null) {
                 base.onTableReference(sourceName, sourceAlias, getStartLine(ctx), getEndLine(ctx));
             }
+        } else if (ctx.table_collection_expression() != null && sourceAlias != null) {
+            // Case C: USING TABLE(collection_expr) alias — register alias in scope directly
+            // (tableview_name is null, no subquery is entered, so the alias stack alone is insufficient)
+            var tce = ctx.table_collection_expression();
+            String collExpr = tce.expression() != null
+                    ? BaseSemanticListener.cleanIdentifier(tce.expression().getText())
+                    : null;
+            String syntheticName = (collExpr != null && !collExpr.isBlank()) ? collExpr : "COLLECTION_SOURCE";
+            base.onTableReference(syntheticName, sourceAlias, getStartLine(ctx), getEndLine(ctx));
         }
         if (sourceAlias != null) {
             base.setSubqueryAlias(sourceAlias);

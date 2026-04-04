@@ -60,7 +60,7 @@ public class ResolutionLogger {
         String sql =
             "INSERT INTO DaliResolutionLog SET " +
             "session_id=?, ts=?, input_kind=?, raw_input=?, statement_geoid=?, " +
-            "strategy=?, result_kind=?, resolved_geoid=?, resolved_type=?, " +
+            "`strategy`=?, result_kind=?, resolved_geoid=?, resolved_type=?, " +
             "has_special_chars=?, is_qualified=?, is_function_call=?, note=?";
 
         Object[] params = {
