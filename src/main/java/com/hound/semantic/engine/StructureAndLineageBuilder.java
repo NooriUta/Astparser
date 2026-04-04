@@ -29,6 +29,9 @@ public class StructureAndLineageBuilder {
     // STAB-2: диагностический логгер (null = prod-режим, no-op)
     private ResolutionLogger resolutionLogger;
 
+    // S1.SCH: log of suspicious schema registrations with call backtrace
+    private final List<Map<String, Object>> schemaRegistrationLog = new ArrayList<>();
+
     public void setResolutionLogger(ResolutionLogger rl) { this.resolutionLogger = rl; }
 
     // ═══════ Tables ═══════
@@ -239,7 +242,7 @@ public class StructureAndLineageBuilder {
 
     public void ensureSchema(String name, String dbGeoid) {
         if (name != null && !name.isBlank()) {
-            // STAB-2: лог невалидных имён схем
+            // STAB-2: лог невалидных имён схем (diag mode only)
             if (resolutionLogger != null && resolutionLogger.isEnabled()) {
                 if (!com.hound.util.ValidationUtils.isValidIdentifier(name)) {
                     resolutionLogger.log(
@@ -250,11 +253,56 @@ public class StructureAndLineageBuilder {
                     logger.warn("STAB: invalid schema name: '{}'", name);
                 }
             }
+            // S1.SCH: always log suspicious schema names to DB (quotes, $, :, parens, etc.)
+            if (isSuspiciousSchemaName(name) && !schemas.containsKey(name.toUpperCase())) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("schema_name", name);
+                entry.put("reason",     classifySuspiciousReason(name));
+                entry.put("backtrace",  captureHoundBacktrace());
+                schemaRegistrationLog.add(entry);
+                logger.warn("S1.SCH: suspicious schema name registered: '{}' reason={}", name, entry.get("reason"));
+            }
             Map<String, Object> schemaData = new LinkedHashMap<>();
             schemaData.put("name", name.toUpperCase());
             schemaData.put("db", dbGeoid);
             schemas.putIfAbsent(name.toUpperCase(), schemaData);
         }
+    }
+
+    private static boolean isSuspiciousSchemaName(String name) {
+        return name.contains("\"") || name.contains("'")
+                || name.contains("$") || name.contains(":")
+                || name.contains("(") || name.contains(")")
+                || name.contains(".") || name.contains(" ");
+    }
+
+    private static String classifySuspiciousReason(String name) {
+        if (name.contains("\"") || name.contains("'")) return "quoted_identifier_not_stripped";
+        if (name.contains("(") || name.contains(")"))  return "parenthesis_in_schema_name";
+        if (name.contains("."))                         return "dot_in_schema_name";
+        if (name.contains("$"))                         return "dollar_sign_in_schema_name";
+        if (name.contains(":"))                         return "colon_in_schema_name";
+        if (name.contains(" "))                         return "space_in_schema_name";
+        return "special_chars";
+    }
+
+    /** Captures only com.hound.* frames from the current call stack. */
+    private static String captureHoundBacktrace() {
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        StringBuilder sb = new StringBuilder();
+        for (StackTraceElement e : stack) {
+            if (e.getClassName().startsWith("com.hound")) {
+                sb.append(e.getClassName().replaceFirst("com\\.hound\\.", ""))
+                  .append('.').append(e.getMethodName())
+                  .append(':').append(e.getLineNumber()).append('\n');
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    /** S1.SCH: returns suspicious schema registration log for DB persistence. */
+    public List<Map<String, Object>> getSchemaRegistrationLog() {
+        return Collections.unmodifiableList(schemaRegistrationLog);
     }
 
     // ═══════ Aggregators (порт Python get_structure / get_lineage) ═══════

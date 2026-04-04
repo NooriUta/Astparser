@@ -794,6 +794,16 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .save();
             }
 
+            // ── DaliSchemaLog: suspicious schema registrations with backtrace (S1.SCH) ──
+            for (Map<String, Object> schEntry : result.getSchemaRegistrationLog()) {
+                embeddedDb.newDocument("DaliSchemaLog")
+                        .set("session_id",   sid)
+                        .set("schema_name",  schEntry.get("schema_name"))
+                        .set("reason",       schEntry.get("reason"))
+                        .set("backtrace",    schEntry.get("backtrace"))
+                        .save();
+            }
+
             // ── CALLS edges: intra-file routine calls (CALLS-1) ──
             for (var callerEntry : result.getCalledRoutines().entrySet()) {
                 MutableVertex callerV = rtV.get(callerEntry.getKey());
@@ -1246,6 +1256,12 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                  logEntry.get("result_kind"), logEntry.get("is_function_call"),
                  logEntry.get("atom_context"), logEntry.get("parent_context"),
                  logEntry.get("note"), logEntry.get("strategy"));
+        }
+
+        // ── DaliSchemaLog: suspicious schema registrations with backtrace (S1.SCH) ──
+        for (Map<String, Object> schEntry : result.getSchemaRegistrationLog()) {
+            rcmd("INSERT INTO DaliSchemaLog SET session_id=?, schema_name=?, reason=?, backtrace=?",
+                 sid, schEntry.get("schema_name"), schEntry.get("reason"), schEntry.get("backtrace"));
         }
 
         // ── CALLS edges: intra-file routine calls (CALLS-1) ──

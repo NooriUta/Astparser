@@ -22,6 +22,12 @@ import org.slf4j.LoggerFactory;
  * 23 Edge types (structural + usage + atom resolution + flow)
  *   Note: CONTAINS_PACKAGE removed in v6 — packages use CONTAINS_ROUTINE (IS-A)
  *
+ * Schema v13 additions (S1.SCH):
+ *   DaliSchemaLog — document type for suspicious schema name registrations.
+ *   Fields: session_id, schema_name, reason, backtrace (com.hound.* call stack).
+ *   Always active (not only --diag mode). Triggers on: quotes, $, :, (), space, dot
+ *   in schema name — helps trace where incorrect schema names originate.
+ *
  * Schema v12 additions (NULL_STRATEGY SKIP):
  *   All UNIQUE and NOTUNIQUE (LSM_TREE) indexes rebuilt with NULL_STRATEGY SKIP —
  *   null keys are silently skipped instead of indexed as a shared bucket entry.
@@ -71,7 +77,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 12;
+    private static final int SCHEMA_VERSION = 13;
 
     private SchemaInitializer() {}
 
@@ -345,6 +351,8 @@ public final class SchemaInitializer {
                 "CREATE DOCUMENT TYPE DaliPerfStats IF NOT EXISTS",
                 // STAB-1: resolution diagnostics log (diag mode only)
                 "CREATE DOCUMENT TYPE DaliResolutionLog IF NOT EXISTS",
+                // S1.SCH: suspicious schema name log with backtrace (always active)
+                "CREATE DOCUMENT TYPE DaliSchemaLog IF NOT EXISTS",
                 // v7: namespace / canonical properties (ADR-014)
                 "CREATE PROPERTY DaliTable.db_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.db_name IF NOT EXISTS STRING",

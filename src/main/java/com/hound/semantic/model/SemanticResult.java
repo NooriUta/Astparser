@@ -21,11 +21,14 @@ public class SemanticResult {
     private final List<Map<String, Object>> resolutionLog;
     // CALLS-1: callerGeoid → [{name, line, type}] for CALLS edge materialization
     private final Map<String, List<Map<String, String>>> calledRoutines;
+    // S1.SCH: suspicious schema registrations with backtrace (schema_name, reason, backtrace)
+    private final List<Map<String, Object>> schemaRegistrationLog;
 
     public SemanticResult(String sessionId, String filePath, String dialect, long processingTimeMs,
                           Structure structure, List<LineageEdge> lineage, Map<String, Object> atoms,
                           List<Map<String, Object>> resolutionLog,
-                          Map<String, List<Map<String, String>>> calledRoutines) {
+                          Map<String, List<Map<String, String>>> calledRoutines,
+                          List<Map<String, Object>> schemaRegistrationLog) {
         this.sessionId = sessionId;
         this.filePath = filePath;
         this.dialect = dialect;
@@ -35,6 +38,7 @@ public class SemanticResult {
         this.atoms = atoms != null ? atoms : Map.of();
         this.resolutionLog = resolutionLog != null ? resolutionLog : List.of();
         this.calledRoutines = calledRoutines != null ? calledRoutines : Map.of();
+        this.schemaRegistrationLog = schemaRegistrationLog != null ? schemaRegistrationLog : List.of();
     }
 
     public String getSessionId() { return sessionId; }
@@ -46,6 +50,7 @@ public class SemanticResult {
     public Map<String, Object> getAtoms() { return atoms; }
     public List<Map<String, Object>> getResolutionLog() { return resolutionLog; }
     public Map<String, List<Map<String, String>>> getCalledRoutines() { return calledRoutines; }
+    public List<Map<String, Object>> getSchemaRegistrationLog() { return schemaRegistrationLog; }
 
     /**
      * Arrow Flight compatible serialization.
