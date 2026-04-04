@@ -28,6 +28,10 @@ import org.slf4j.LoggerFactory;
  *   Always active (not only --diag mode). Triggers on: quotes, $, :, (), space, dot
  *   in schema name — helps trace where incorrect schema names originate.
  *
+ * Schema v14 additions (FULLTEXT gaps):
+ *   DaliApplication(app_name), DaliOutputColumn(name),
+ *   DaliSession(file_path), DaliStatement(stmt_geoid)
+ *
  * Schema v13 additions (HASH indexes):
  *   UNIQUE → UNIQUE_HASH, NOTUNIQUE → NOTUNIQUE_HASH for all point-lookup indexes.
  *   SQL syntax confirmed: UNIQUE_HASH / NOTUNIQUE_HASH (not "HASH" standalone).
@@ -81,7 +85,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 13;
+    private static final int SCHEMA_VERSION = 14;
 
     private SchemaInitializer() {}
 
@@ -286,9 +290,13 @@ public final class SchemaInitializer {
         tryCreateFullTextIndex(db, schema, "DaliDatabase",  "DaliDatabase[database_name_ft]","database_name");
         tryCreateFullTextIndex(db, schema, "DaliStatement", "DaliStatement[snippet_ft]",    "snippet");
         tryCreateFullTextIndex(db, schema, "DaliAtom",      "DaliAtom[atom_text_ft]",       "atom_text");
-        tryCreateFullTextIndex(db, schema, "DaliPackage",  "DaliPackage[package_name_ft]",  "package_name");
-        tryCreateFullTextIndex(db, schema, "DaliParameter", "DaliParameter[param_name_ft]", "param_name");
-        tryCreateFullTextIndex(db, schema, "DaliVariable",  "DaliVariable[var_name_ft]",    "var_name");
+        tryCreateFullTextIndex(db, schema, "DaliPackage",       "DaliPackage[package_name_ft]",      "package_name");
+        tryCreateFullTextIndex(db, schema, "DaliParameter",     "DaliParameter[param_name_ft]",      "param_name");
+        tryCreateFullTextIndex(db, schema, "DaliVariable",      "DaliVariable[var_name_ft]",         "var_name");
+        tryCreateFullTextIndex(db, schema, "DaliApplication",   "DaliApplication[app_name_ft]",      "app_name");
+        tryCreateFullTextIndex(db, schema, "DaliOutputColumn",  "DaliOutputColumn[name_ft]",         "name");
+        tryCreateFullTextIndex(db, schema, "DaliSession",       "DaliSession[file_path_ft]",         "file_path");
+        tryCreateFullTextIndex(db, schema, "DaliStatement",     "DaliStatement[stmt_geoid_ft]",      "stmt_geoid");
 
         // ── Schema v10→v13: NOTUNIQUE_HASH session_id indexes — all vertex types with session_id ──
         tryCreateNonUniqueIndex(db, schema, "DaliStatement",   "DaliStatement[session_id]",   "session_id");
@@ -452,6 +460,11 @@ public final class SchemaInitializer {
                 "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT",
                 "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT",
                 "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT",
+                // v14: FULLTEXT gaps — app_name, output column name, session file_path, stmt_geoid
+                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliSession (file_path) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (stmt_geoid) FULL_TEXT",
                 // v10→v13: NOTUNIQUE_HASH session_id — all vertex types carrying session_id
                 "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
                 "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
