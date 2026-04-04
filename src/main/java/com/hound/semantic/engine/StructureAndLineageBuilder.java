@@ -1,5 +1,6 @@
 package com.hound.semantic.engine;
 
+import com.hound.diagnostic.ResolutionLogger;
 import com.hound.semantic.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +26,11 @@ public class StructureAndLineageBuilder {
     private final Map<String, RoutineInfo> routines = new LinkedHashMap<>();
     private final List<LineageEdge> lineageEdges = new ArrayList<>();
 
+    // STAB-2: диагностический логгер (null = prod-режим, no-op)
+    private ResolutionLogger resolutionLogger;
+
+    public void setResolutionLogger(ResolutionLogger rl) { this.resolutionLogger = rl; }
+
     // ═══════ Tables ═══════
 
     /**
@@ -46,6 +52,24 @@ public class StructureAndLineageBuilder {
         String geoid = (resolvedSchema != null && !resolvedSchema.isBlank())
                 ? resolvedSchema.toUpperCase() + "." + upperName
                 : upperName;
+
+        // STAB-2: предупреждение и лог о подозрительных именах таблиц
+        if (resolutionLogger != null && resolutionLogger.isEnabled()) {
+            boolean hasSpecial = upperName.matches(".*[()\\[\\]{}!%^&*].*");
+            boolean isFunc     = upperName.matches("^[A-Z_]+\\(.*");
+            if (hasSpecial || isFunc) {
+                resolutionLogger.log(
+                    ResolutionLogger.InputKind.TABLE_REF,
+                    upperName, null, "ensureTable",
+                    isFunc ? ResolutionLogger.ResultKind.SKIPPED
+                           : ResolutionLogger.ResultKind.UNRESOLVED,
+                    null, null,
+                    isFunc ? "function_call_as_table" : "special_chars_in_table_name"
+                );
+                logger.warn("STAB: suspicious table name: '{}' (func={}, special={})",
+                        upperName, isFunc, hasSpecial);
+            }
+        }
 
         String finalUpperName = upperName;
         String finalSchema = resolvedSchema;
@@ -192,6 +216,17 @@ public class StructureAndLineageBuilder {
 
     public void ensureSchema(String name, String dbGeoid) {
         if (name != null && !name.isBlank()) {
+            // STAB-2: лог невалидных имён схем
+            if (resolutionLogger != null && resolutionLogger.isEnabled()) {
+                if (!com.hound.util.ValidationUtils.isValidIdentifier(name)) {
+                    resolutionLogger.log(
+                        ResolutionLogger.InputKind.TABLE_REF, name, null, "ensureSchema",
+                        ResolutionLogger.ResultKind.UNRESOLVED, null, null,
+                        "invalid_schema_name: " + name
+                    );
+                    logger.warn("STAB: invalid schema name: '{}'", name);
+                }
+            }
             Map<String, Object> schemaData = new LinkedHashMap<>();
             schemaData.put("name", name.toUpperCase());
             schemaData.put("db", dbGeoid);

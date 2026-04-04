@@ -173,5 +173,11 @@ public class StatementInfo {
     public void addJoin(JoinInfo join) {
         joins.add(join);
     }
+
+    /** STAB-5: replaces join list after postProcessJoins() */
+    public void setJoins(java.util.List<JoinInfo> updatedJoins) {
+        joins.clear();
+        joins.addAll(updatedJoins);
+    }
 }
  

@@ -586,6 +586,16 @@ public abstract class BaseSemanticListener {
         engine.onRoutineReturnType(returnType);
     }
 
+    /**
+     * STAB-9: регистрирует вызов процедуры/функции из текущей routine.
+     * Вызывается из PlSqlSemanticListener.enterCall_statement().
+     */
+    public void onCallStatement(String calledName, int line) {
+        String callerGeoid = currentRoutine();
+        if (callerGeoid == null || calledName == null || calledName.isBlank()) return;
+        engine.onCallStatement(callerGeoid, calledName, line);
+    }
+
     public void onTableReference(String tableName, String tableAlias, int line, int endLine) {
         String role = isInDmlTarget() ? "TARGET" : "SOURCE";
         processTableReference(tableName, tableAlias);
@@ -663,6 +673,28 @@ public abstract class BaseSemanticListener {
     public void onSelectedListEnter(int line) { current.put("selected_list", line); }
     public void onSelectedListExit()          { current.put("selected_list", null); }
 
+    /**
+     * STAB-11: голый SELECT * (без table prefix) — нет select_list_elements событий.
+     * Регистрируем wildcard output column "*" с order=1.
+     * Аналог Python: exitSelected_list when ctx.getText() == '*'.
+     */
+    public void onBareStar(int line, int col) {
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt == null) return;
+        var stmtInfo = engine.getBuilder().getStatements().get(stmt);
+        if (stmtInfo == null) return;
+        if (stmtInfo.getColumnsOutput().containsKey("*")) return; // уже есть
+
+        Map<String, Object> starCol = new java.util.LinkedHashMap<>();
+        starCol.put("order",       1);
+        starCol.put("name",        "*");
+        starCol.put("expression",  "*");
+        starCol.put("source_type", "star");
+        starCol.put("alias",       null);
+        stmtInfo.addColumnOutput("*", starCol);
+        logger.debug("Bare SELECT * registered for stmt '{}'", stmt);
+    }
+
     public void onWhereEnter(int line)   { current.put("where", line); }
     public void onWhereExit()            { current.put("where", null); }
     public void onHavingEnter(int line)  { current.put("having", line); }
@@ -682,6 +714,27 @@ public abstract class BaseSemanticListener {
         current.put("Values_clause_cnt", 0);
     }
     public void onValuesClauseExit() { current.put("Values_clause", false); }
+
+    /**
+     * STAB-6: вызывается из exitExpression когда expression является дочерним
+     * элементом values_clause. Инкрементирует позиционный счётчик и привязывает
+     * атомы в диапазоне позиции к output_column_sequence = cnt.
+     *
+     * Аналог Python: exitExpression VALUES position counter + atom binding.
+     */
+    public void onValuesExpressionExit(int startLine, int startCol,
+                                       int endLine,   int endCol) {
+        int cnt = (int) current.getOrDefault("Values_clause_cnt", 0) + 1;
+        current.put("Values_clause_cnt", cnt);
+
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt == null) return;
+
+        engine.getAtomProcessor().bindAtomsToOutputColumn(
+                stmt, startLine, startCol, endLine, endCol, cnt);
+        logger.debug("VALUES expr #{}: lines {}-{} bound in stmt '{}'",
+                cnt, startLine, endLine, stmt);
+    }
 
     public void onDmlTargetEnter() { current.put("in_dml_target", true); }
     public void onDmlTargetExit()  { current.put("in_dml_target", false); }

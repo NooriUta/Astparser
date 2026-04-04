@@ -1,6 +1,7 @@
 // File: src/main/java/com/hound/semantic/engine/NameResolver.java
 package com.hound.semantic.engine;
 
+import com.hound.diagnostic.ResolutionLogger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,12 +32,20 @@ public class NameResolver {
     private StructureAndLineageBuilder builder;
     private ScopeManager scopeManager;
 
+    // Диагностика (STAB-3): null в prod-режиме — no-op
+    private ResolutionLogger resolutionLogger;
+
     /**
      * Подключает зависимости. Вызывается из UniversalSemanticEngine при инициализации.
      */
     public void wire(StructureAndLineageBuilder builder, ScopeManager scopeManager) {
         this.builder = builder;
         this.scopeManager = scopeManager;
+    }
+
+    /** STAB-3: подключает диагностический логгер (только в --diag режиме) */
+    public void setResolutionLogger(ResolutionLogger rl) {
+        this.resolutionLogger = rl;
     }
 
     /**
@@ -67,9 +76,26 @@ public class NameResolver {
             resolutionCache.put(cacheKey, result);
         }
 
-        logger.debug("NameResolver: '{}' → {} (cache: {}/{})",
+        logger.debug("NameResolver: '{}' → {} [{}] (cache: {}/{})",
                 name, result.isResolved() ? result.getType() + ":" + result.getGeoid() : "NOT FOUND",
+                result.getStrategy(),
                 cacheHits, cacheHits + cacheMisses);
+
+        // STAB-3: диагностическое логирование (только в --diag режиме)
+        if (resolutionLogger != null && resolutionLogger.isEnabled()) {
+            resolutionLogger.log(
+                ResolutionLogger.InputKind.ATOM,
+                name,
+                currentStatementGeoid,
+                result.isResolved() ? result.getStrategy() : "all_failed",
+                result.isResolved()
+                    ? ResolutionLogger.ResultKind.RESOLVED
+                    : ResolutionLogger.ResultKind.UNRESOLVED,
+                result.isResolved() ? result.getGeoid() : null,
+                result.isResolved() ? result.getType()  : null,
+                null
+            );
+        }
 
         return result;
     }
@@ -93,15 +119,15 @@ public class NameResolver {
 
             // Стратегия 1: Таблица по точному geoid (schema.table или просто table)
             ResolvedRef byName = resolveTableByExactGeoid(upperName);
-            if (byName.isResolved()) return byName;
+            if (byName.isResolved()) return tag(byName, "1_exact_geoid");
 
             // Стратегия 2: Таблица по алиасу в текущем scope
             ResolvedRef byAlias = resolveTableByAliasInScope(upperName, currentStatementGeoid);
-            if (byAlias.isResolved()) return byAlias;
+            if (byAlias.isResolved()) return tag(byAlias, "2_alias_scope");
 
             // Стратегия 2b: Поиск по имени таблицы (без учёта схемы)
             ResolvedRef byTableName = resolveTableByNameOnly(upperName);
-            if (byTableName.isResolved()) return byTableName;
+            if (byTableName.isResolved()) return tag(byTableName, "2b_table_name_only");
         }
 
         // Стратегии для подзапросов
@@ -109,24 +135,24 @@ public class NameResolver {
 
             // Стратегия 3: CTE по имени
             ResolvedRef cte = resolveCTE(upperName, currentStatementGeoid);
-            if (cte.isResolved()) return cte;
+            if (cte.isResolved()) return tag(cte, "3_cte");
 
             // Стратегия 4: Подзапрос по алиасу в текущем statement
             ResolvedRef subqAlias = resolveSubqueryByAlias(upperName, currentStatementGeoid);
-            if (subqAlias.isResolved()) return subqAlias;
+            if (subqAlias.isResolved()) return tag(subqAlias, "4_subquery_alias");
 
             // Стратегия 5: Child subqueries текущего statement
             ResolvedRef childSubq = resolveChildSubqueries(upperName, currentStatementGeoid);
-            if (childSubq.isResolved()) return childSubq;
+            if (childSubq.isResolved()) return tag(childSubq, "5_child_subquery");
 
             // Стратегия 6: Source subqueries текущего statement
             ResolvedRef srcSubq = resolveSourceSubqueries(upperName, currentStatementGeoid);
-            if (srcSubq.isResolved()) return srcSubq;
+            if (srcSubq.isResolved()) return tag(srcSubq, "6_source_subquery");
         }
 
         // Стратегия 7: Рекурсивный поиск по parent statements
         ResolvedRef parentRec = resolveParentRecursive(upperName, contextType, currentStatementGeoid, 0);
-        if (parentRec.isResolved()) return parentRec;
+        if (parentRec.isResolved()) return tag(parentRec, "7_parent_recursive");
 
         return ResolvedRef.unresolved(upperName);
     }
@@ -478,6 +504,11 @@ public class NameResolver {
         }
 
         return current;
+    }
+
+    /** STAB-3: оборачивает ResolvedRef в новый с проставленной strategy */
+    private static ResolvedRef tag(ResolvedRef r, String strategy) {
+        return new ResolvedRef(r.getName(), r.getType(), r.getGeoid(), strategy);
     }
 
     private static String toUpper(String s) {

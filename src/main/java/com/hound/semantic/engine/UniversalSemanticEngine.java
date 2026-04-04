@@ -121,6 +121,9 @@ public class UniversalSemanticEngine {
                 }
             }
         }
+        // STAB-4: уровень 1 — resolve pending columns пока scope ещё открыт
+        if (stmt != null) resolvePartialPendingForStatement(stmt);
+
         ScopeContext popped = scopeManager.pop();
         logger.debug("Statement EXIT: {} [{}]",
                 popped != null ? popped.getStatementType() : "?",
@@ -381,7 +384,21 @@ public class UniversalSemanticEngine {
     // ═══════════════════════════════════════════════════════════════
 
     public void onFromStart()  { /* marker for scope */ }
-    public void onFromExit()   { /* reset marker */ }
+
+    /**
+     * STAB-10: exitFrom — сбрасывает target_table для UPDATE/DELETE
+     * после того как FROM обработан, чтобы он не загрязнял следующий statement.
+     * Аналог Python exitFrom_clause DML cleanup.
+     */
+    public void onFromExit() {
+        ScopeContext ctx = scopeManager.peek();
+        if (ctx == null) return;
+        String stmtType = ctx.getStatementType();
+        if ("UPDATE".equals(stmtType) || "DELETE".equals(stmtType)) {
+            ctx.setTargetTable(null);
+            logger.debug("FROM exit: cleared target_table for {}", stmtType);
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Atom
@@ -450,17 +467,52 @@ public class UniversalSemanticEngine {
         if (si != null) resolveStarSubqueryColumns(stmtGeoid, si);
     }
 
+    /**
+     * STAB-5: postProcessJoins теперь СОХРАНЯЕТ resolved geoids в JoinInfo
+     * через JoinInfo.withResolved(). Старая версия только логировала.
+     */
     private void postProcessJoins(String stmtGeoid) {
         StatementInfo si = builder.getStatements().get(stmtGeoid);
         if (si == null) return;
+
+        var updatedJoins = new ArrayList<JoinInfo>();
+        boolean changed = false;
+
         for (JoinInfo j : si.getJoins()) {
-            if (j.sourceTableGeoid() == null && j.sourceTableAlias() != null) {
+            String srcGeoid = j.resolvedSourceGeoid();
+            String tgtGeoid = j.resolvedTargetGeoid();
+
+            // Пробуем resolve source если ещё не resolved
+            if (srcGeoid == null && j.sourceTableAlias() != null) {
                 ResolvedRef ref = nameResolver.resolve(j.sourceTableAlias(), "any", stmtGeoid);
                 if (ref.isResolved()) {
-                    logger.debug("Post-resolved JOIN source: {} → {}", j.sourceTableAlias(), ref.getGeoid());
+                    srcGeoid = ref.getGeoid();
+                    logger.debug("JOIN source post-resolved: '{}' → '{}' [{}]",
+                            j.sourceTableAlias(), srcGeoid, ref.getStrategy());
+                    changed = true;
+                } else {
+                    logger.warn("JOIN source UNRESOLVED: alias='{}' stmt='{}'",
+                            j.sourceTableAlias(), stmtGeoid);
                 }
             }
+
+            // Пробуем resolve target если ещё не resolved
+            if (tgtGeoid == null && j.targetTableAlias() != null) {
+                ResolvedRef ref = nameResolver.resolve(j.targetTableAlias(), "any", stmtGeoid);
+                if (ref.isResolved()) {
+                    tgtGeoid = ref.getGeoid();
+                    logger.debug("JOIN target post-resolved: '{}' → '{}' [{}]",
+                            j.targetTableAlias(), tgtGeoid, ref.getStrategy());
+                    changed = true;
+                }
+            }
+
+            updatedJoins.add((srcGeoid != null || tgtGeoid != null)
+                    ? j.withResolved(srcGeoid, tgtGeoid)
+                    : j);
         }
+
+        if (changed) si.setJoins(updatedJoins);
     }
 
     private void mergeUnionColumns(String stmtGeoid) {
@@ -481,10 +533,104 @@ public class UniversalSemanticEngine {
      * Вызывается ПОСЛЕ полного walk AST.
      * Разрешает columns, которые не могли быть resolved inline.
      */
+    // ═══════════════════════════════════════════════════════════════
+    // CALLS tracking (STAB-9)
+    // ═══════════════════════════════════════════════════════════════
+
+    /** callerGeoid → список {name, line, type} вызовов */
+    private final Map<String, List<Map<String, String>>> calledRoutines = new LinkedHashMap<>();
+
+    /**
+     * Регистрирует вызов процедуры/функции из тела routine.
+     * Вызывается из BaseSemanticListener.onCallStatement().
+     * Дедупликация по name+line.
+     */
+    public void onCallStatement(String callerGeoid, String calledName, int line) {
+        if (callerGeoid == null || calledName == null || calledName.isBlank()) return;
+        var calls = calledRoutines.computeIfAbsent(callerGeoid, k -> new ArrayList<>());
+        boolean exists = calls.stream().anyMatch(c ->
+                calledName.equalsIgnoreCase(c.get("name"))
+                && String.valueOf(line).equals(c.get("line")));
+        if (!exists) {
+            calls.add(Map.of("name", calledName, "line", String.valueOf(line),
+                             "type", determineCallType(calledName)));
+            logger.debug("CALL registered: {} → {} [line {}]", callerGeoid, calledName, line);
+        }
+    }
+
+    private String determineCallType(String name) {
+        for (var entry : builder.getRoutines().entrySet()) {
+            String geoid = entry.getKey().toUpperCase();
+            String rType = entry.getValue().getRoutineType();
+            if (geoid.endsWith(":" + name.toUpperCase()) || geoid.equals(name.toUpperCase()))
+                return rType != null ? rType : "UNKNOWN";
+        }
+        return "UNKNOWN";
+    }
+
+    /** Возвращает собранные вызовы для последующей записи CALLS рёбер */
+    public Map<String, List<Map<String, String>>> getCalledRoutines() {
+        return calledRoutines;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Pending columns
+    // ═══════════════════════════════════════════════════════════════
+
     private final List<Map<String, String>> pendingColumns = new ArrayList<>();
 
     public void addPendingColumn(String columnRef, String statementGeoid) {
         pendingColumns.add(Map.of("ref", columnRef, "stmt", statementGeoid));
+    }
+
+    public int getPendingColumnsCount() { return pendingColumns.size(); }
+
+    /**
+     * STAB-4: уровень 1 — пробуем resolve pending columns принадлежащие stmtGeoid
+     * ДО pop(). Scope ещё открыт → aliases, CTE, source_tables этого statement видны.
+     * Аналог Python: частичный _process_atoms_on_exit() при exitStatement.
+     */
+    private void resolvePartialPendingForStatement(String stmtGeoid) {
+        if (pendingColumns.isEmpty()) return;
+
+        var stillPending = new ArrayList<Map<String, String>>();
+        int resolvedNow = 0;
+
+        for (var p : pendingColumns) {
+            // Только pending из этого statement
+            if (!stmtGeoid.equals(p.get("stmt"))) {
+                stillPending.add(p);
+                continue;
+            }
+
+            String ref   = p.get("ref");
+            String[] parts = ref.split("\\.", 2);
+            String tPart = parts.length > 1 ? parts[0] : null;
+            String cPart = parts.length > 1 ? parts[1] : parts[0];
+
+            String tGeoid = null;
+            if (tPart != null) {
+                var r = nameResolver.resolve(tPart, "any", stmtGeoid);
+                if (r.isResolved()) tGeoid = r.getGeoid();
+            } else {
+                var r = nameResolver.resolveImplicitTable(stmtGeoid);
+                if (r.isResolved()) tGeoid = r.getGeoid();
+            }
+
+            if (tGeoid != null) {
+                builder.addColumn(tGeoid, cPart, null, null);
+                resolvedNow++;
+            } else {
+                stillPending.add(p);
+            }
+        }
+
+        if (resolvedNow > 0) {
+            pendingColumns.clear();
+            pendingColumns.addAll(stillPending);
+            logger.debug("Pending on exitStatement [{}]: resolved={}, remaining={}",
+                    stmtGeoid, resolvedNow, pendingColumns.size());
+        }
     }
 
     public void resolvePendingColumns() {
@@ -492,8 +638,9 @@ public class UniversalSemanticEngine {
         for (var entry : builder.getStatements().entrySet()) {
             resolveStarSubqueryColumns(entry.getKey(), entry.getValue());
         }
-        // 2. Pending column refs
-        logger.debug("Resolving {} pending columns", pendingColumns.size());
+        // 2. Pending column refs (STAB-4: уровень 2 — post-walk)
+        int pendingBefore = pendingColumns.size();
+        logger.info("Pending columns post-walk: {} to resolve", pendingBefore);
         var resolved = new ArrayList<Integer>();
         for (int i = 0; i < pendingColumns.size(); i++) {
             var p = pendingColumns.get(i);
@@ -514,7 +661,8 @@ public class UniversalSemanticEngine {
             }
         }
         for (int i = resolved.size() - 1; i >= 0; i--) pendingColumns.remove((int) resolved.get(i));
-        logger.debug("Pending remaining: {}", pendingColumns.size());
+        logger.info("Pending columns: {} resolved, {} remaining",
+                pendingBefore - pendingColumns.size(), pendingColumns.size());
     }
 
     /**

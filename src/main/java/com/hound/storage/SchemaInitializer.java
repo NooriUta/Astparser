@@ -125,6 +125,10 @@ public final class SchemaInitializer {
         // DaliSnippet — Document type for SQL text (avoids quoting issues in remote INSERT)
         if (!schema.existsType("DaliSnippet")) schema.createDocumentType("DaliSnippet");
 
+        // DaliResolutionLog — диагностический лог попыток resolution (STAB-1)
+        // Используется только в режиме --diag. Не vertex — не участвует в граф-навигации.
+        if (!schema.existsType("DaliResolutionLog")) schema.createDocumentType("DaliResolutionLog");
+
         // ── Schema v7 additions: namespace / canonical properties (ADR-014) ──
 
         // DaliTable: db_name (canonical_geoid removed in v9 — derived field)
@@ -253,6 +257,8 @@ public final class SchemaInitializer {
                 "CREATE DOCUMENT TYPE DaliSnippet IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliMeta IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliPerfStats IF NOT EXISTS",
+                // STAB-1: resolution diagnostics log (diag mode only)
+                "CREATE DOCUMENT TYPE DaliResolutionLog IF NOT EXISTS",
                 // v7: namespace / canonical properties (ADR-014)
                 "CREATE PROPERTY DaliTable.db_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.db_name IF NOT EXISTS STRING",

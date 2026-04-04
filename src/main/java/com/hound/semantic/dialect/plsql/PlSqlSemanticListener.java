@@ -565,6 +565,18 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void exitSelected_list(PlSqlParser.Selected_listContext ctx) {
         base.onSelectedListExit();
+
+        // STAB-11: голый SELECT * — нет select_list_elements событий, обрабатываем здесь.
+        // ASTERISK() — terminal node; select_list_elements() — список дочерних правил.
+        if (ctx == null) return;
+        try {
+            boolean hasAsterisk = ctx.ASTERISK() != null;
+            boolean hasElements = ctx.select_list_elements() != null
+                    && !ctx.select_list_elements().isEmpty();
+            if (hasAsterisk && !hasElements) {
+                base.onBareStar(getStartLine(ctx), getStartCol(ctx));
+            }
+        } catch (Exception ignored) {}
     }
 
     // =========================================================================
@@ -611,8 +623,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // Column name
     // =========================================================================
 
+    // STAB-7: перенесено с enter на exit — при enter внутри сложных выражений
+    // enterSchema_name может сработать ПОСЛЕ и загрязнить state.
+    // На exit все дочерние узлы уже обработаны, scope чист.
     @Override
-    public void enterColumn_name(PlSqlParser.Column_nameContext ctx) {
+    public void enterColumn_name(PlSqlParser.Column_nameContext ctx) { }
+
+    @Override
+    public void exitColumn_name(PlSqlParser.Column_nameContext ctx) {
         if (ctx == null || ctx.getText() == null) return;
         String columnRef = BaseSemanticListener.cleanIdentifier(ctx.getText());
         if (columnRef != null && !columnRef.isBlank()) {
@@ -659,6 +677,49 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void exitMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx)  { base.onMergeUpdateExit(); }
 
     // =========================================================================
+    // CALLS (STAB-9): межпроцедурные зависимости
+    // Аналог Python: enterCall_statement + _add_called_routine()
+    // =========================================================================
+
+    @Override
+    public void enterCall_statement(PlSqlParser.Call_statementContext ctx) {
+        if (ctx == null || base.currentRoutine() == null) return;
+
+        String calledName = null;
+
+        // Стратегия 1: routine_name() — ANTLR4 всегда возвращает List
+        try {
+            var routineNames = ctx.routine_name();
+            if (routineNames != null && !routineNames.isEmpty()) {
+                for (var rn : routineNames) {
+                    if (rn == null) continue;
+                    try {
+                        Method gt = rn.getClass().getMethod("getText");
+                        String rText = (String) gt.invoke(rn);
+                        if (rText != null && !rText.isBlank())
+                            base.onCallStatement(BaseSemanticListener.cleanIdentifier(rText), getStartLine(ctx));
+                    } catch (Exception ignored) {}
+                }
+                return; // handled via list
+            }
+        } catch (Exception ignored) {}
+
+        // Стратегия 2: fallback — getText() до первой '('
+        if (calledName == null || calledName.isBlank()) {
+            try {
+                String raw = ctx.getText();
+                int paren = raw.indexOf('(');
+                calledName = BaseSemanticListener.cleanIdentifier(
+                        paren > 0 ? raw.substring(0, paren) : raw);
+            } catch (Exception ignored) {}
+        }
+
+        if (calledName != null && !calledName.isBlank()) {
+            base.onCallStatement(calledName, getStartLine(ctx));
+        }
+    }
+
+    // =========================================================================
     // Values clause
     // =========================================================================
 
@@ -666,6 +727,32 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterValues_clause(PlSqlParser.Values_clauseContext ctx) { base.onValuesClauseEnter(); }
     @Override
     public void exitValues_clause(PlSqlParser.Values_clauseContext ctx)  { base.onValuesClauseExit(); }
+
+    /**
+     * STAB-6: exitExpression — VALUES counter + atom binding.
+     * Обнаруживаем, когда expression находится непосредственно внутри values_clause
+     * (expression → expression_list → values_clause), и вызываем onValuesExpressionExit.
+     */
+    @Override
+    public void exitExpression(PlSqlParser.ExpressionContext ctx) {
+        if (ctx == null) return;
+        boolean isInValues = false;
+        try {
+            // Типичная иерархия: values_clause → expression_list → expression
+            // Поднимаемся на 2 уровня вверх
+            if (ctx.parent != null && ctx.parent.parent != null) {
+                int ruleIdx = ((ParserRuleContext) ctx.parent.parent).getRuleIndex();
+                if ("values_clause".equals(PlSqlParser.ruleNames[ruleIdx])) {
+                    isInValues = true;
+                }
+            }
+        } catch (Exception ignored) {}
+        if (isInValues) {
+            base.onValuesExpressionExit(
+                    getStartLine(ctx), getStartCol(ctx),
+                    getEndLine(ctx), getEndCol(ctx));
+        }
+    }
 
     // =========================================================================
     // Atom
