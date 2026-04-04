@@ -72,6 +72,7 @@ public class DiagnosticRunner {
     public void runAll() {
         long t0 = System.currentTimeMillis();
 
+        section0_Namespaces();
         section1_GeneralStats();
         section2_AtomsResolution();
         section3_OutputColumns();
@@ -94,6 +95,55 @@ public class DiagnosticRunner {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // 0. Namespaces / Database overview (ADR-014)
+    // ═══════════════════════════════════════════════════════════════
+
+    private void section0_Namespaces() {
+        header("0. NAMESPACES (ADR-014: папка = база данных)");
+
+        query("Приложения (DaliApplication)",
+                "SELECT app_name, app_geoid FROM DaliApplication ORDER BY app_name");
+
+        query("BELONGS_TO_APP рёбра: DaliDatabase → DaliApplication",
+                "SELECT out.db_name as db, in.app_name as app FROM BELONGS_TO_APP ORDER BY app, db");
+
+        query("Зарегистрированные базы данных (DaliDatabase)",
+                "SELECT db_name, db_geoid, created_at FROM DaliDatabase ORDER BY db_name");
+
+        query("Сессии по базам данных",
+                "SELECT db_name, count(*) as session_count FROM DaliSession GROUP BY db_name ORDER BY session_count DESC");
+
+        query("Канонические схемы по базам (DaliSchema с db_name)",
+                "SELECT db_name, schema_name, schema_geoid FROM DaliSchema WHERE db_name IS NOT NULL ORDER BY db_name, schema_name");
+
+        query("CONTAINS_SCHEMA рёбра: DaliDatabase → DaliSchema",
+                "SELECT out.db_name as db, in.schema_name as schema, in.schema_geoid as geoid " +
+                "FROM CONTAINS_SCHEMA ORDER BY db, schema");
+
+        query("Схемы без db_name (ad-hoc)",
+                "SELECT count(*) as adhoc_schemas FROM DaliSchema WHERE db_name IS NULL");
+
+        query("Канонические таблицы по базам (DaliTable с db_name)",
+                "SELECT db_name, count(*) as table_count FROM DaliTable WHERE db_name IS NOT NULL GROUP BY db_name ORDER BY table_count DESC");
+
+        query("Канонические колонки по базам",
+                "SELECT db_name, count(*) as col_count FROM DaliColumn WHERE db_name IS NOT NULL GROUP BY db_name ORDER BY col_count DESC");
+
+        query("Ad-hoc таблицы (без namespace, db_name IS NULL)",
+                "SELECT count(*) as adhoc_tables FROM DaliTable WHERE db_name IS NULL");
+
+        query("Топ-10 таблиц по числу использований (READS_FROM)",
+                "SELECT out.table_geoid as table_geoid, out.db_name as db_name, count(*) as reads " +
+                "FROM READS_FROM GROUP BY out.table_geoid ORDER BY reads DESC LIMIT 10");
+
+        query("Pipeline-статистика по базам данных (DaliPerfStats)",
+                "SELECT db_name, count(*) as files, " +
+                "sum(ms_parse) as total_parse_ms, sum(ms_walk) as total_walk_ms, " +
+                "sum(cnt_statements) as total_stmts, sum(cnt_atoms) as total_atoms " +
+                "FROM DaliPerfStats WHERE db_name IS NOT NULL GROUP BY db_name ORDER BY db_name");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // 1. Общая статистика
     // ═══════════════════════════════════════════════════════════════
 
@@ -101,9 +151,9 @@ public class DiagnosticRunner {
         header("1. ОБЩАЯ СТАТИСТИКА");
 
         // Vertex counts (FROM V not supported in embedded — enumerate types)
-        String[] vtxTypes = {"DaliSession","DaliDatabase","DaliSchema","DaliPackage","DaliTable",
-                "DaliColumn","DaliRoutine","DaliStatement","DaliAtom","DaliOutputColumn",
-                "DaliJoin","DaliParameter","DaliVariable","DaliSnippet"};
+        String[] vtxTypes = {"DaliSession","DaliDatabase","DaliApplication","DaliSchema",
+                "DaliPackage","DaliTable","DaliColumn","DaliRoutine","DaliStatement",
+                "DaliAtom","DaliOutputColumn","DaliJoin","DaliParameter","DaliVariable","DaliSnippet"};
         println("");
         println("  ▸ Vertex counts по типам");
         totalQueries++;
@@ -115,7 +165,8 @@ public class DiagnosticRunner {
         }
 
         // Edge counts
-        String[] edgTypes = {"BELONGS_TO_SESSION","CONTAINS_TABLE","CONTAINS_ROUTINE",
+        String[] edgTypes = {"BELONGS_TO_SESSION","CONTAINS_SCHEMA","CONTAINS_TABLE",
+                "CONTAINS_ROUTINE","BELONGS_TO_APP",
                 "HAS_COLUMN","HAS_PARAMETER","HAS_VARIABLE","CHILD_OF","CONTAINS_STMT",
                 "HAS_OUTPUT_COL","HAS_ATOM","HAS_JOIN","READS_FROM","WRITES_TO",
                 "USES_SUBQUERY","ROUTINE_USES_TABLE","CALLS","ATOM_REF_TABLE",

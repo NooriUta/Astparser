@@ -5,6 +5,7 @@ import com.hound.semantic.engine.UniversalSemanticEngine;
 import com.hound.semantic.model.*;
 import com.hound.semantic.dialect.plsql.PlSqlSemanticListener;
 import com.hound.storage.ArcadeDBSemanticWriter;
+import com.hound.storage.CanonicalPool;
 import com.hound.diagnostic.DiagnosticRunner;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
@@ -165,56 +166,164 @@ public class HoundApplication {
     /** Результат анализа одного файла (без записи в БД). */
     private record AnalysisResult(Path file, SemanticResult semantic, PipelineTimer timer) {}
 
+    /**
+     * Группа файлов, принадлежащих одной базе данных (namespace).
+     *
+     * <ul>
+     *   <li>{@code dbName = null} — ad-hoc режим (одиночные файлы без namespace)
+     *   <li>{@code dbName != null} — имя папки = имя БД (DWH, ODS, DWH2, ...)
+     * </ul>
+     */
+    private record DatabaseBatch(String dbName, List<Path> files) {}
+
     // ═══════════════════════════════════════════════════════════════
     // Directory
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Обрабатывает директорию с автоматическим определением режима namespace:
+     * <ul>
+     *   <li><b>Single-DB</b>: в директории есть SQL-файлы напрямую → вся папка = одна БД
+     *   <li><b>Multi-DB</b>: SQL-файлы только в поддиректориях → каждая поддиректория = БД
+     *   <li><b>Ad-hoc</b>: файлы в корне при Multi-DB → db_name=null (без namespace)
+     * </ul>
+     */
     private void processDirectory(Path dir, RunConfig config, ArcadeDBSemanticWriter writer)
             throws IOException {
-        List<Path> sqlFiles;
+        List<DatabaseBatch> batches = detectDatabases(dir);
+        if (batches.isEmpty()) {
+            logger.warn("SQL-файлы не найдены в: {}", dir);
+            return;
+        }
+
+        int totalFiles = batches.stream().mapToInt(b -> b.files().size()).sum();
+        logger.info("Namespace-режим: {} баз, {} файлов итого", batches.size(), totalFiles);
+
+        List<PipelineTimer> allTimers = new ArrayList<>();
+        List<String>        allNames  = new ArrayList<>();
+        int totalSuccess = 0, totalFailed = 0;
+
+        for (DatabaseBatch batch : batches) {
+            if (batch.dbName() != null) {
+                logger.info("==> Database: '{}' ({} файлов)", batch.dbName(), batch.files().size());
+            } else {
+                logger.info("==> Ad-hoc: {} файлов (без namespace)", batch.files().size());
+            }
+            int[] sf = processBatch(batch, config, writer, allTimers, allNames);
+            totalSuccess += sf[0];
+            totalFailed  += sf[1];
+        }
+
+        printSummary(allTimers, allNames, totalSuccess, totalFailed);
+    }
+
+    /**
+     * Определяет разбивку директории на DatabaseBatch.
+     *
+     * <p>Правило auto-detect:
+     * <ol>
+     *   <li>Есть SQL-файлы прямо в {@code dir} → Single-DB: dbName = dir.getFileName()
+     *   <li>Нет SQL-файлов в корне, есть поддиректории → Multi-DB: каждая поддир = БД
+     *   <li>Нет ничего → пустой список
+     * </ol>
+     */
+    private List<DatabaseBatch> detectDatabases(Path dir) throws IOException {
+        // Файлы SQL прямо в dir (не рекурсивно)
+        List<Path> rootSql;
+        try (Stream<Path> s = Files.list(dir)) {
+            rootSql = s.filter(Files::isRegularFile)
+                       .filter(HoundApplication::isSqlFile)
+                       .sorted()
+                       .toList();
+        }
+
+        // Поддиректории
+        List<Path> subdirs;
+        try (Stream<Path> s = Files.list(dir)) {
+            subdirs = s.filter(Files::isDirectory).sorted().toList();
+        }
+
+        if (!rootSql.isEmpty() || subdirs.isEmpty()) {
+            // Single-DB mode: вся директория = одна база данных
+            String dbName = dir.getFileName().toString();
+            List<Path> allFiles = findAllSql(dir);
+            if (allFiles.isEmpty()) return List.of();
+            logger.debug("Single-DB mode: db='{}', files={}", dbName, allFiles.size());
+            return List.of(new DatabaseBatch(dbName, allFiles));
+        }
+
+        // Multi-DB mode: каждая поддиректория = отдельная база данных
+        List<DatabaseBatch> batches = new ArrayList<>();
+        for (Path sub : subdirs) {
+            List<Path> files = findAllSql(sub);
+            if (!files.isEmpty()) {
+                String dbName = sub.getFileName().toString();
+                logger.debug("Multi-DB: db='{}', files={}", dbName, files.size());
+                batches.add(new DatabaseBatch(dbName, files));
+            }
+        }
+        // Файлы прямо в корне при Multi-DB — ad-hoc группа (dbName = null)
+        if (!rootSql.isEmpty()) {
+            logger.warn("Ad-hoc файлы в корне при Multi-DB режиме: {} файлов → db_name=null", rootSql.size());
+            batches.add(new DatabaseBatch(null, rootSql));
+        }
+        return batches;
+    }
+
+    /** Рекурсивно собирает все SQL-файлы в директории, отсортированные. */
+    private static List<Path> findAllSql(Path dir) throws IOException {
         try (Stream<Path> stream = Files.walk(dir)) {
-            sqlFiles = stream
+            return stream
                     .filter(Files::isRegularFile)
                     .filter(HoundApplication::isSqlFile)
                     .sorted()
                     .toList();
         }
+    }
 
-        if (sqlFiles.isEmpty()) {
-            logger.warn("SQL-файлы не найдены в: {}", dir);
-            return;
-        }
-
+    /**
+     * Обрабатывает один DatabaseBatch: Phase 1 (параллельный разбор) + Phase 2 (запись).
+     * Создаёт CanonicalPool если есть db_name и writer.
+     *
+     * @return int[]{success, failed}
+     */
+    private int[] processBatch(DatabaseBatch batch, RunConfig config, ArcadeDBSemanticWriter writer,
+                                List<PipelineTimer> allTimers, List<String> allNames)
+            throws IOException {
+        List<Path> sqlFiles = batch.files();
         int threads = config.threads;
-        logger.info("Найдено {} SQL-файлов, потоков: {}", sqlFiles.size(), threads);
+
+        // Создаём CanonicalPool для этой базы данных (null = ad-hoc режим).
+        // appName из config (--app-name) задаёт DaliApplication → DaliDatabase иерархию.
+        CanonicalPool pool = (writer != null && batch.dbName() != null)
+                ? writer.ensureCanonicalPool(batch.dbName(), config.appName, config.appName)
+                : null;
 
         // session-id counter — уникален при параллельном запуске
         AtomicLong sessionSeq = new AtomicLong(System.currentTimeMillis());
 
         // ── Phase 1: параллельный parse + walk + resolve ──
         List<Future<AnalysisResult>> futures = new ArrayList<>(sqlFiles.size());
-        ThreadPoolManager pool = ThreadPoolManager.newFixedThreadPool(threads);
+        ThreadPoolManager threadPool = ThreadPoolManager.newFixedThreadPool(threads);
         for (Path file : sqlFiles) {
-            futures.add(pool.submit(() -> analyzeFile(file, config, sessionSeq)));
+            futures.add(threadPool.submit(() -> analyzeFile(file, config, sessionSeq)));
         }
-        pool.shutdownAndWait();
+        threadPool.shutdownAndWait();
 
         // ── Phase 2: последовательная запись в БД + сбор статистики ──
         int success = 0, failed = 0;
-        List<PipelineTimer> timers = new ArrayList<>();
-        List<String>        names  = new ArrayList<>();
 
         for (Future<AnalysisResult> f : futures) {
             try {
                 AnalysisResult ar = f.get();
                 if (ar.semantic() != null) {
                     if (writer != null) {
-                        writer.saveResult(ar.semantic(), ar.timer());
+                        writer.saveResult(ar.semantic(), ar.timer(), pool, batch.dbName());
                     }
                     printResult(ar.file(), ar.semantic(), ar.timer().count("lines"), ar.timer());
                 }
-                timers.add(ar.timer());
-                names.add(ar.file().getFileName().toString());
+                allTimers.add(ar.timer());
+                allNames.add(ar.file().getFileName().toString());
                 success++;
             } catch (ExecutionException e) {
                 logger.error("Ошибка: {} — {}", "<file>", e.getCause().getMessage(), e.getCause());
@@ -226,7 +335,11 @@ public class HoundApplication {
             }
         }
 
-        printSummary(timers, names, success, failed);
+        if (pool != null) {
+            logger.info("CanonicalPool '{}': {} схем, {} таблиц, {} колонок", batch.dbName(),
+                    pool.schemaCount(), pool.tableCount(), pool.columnCount());
+        }
+        return new int[]{success, failed};
     }
 
     /**
@@ -298,7 +411,8 @@ public class HoundApplication {
         );
 
         if (writer != null) {
-            writer.saveResult(result, timer);
+            // Ad-hoc mode: single file, no database namespace (pool=null, dbName=null)
+            writer.saveResult(result, timer, null, null);
         }
 
         printResult(file, result, lineCount, timer);
@@ -382,6 +496,7 @@ public class HoundApplication {
         options.addOption("n", "db-name", true, "Database name (default: hound)");
         options.addOption("u", "db-user", true, "Database user (default: root)");
         options.addOption(null, "db-password", true, "Database password");
+        options.addOption(null, "app-name", true, "Application name (DaliApplication vertex, groups databases)");
         options.addOption(null, "clean", false, "Delete all Dali records before processing");
         options.addOption(null, "diag", false, "Run diagnostics after processing");
         options.addOption(null, "threads", true, "Number of parallel parse threads (default: CPU cores)");
@@ -417,6 +532,9 @@ public class HoundApplication {
         if (cmd.hasOption("db-user")) config.dbUser = cmd.getOptionValue("db-user");
         if (cmd.hasOption("db-password")) config.dbPassword = cmd.getOptionValue("db-password");
 
+        // Namespace / hierarchy
+        if (cmd.hasOption("app-name")) config.appName = cmd.getOptionValue("app-name");
+
         // Flags
         config.clean = cmd.hasOption("clean");
         config.diag  = cmd.hasOption("diag");
@@ -442,6 +560,9 @@ public class HoundApplication {
         System.out.println("    --db-name hound");
         System.out.println("    --db-user root");
         System.out.println("    --db-password playwithdata");
+        System.out.println();
+        System.out.println("Namespace / hierarchy:");
+        System.out.println("  --app-name <name>            Application name (DaliApplication, groups databases)");
         System.out.println();
         System.out.println("Flags:");
         System.out.println("  --clean                      Очистить все Dali-данные перед обработкой");
@@ -556,6 +677,11 @@ public class HoundApplication {
         String dbName = "hound";
         String dbUser = "root";
         String dbPassword = "playwithdata";
+
+        // Namespace / application hierarchy
+        // --app-name groups multiple databases under one DaliApplication vertex.
+        // Example: --app-name CRM  (creates CRM → DWH, CRM → ODS edges if both processed)
+        String appName = null;
 
         // Flags
         boolean clean    = false;

@@ -54,14 +54,29 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     // Main entry point
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Ad-hoc mode (backward-compatible): no database namespace.
+     * Tables/columns are per-session, no canonical deduplication.
+     */
     public String saveResult(SemanticResult result, PipelineTimer timer) {
+        return saveResult(result, timer, null, null);
+    }
+
+    /**
+     * Namespace-aware save.
+     *
+     * @param pool    CanonicalPool for the database batch (null = ad-hoc mode)
+     * @param dbName  Database name derived from folder name (null = ad-hoc mode)
+     */
+    public String saveResult(SemanticResult result, PipelineTimer timer,
+                             CanonicalPool pool, String dbName) {
         String sid = result.getSessionId();
         long t0 = System.currentTimeMillis();
 
         if (mode == Mode.EMBEDDED) {
-            saveEmbedded(sid, result, timer);
+            saveEmbedded(sid, result, timer, pool, dbName);
         } else {
-            saveRemote(sid, result, timer);
+            saveRemote(sid, result, timer, pool, dbName);
         }
 
         long ms = System.currentTimeMillis() - t0;
@@ -81,14 +96,152 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 .mapToInt(st -> st.getJoins().size()).sum() : 0;
         int cntLineage    = result.getLineage().size();
 
-        logger.info("ArcadeDB ({}): T:{} C:{} S:{} R:{} A:{} J:{} OC:{} L:{} [{}]",
-                mode, cntTables, cntColumns, cntStatements, cntRoutines,
+        logger.info("ArcadeDB ({}) [db={}]: T:{} C:{} S:{} R:{} A:{} J:{} OC:{} L:{} [{}]",
+                mode, dbName != null ? dbName : "ad-hoc",
+                cntTables, cntColumns, cntStatements, cntRoutines,
                 cntAtoms, cntJoins, oc, cntLineage, formatTime(ms));
 
-        writePerfStats(sid, result, timer,
+        writePerfStats(sid, result, timer, dbName,
                 cntTables, cntColumns, cntStatements, cntRoutines,
                 cntAtoms, cntJoins, oc, cntLineage);
         return sid;
+    }
+
+    /**
+     * Creates the canonical DaliDatabase vertex for the given namespace and returns
+     * an empty CanonicalPool backed by it.
+     *
+     * <p>Called once per database batch before Phase 2 write loop.
+     * The CanonicalPool is then passed to each {@link #saveResult} call in the batch.
+     *
+     * @param dbName   Database name (folder name), must not be null
+     * @return  A fresh {@link CanonicalPool} for this database
+     */
+    public CanonicalPool ensureCanonicalPool(String dbName) {
+        return ensureCanonicalPool(dbName, null, null);
+    }
+
+    /**
+     * Creates canonical DaliDatabase (and optionally DaliApplication) vertices and
+     * wires the BELONGS_TO_APP edge between them.
+     *
+     * @param dbName   Database name (folder name), must not be null
+     * @param appName  Application name for DaliApplication vertex; null = no application layer
+     * @param appGeoid Canonical application geoid; null = use appName as geoid
+     * @return  A fresh {@link CanonicalPool} for this database
+     */
+    public CanonicalPool ensureCanonicalPool(String dbName, String appName, String appGeoid) {
+        CanonicalPool pool = new CanonicalPool(dbName);
+        String resolvedAppGeoid = (appGeoid != null) ? appGeoid : appName;
+        try {
+            if (mode == Mode.EMBEDDED) {
+                embeddedDb.transaction(() -> {
+                    // ── DaliApplication (optional) — find-or-create ──
+                    MutableVertex appVtx = null;
+                    if (appName != null) {
+                        var appRs = embeddedDb.query("sql",
+                                "SELECT FROM DaliApplication WHERE app_geoid = :g LIMIT 1",
+                                Map.of("g", resolvedAppGeoid));
+                        if (appRs.hasNext()) {
+                            appVtx = (MutableVertex) appRs.next().toElement();
+                        } else {
+                            appVtx = embeddedDb.newVertex("DaliApplication")
+                                    .set("app_name",   appName)
+                                    .set("app_geoid",  resolvedAppGeoid)
+                                    .set("created_at", System.currentTimeMillis())
+                                    .save();
+                        }
+                        pool.setApplicationVtx(appVtx);
+                    }
+                    // ── DaliDatabase — find-or-create ──
+                    var dbRs = embeddedDb.query("sql",
+                            "SELECT FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
+                            Map.of("g", dbName));
+                    MutableVertex dbVtx;
+                    if (dbRs.hasNext()) {
+                        dbVtx = (MutableVertex) dbRs.next().toElement();
+                    } else {
+                        dbVtx = embeddedDb.newVertex("DaliDatabase")
+                                .set("db_name",    dbName)
+                                .set("db_geoid",   dbName)
+                                .set("created_at", System.currentTimeMillis())
+                                .save();
+                        // Wire BELONGS_TO_APP only when DaliDatabase is newly created
+                        if (appVtx != null) {
+                            dbVtx.newEdge("BELONGS_TO_APP", appVtx, true);
+                        }
+                    }
+                    pool.setDatabaseVtx(dbVtx);
+                });
+            } else {
+                // ── DaliApplication (optional, remote) — find-or-create ──
+                if (appName != null) {
+                    try {
+                        var rs = remoteDb.query("sql",
+                                "SELECT @rid AS rid FROM DaliApplication WHERE app_geoid = :g LIMIT 1",
+                                Map.of("g", resolvedAppGeoid));
+                        if (rs.hasNext()) {
+                            String rid = (String) rs.next().toMap().get("rid");
+                            if (rid != null) pool.setApplicationRid(rid);
+                        }
+                    } catch (Exception ex) {
+                        logger.debug("DaliApplication lookup failed for '{}': {}", appName, ex.getMessage());
+                    }
+                    if (pool.getApplicationRid() == null) {
+                        rcmd("INSERT INTO DaliApplication SET app_name=?, app_geoid=?, created_at=?",
+                                appName, resolvedAppGeoid, System.currentTimeMillis());
+                        try {
+                            var rs = remoteDb.query("sql",
+                                    "SELECT @rid AS rid FROM DaliApplication WHERE app_geoid = :g LIMIT 1",
+                                    Map.of("g", resolvedAppGeoid));
+                            if (rs.hasNext()) {
+                                String rid = (String) rs.next().toMap().get("rid");
+                                if (rid != null) pool.setApplicationRid(rid);
+                            }
+                        } catch (Exception ex) {
+                            logger.debug("DaliApplication RID fetch failed for '{}': {}", appName, ex.getMessage());
+                        }
+                    }
+                }
+                // ── DaliDatabase (remote) — find-or-create ──
+                boolean dbIsNew = false;
+                try {
+                    var rs = remoteDb.query("sql",
+                            "SELECT @rid AS rid FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
+                            Map.of("g", dbName));
+                    if (rs.hasNext()) {
+                        String rid = (String) rs.next().toMap().get("rid");
+                        if (rid != null) pool.setDatabaseRid(rid);
+                    }
+                } catch (Exception ex) {
+                    logger.debug("DaliDatabase lookup failed for '{}': {}", dbName, ex.getMessage());
+                }
+                if (pool.getDatabaseRid() == null) {
+                    rcmd("INSERT INTO DaliDatabase SET db_name=?, db_geoid=?, created_at=?",
+                            dbName, dbName, System.currentTimeMillis());
+                    dbIsNew = true;
+                    try {
+                        var rs = remoteDb.query("sql",
+                                "SELECT @rid AS rid FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
+                                Map.of("g", dbName));
+                        if (rs.hasNext()) {
+                            String rid = (String) rs.next().toMap().get("rid");
+                            if (rid != null) pool.setDatabaseRid(rid);
+                        }
+                    } catch (Exception ex) {
+                        logger.debug("DaliDatabase RID fetch failed for '{}': {}", dbName, ex.getMessage());
+                    }
+                }
+                // ── BELONGS_TO_APP: DaliDatabase → DaliApplication (only for new DB) ──
+                if (dbIsNew && pool.getDatabaseRid() != null && pool.getApplicationRid() != null) {
+                    edgeByRid("BELONGS_TO_APP", pool.getDatabaseRid(), pool.getApplicationRid(), dbName);
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("ensureCanonicalPool failed for '{}': {}", dbName, e.getMessage());
+        }
+        logger.info("CanonicalPool created: db='{}' app='{}'", dbName, appName != null ? appName : "—");
+        return pool;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -96,10 +249,11 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     // ═══════════════════════════════════════════════════════════════
 
     private void writePerfStats(String sid, SemanticResult result, PipelineTimer timer,
+                                String dbName,
                                 int cntTables, int cntColumns, int cntStatements, int cntRoutines,
                                 int cntAtoms, int cntJoins, int cntOutputCols, int cntLineage) {
         // Atom resolution breakdown — iterate raw atoms map
-        int atomResolved = 0, atomConst = 0, atomFunc = 0, atomFailed = 0;
+        int atomResolvedTmp = 0, atomConstTmp = 0, atomFuncTmp = 0, atomFailedTmp = 0;
         for (var container : result.getAtoms().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> cont = (Map<String, Object>) container.getValue();
@@ -109,18 +263,24 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             if (atoms == null) continue;
             for (var at : atoms.entrySet()) {
                 String status = (String) at.getValue().get("status");
-                if ("Обработано".equals(status))      atomResolved++;
-                else if ("constant".equals(status))   atomConst++;
-                else if ("function_call".equals(status)) atomFunc++;
-                else                                  atomFailed++;
+                if ("Обработано".equals(status))      atomResolvedTmp++;
+                else if ("constant".equals(status))   atomConstTmp++;
+                else if ("function_call".equals(status)) atomFuncTmp++;
+                else                                  atomFailedTmp++;
             }
         }
+        // Capture as effectively-final for lambda capture
+        final int atomResolved = atomResolvedTmp;
+        final int atomConst    = atomConstTmp;
+        final int atomFunc     = atomFuncTmp;
+        final int atomFailed   = atomFailedTmp;
 
         try {
             if (mode == Mode.EMBEDDED) {
                 embeddedDb.transaction(() ->
                     embeddedDb.newDocument("DaliPerfStats")
                         .set("session_id",       sid)
+                        .set("db_name",          dbName)
                         .set("file_path",        result.getFilePath())
                         .set("dialect",          result.getDialect())
                         .set("created_at",       System.currentTimeMillis())
@@ -150,13 +310,13 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 );
             } else {
                 rcmd("INSERT INTO DaliPerfStats SET " +
-                     "session_id=?, file_path=?, dialect=?, created_at=?, " +
+                     "session_id=?, db_name=?, file_path=?, dialect=?, created_at=?, " +
                      "ms_parse=?, ms_walk=?, ms_resolve=?, ms_write_vtx=?, ms_write_edge=?, ms_total=?, " +
                      "count_tokens=?, " +
                      "cnt_tables=?, cnt_columns=?, cnt_statements=?, cnt_routines=?, " +
                      "cnt_atoms=?, cnt_atoms_resolved=?, cnt_atoms_const=?, cnt_atoms_func=?, cnt_atoms_failed=?, " +
                      "cnt_output_cols=?, cnt_joins=?, cnt_lineage=?",
-                        sid, result.getFilePath(), result.getDialect(), System.currentTimeMillis(),
+                        sid, dbName, result.getFilePath(), result.getDialect(), System.currentTimeMillis(),
                         timer.ms("parse"), timer.ms("walk"), timer.ms("resolve"),
                         timer.ms("write.vtx"), timer.ms("write.edge"), timer.totalMs(),
                         timer.count("tokens"),
@@ -173,43 +333,80 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     // EMBEDDED mode
     // ═══════════════════════════════════════════════════════════════
 
-    private void saveEmbedded(String sid, SemanticResult result, PipelineTimer timer) {
+    private void saveEmbedded(String sid, SemanticResult result, PipelineTimer timer,
+                              CanonicalPool pool, String dbName) {
         timer.start("write.vtx");
         embeddedDb.transaction(() -> {
-            // ... (весь embedded-код без изменений — оставлен как был)
             Structure str = result.getStructure();
             if (str == null) return;
 
             MutableVertex sessionV = embeddedDb.newVertex("DaliSession")
                     .set("session_id", sid)
+                    .set("db_name",    dbName)
                     .set("file_path", result.getFilePath())
                     .set("dialect", result.getDialect())
                     .set("processing_time_ms", result.getProcessingTimeMs())
                     .set("created_at", System.currentTimeMillis())
                     .save();
 
+            // ── DaliDatabase: canonical (namespace) or per-session (ad-hoc) ──
+            // In namespace mode the canonical DaliDatabase already exists in the pool;
+            // per-session DB references from SQL text are omitted to avoid duplication.
             Map<String, MutableVertex> dbV = new LinkedHashMap<>();
-            for (var e : str.getDatabases().entrySet()) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> d = (Map<String, Object>) e.getValue();
-                MutableVertex v = embeddedDb.newVertex("DaliDatabase")
-                        .set("session_id", sid)
-                        .set("database_geoid", e.getKey())
-                        .set("database_name", d.get("name"))
-                        .save();
-                dbV.put(e.getKey(), v);
+            if (pool == null) {
+                for (var e : str.getDatabases().entrySet()) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> d = (Map<String, Object>) e.getValue();
+                    MutableVertex v = embeddedDb.newVertex("DaliDatabase")
+                            .set("session_id",    sid)
+                            .set("database_geoid", e.getKey())
+                            .set("database_name",  d.get("name"))
+                            .save();
+                    dbV.put(e.getKey(), v);
+                }
             }
 
+            // ── DaliSchema: canonical (namespace) or per-session (ad-hoc) ──
             Map<String, MutableVertex> schV = new LinkedHashMap<>();
             for (var e : str.getSchemas().entrySet()) {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> sc = (Map<String, Object>) e.getValue();
-                MutableVertex v = embeddedDb.newVertex("DaliSchema")
-                        .set("session_id", sid)
-                        .set("schema_geoid", e.getKey())
-                        .set("schema_name", sc.get("name"))
-                        .set("database_geoid", sc.get("db"))
-                        .save();
+                MutableVertex v;
+                if (pool != null) {
+                    // Namespace mode: one vertex per unique schema per database
+                    String cg = pool.canonicalSchema(e.getKey());
+                    v = pool.getSchemaVtx(cg);
+                    if (v == null) {
+                        // Cross-run deduplication: query before create
+                        var rs = embeddedDb.query("sql",
+                                "SELECT FROM DaliSchema WHERE db_name = :d AND schema_geoid = :s LIMIT 1",
+                                Map.of("d", dbName, "s", e.getKey()));
+                        if (rs.hasNext()) {
+                            v = (MutableVertex) rs.next().toElement();
+                        } else {
+                            v = embeddedDb.newVertex("DaliSchema")
+                                    .set("db_name",        dbName)
+                                    .set("db_geoid",       dbName)
+                                    .set("schema_geoid",   e.getKey())
+                                    .set("schema_name",    sc.get("name"))
+                                    .set("database_geoid", sc.get("db"))
+                                    .save();
+                            // CONTAINS_SCHEMA: DaliDatabase → DaliSchema (new schema only)
+                            if (pool.getDatabaseVtx() != null) {
+                                pool.getDatabaseVtx().newEdge("CONTAINS_SCHEMA", v, true);
+                            }
+                        }
+                        pool.putSchemaVtx(cg, v);
+                    }
+                } else {
+                    // Ad-hoc mode: per-session schema vertex (old behavior)
+                    v = embeddedDb.newVertex("DaliSchema")
+                            .set("session_id",     sid)
+                            .set("schema_geoid",   e.getKey())
+                            .set("schema_name",    sc.get("name"))
+                            .set("database_geoid", sc.get("db"))
+                            .save();
+                }
                 schV.put(e.getKey(), v);
             }
 
@@ -234,43 +431,112 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 }
             }
 
+            // ── DaliTable: canonical (namespace mode) or per-session (ad-hoc) ──
             Map<String, MutableVertex> tblV = new LinkedHashMap<>();
             for (var e : str.getTables().entrySet()) {
                 TableInfo t = e.getValue();
-                MutableVertex v = embeddedDb.newVertex("DaliTable")
-                        .set("session_id", sid)
-                        .set("table_geoid", e.getKey())
-                        .set("table_name", t.tableName())
-                        .set("schema_geoid", t.schemaGeoid())
-                        .set("table_type", t.tableType())
-                        .set("aliases", new ArrayList<>(t.aliases()))
-                        .set("column_count", t.columnCount())
-                        .save();
-                tblV.put(e.getKey(), v);
-                sessionV.newEdge("BELONGS_TO_SESSION", v, true);
-                if (t.schemaGeoid() != null) {
-                    MutableVertex sv2 = schV.get(t.schemaGeoid().toUpperCase());
-                    if (sv2 != null) sv2.newEdge("CONTAINS_TABLE", v, true);
+                MutableVertex v;
+                if (pool != null) {
+                    // Namespace mode: one vertex per unique table per database
+                    String cg = pool.canonical(e.getKey());
+                    v = pool.getTableVtx(cg);
+                    if (v == null) {
+                        // Cross-run deduplication: query before create
+                        var rs = embeddedDb.query("sql",
+                                "SELECT FROM DaliTable WHERE db_name = :d AND table_geoid = :t LIMIT 1",
+                                Map.of("d", dbName, "t", e.getKey()));
+                        if (rs.hasNext()) {
+                            v = (MutableVertex) rs.next().toElement();
+                        } else {
+                            v = embeddedDb.newVertex("DaliTable")
+                                    .set("db_name",      dbName)
+                                    .set("table_geoid",  e.getKey())
+                                    .set("table_name",   t.tableName())
+                                    .set("schema_geoid", t.schemaGeoid())
+                                    .set("table_type",   t.tableType())
+                                    .set("aliases",      new ArrayList<>(t.aliases()))
+                                    .set("column_count", t.columnCount())
+                                    .save();
+                            // CONTAINS_TABLE: DaliSchema → DaliTable (new table only)
+                            if (t.schemaGeoid() != null) {
+                                MutableVertex sv2 = schV.get(t.schemaGeoid().toUpperCase());
+                                if (sv2 != null) sv2.newEdge("CONTAINS_TABLE", v, true);
+                            }
+                        }
+                        pool.putTableVtx(cg, v);
+                    }
+                    // No BELONGS_TO_SESSION for canonical tables
+                } else {
+                    // Ad-hoc mode: per-session table vertex (old behavior)
+                    v = embeddedDb.newVertex("DaliTable")
+                            .set("session_id",  sid)
+                            .set("table_geoid", e.getKey())
+                            .set("table_name",  t.tableName())
+                            .set("schema_geoid", t.schemaGeoid())
+                            .set("table_type",  t.tableType())
+                            .set("aliases",     new ArrayList<>(t.aliases()))
+                            .set("column_count", t.columnCount())
+                            .save();
+                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
+                    if (t.schemaGeoid() != null) {
+                        MutableVertex sv2 = schV.get(t.schemaGeoid().toUpperCase());
+                        if (sv2 != null) sv2.newEdge("CONTAINS_TABLE", v, true);
+                    }
                 }
+                tblV.put(e.getKey(), v);
             }
 
+            // ── DaliColumn: canonical (namespace mode) or per-session (ad-hoc) ──
             Map<String, MutableVertex> colV = new LinkedHashMap<>();
             for (var e : str.getColumns().entrySet()) {
                 ColumnInfo c = e.getValue();
-                MutableVertex v = embeddedDb.newVertex("DaliColumn")
-                        .set("session_id", sid)
-                        .set("column_geoid", e.getKey())
-                        .set("table_geoid", c.getTableGeoid())
-                        .set("column_name", c.getColumnName())
-                        .set("expression", c.getExpression())
-                        .set("alias", c.getAlias())
-                        .set("is_output", c.isOutput())
-                        .set("col_order", c.getOrder())
-                        .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
-                        .save();
+                MutableVertex v;
+                if (pool != null) {
+                    // Namespace mode: one vertex per unique column per database
+                    String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
+                    v = pool.getColumnVtx(cg);
+                    if (v == null) {
+                        // Cross-run deduplication: query before create
+                        var rs = embeddedDb.query("sql",
+                                "SELECT FROM DaliColumn WHERE db_name = :d AND column_geoid = :c LIMIT 1",
+                                Map.of("d", dbName, "c", e.getKey()));
+                        if (rs.hasNext()) {
+                            v = (MutableVertex) rs.next().toElement();
+                        } else {
+                            v = embeddedDb.newVertex("DaliColumn")
+                                    .set("db_name",        dbName)
+                                    .set("column_geoid",   e.getKey())
+                                    .set("table_geoid",    c.getTableGeoid())
+                                    .set("column_name",    c.getColumnName())
+                                    .set("expression",     c.getExpression())
+                                    .set("alias",          c.getAlias())
+                                    .set("is_output",      c.isOutput())
+                                    .set("col_order",      c.getOrder())
+                                    .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
+                                    .save();
+                            MutableVertex tv = tblV.get(c.getTableGeoid());
+                            if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
+                        }
+                        pool.putColumnVtx(cg, v);
+                    }
+                    // Existing canonical column: skip (already linked to its table)
+                } else {
+                    // Ad-hoc mode: per-session column (old behavior)
+                    v = embeddedDb.newVertex("DaliColumn")
+                            .set("session_id",   sid)
+                            .set("column_geoid", e.getKey())
+                            .set("table_geoid",  c.getTableGeoid())
+                            .set("column_name",  c.getColumnName())
+                            .set("expression",   c.getExpression())
+                            .set("alias",        c.getAlias())
+                            .set("is_output",    c.isOutput())
+                            .set("col_order",    c.getOrder())
+                            .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
+                            .save();
+                    MutableVertex tv = tblV.get(c.getTableGeoid());
+                    if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
+                }
                 colV.put(e.getKey(), v);
-                MutableVertex tv = tblV.get(c.getTableGeoid());
-                if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
             }
 
             Map<String, MutableVertex> rtV = new LinkedHashMap<>();
@@ -531,28 +797,47 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     // REMOTE mode — с RID-кэшем
     // ═══════════════════════════════════════════════════════════════
 
-    private void saveRemote(String sid, SemanticResult result, PipelineTimer timer) {
+    private void saveRemote(String sid, SemanticResult result, PipelineTimer timer,
+                            CanonicalPool pool, String dbName) {
         Structure str = result.getStructure();
         if (str == null) return;
 
         timer.start("write.vtx");
 
-        // === Все INSERT вершин (без изменений) ===
-        rcmd("INSERT INTO DaliSession SET session_id=?, file_path=?, dialect=?, processing_time_ms=?, created_at=?",
-                sid, result.getFilePath(), result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
+        rcmd("INSERT INTO DaliSession SET session_id=?, db_name=?, file_path=?, dialect=?, processing_time_ms=?, created_at=?",
+                sid, dbName, result.getFilePath(), result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
 
-        for (var e : str.getDatabases().entrySet()) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> d = (Map<String, Object>) e.getValue();
-            rcmd("INSERT INTO DaliDatabase SET session_id=?, database_geoid=?, database_name=?",
-                    sid, e.getKey(), d.get("name"));
+        // ── DaliDatabase: skip per-session references in namespace mode ──
+        // In namespace mode the canonical DaliDatabase was created by ensureCanonicalPool();
+        // SQL-text DB references (str.getDatabases()) are omitted to avoid duplication.
+        if (pool == null) {
+            for (var e : str.getDatabases().entrySet()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> d = (Map<String, Object>) e.getValue();
+                rcmd("INSERT INTO DaliDatabase SET session_id=?, database_geoid=?, database_name=?",
+                        sid, e.getKey(), d.get("name"));
+            }
         }
 
+        // ── DaliSchema: canonical (namespace) or per-session (ad-hoc) ──
+        // Track newly created schemas/tables so we can wire hierarchy edges after RID cache build.
+        Set<String> newSchemaGeoids = new LinkedHashSet<>();
+        Set<String> newTableGeoids  = new LinkedHashSet<>();
         for (var e : str.getSchemas().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> sc = (Map<String, Object>) e.getValue();
-            rcmd("INSERT INTO DaliSchema SET session_id=?, schema_geoid=?, schema_name=?, database_geoid=?",
-                    sid, e.getKey(), sc.get("name"), sc.get("db"));
+            if (pool != null) {
+                String cg = pool.canonicalSchema(e.getKey());
+                if (!pool.hasSchemaRid(cg)) {
+                    rcmd("INSERT INTO DaliSchema SET db_name=?, db_geoid=?, schema_geoid=?, schema_name=?, database_geoid=?",
+                            dbName, dbName, e.getKey(), sc.get("name"), sc.get("db"));
+                    pool.putSchemaRid(cg, cg); // placeholder — real RID fetched in buildRidCache
+                    newSchemaGeoids.add(e.getKey()); // will need CONTAINS_SCHEMA edge
+                }
+            } else {
+                rcmd("INSERT INTO DaliSchema SET session_id=?, schema_geoid=?, schema_name=?, database_geoid=?",
+                        sid, e.getKey(), sc.get("name"), sc.get("db"));
+            }
         }
 
         for (var e : str.getPackages().entrySet()) {
@@ -566,14 +851,38 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         for (var e : str.getTables().entrySet()) {
             TableInfo t = e.getValue();
-            rcmd("INSERT INTO DaliTable SET session_id=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, column_count=?",
-                    sid, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(), t.columnCount());
+            if (pool != null) {
+                // Namespace mode: upsert canonical table
+                String cg = pool.canonical(e.getKey());
+                if (!pool.hasTableRid(cg)) {
+                    rcmd("INSERT INTO DaliTable SET db_name=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, column_count=?",
+                            dbName, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(), t.columnCount());
+                    pool.putTableRid(cg, cg); // placeholder — real RID fetched in buildRidCache
+                    newTableGeoids.add(e.getKey()); // will need CONTAINS_TABLE edge
+                }
+            } else {
+                // Ad-hoc mode: per-session table
+                rcmd("INSERT INTO DaliTable SET session_id=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, column_count=?",
+                        sid, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(), t.columnCount());
+            }
         }
 
         for (var e : str.getColumns().entrySet()) {
             ColumnInfo c = e.getValue();
-            rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?",
-                    sid, e.getKey(), c.getTableGeoid(), c.getColumnName(), c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder());
+            if (pool != null) {
+                // Namespace mode: upsert canonical column
+                String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
+                if (!pool.hasColumnRid(cg)) {
+                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?",
+                            dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
+                            c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder());
+                    pool.putColumnRid(cg, cg); // placeholder
+                }
+            } else {
+                // Ad-hoc mode: per-session column
+                rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?",
+                        sid, e.getKey(), c.getTableGeoid(), c.getColumnName(), c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder());
+            }
         }
 
         for (var e : str.getRoutines().entrySet()) {
@@ -663,10 +972,32 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         timer.stop("write.vtx");
         timer.start("write.edge");
 
-        // === RID CACHE (главное ускорение) ===
-        RidCache rid = buildRidCache(sid);
+        // === RID CACHE (namespace-aware) ===
+        RidCache rid = buildRidCache(sid, pool, dbName);
 
         // ─────── Рёбра по RID ───────
+
+        // CONTAINS_SCHEMA: DaliDatabase → DaliSchema (namespace mode, new schemas only)
+        if (pool != null && pool.getDatabaseRid() != null) {
+            for (String schGeoid : newSchemaGeoids) {
+                String schRid = rid.schemas.get(schGeoid.toUpperCase());
+                if (schRid != null)
+                    edgeByRid("CONTAINS_SCHEMA", pool.getDatabaseRid(), schRid, sid);
+            }
+        }
+
+        // CONTAINS_TABLE: DaliSchema → DaliTable (namespace mode, new tables only)
+        if (pool != null) {
+            for (String tblGeoid : newTableGeoids) {
+                TableInfo t = str.getTables().get(tblGeoid);
+                if (t == null || t.schemaGeoid() == null) continue;
+                String schRid = rid.schemas.get(t.schemaGeoid().toUpperCase());
+                String tblRid = rid.tables.get(tblGeoid);
+                if (schRid != null && tblRid != null)
+                    edgeByRid("CONTAINS_TABLE", schRid, tblRid, sid);
+            }
+        }
+
         for (var e : str.getPackages().entrySet()) {
             @SuppressWarnings("unchecked")
             Map<String, Object> pkg = (Map<String, Object>) e.getValue();
@@ -679,13 +1010,17 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         }
 
-        for (var e : str.getTables().entrySet()) {
-            String sg = e.getValue().schemaGeoid();
-            if (sg != null) {
-                String fromRid = rid.schemas.get(sg.toUpperCase());
-                String toRid   = rid.tables.get(e.getKey());
-                if (fromRid != null && toRid != null)
-                    edgeByRid("CONTAINS_TABLE", fromRid, toRid, sid);
+        // Ad-hoc mode: CONTAINS_TABLE for all per-session tables.
+        // Namespace mode: already handled above via newTableGeoids.
+        if (pool == null) {
+            for (var e : str.getTables().entrySet()) {
+                String sg = e.getValue().schemaGeoid();
+                if (sg != null) {
+                    String fromRid = rid.schemas.get(sg.toUpperCase());
+                    String toRid   = rid.tables.get(e.getKey());
+                    if (fromRid != null && toRid != null)
+                        edgeByRid("CONTAINS_TABLE", fromRid, toRid, sid);
+                }
             }
         }
 
@@ -863,25 +1198,43 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     }
 
     private RidCache buildRidCache(String sid) {
+        return buildRidCache(sid, null, null);
+    }
+
+    /**
+     * Builds RID cache for remote edge creation.
+     *
+     * <p>In namespace mode (pool != null): tables and columns are fetched by {@code db_name}
+     * (canonical, shared across sessions). All other types are fetched by session_id as usual.
+     *
+     * <p>In ad-hoc mode (pool == null): all types fetched by session_id.
+     */
+    private RidCache buildRidCache(String sid, CanonicalPool pool, String dbName) {
         RidCache cache = new RidCache();
-        cache.tables     = buildRidMap("DaliTable",     "table_geoid",     sid);
-        cache.columns    = buildRidMap("DaliColumn",    "column_geoid",    sid);
+
+        if (pool != null && dbName != null) {
+            // Namespace mode: schemas/tables/columns by db_name (canonical, no session_id)
+            cache.schemas = buildRidMapByField("DaliSchema", "schema_geoid", "db_name", dbName);
+            cache.tables  = buildRidMapByField("DaliTable",  "table_geoid",  "db_name", dbName);
+            cache.columns = buildRidMapByField("DaliColumn", "column_geoid", "db_name", dbName);
+        } else {
+            // Ad-hoc mode: all by session_id
+            cache.schemas = buildRidMap("DaliSchema", "schema_geoid", sid);
+            cache.tables  = buildRidMap("DaliTable",  "table_geoid",  sid);
+            cache.columns = buildRidMap("DaliColumn", "column_geoid", sid);
+        }
+
         cache.statements = buildRidMap("DaliStatement", "stmt_geoid",      sid);
         cache.routines   = buildRidMap("DaliRoutine",   "routine_geoid",   sid);
         cache.packages   = buildRidMap("DaliPackage",   "package_geoid",   sid);
-        cache.schemas    = buildRidMap("DaliSchema",    "schema_geoid",    sid);
         cache.atoms      = buildRidMap("DaliAtom",      "atom_id",         sid);
         cache.outputCols = buildRidMap("DaliOutputColumn", "col_key",      sid);
 
-        logger.info("RID cache built for session {} (T:{} C:{} S:{} R:{} P:{} A:{} OC:{})",
-                sid,
-                cache.tables.size(),
-                cache.columns.size(),
-                cache.statements.size(),
-                cache.routines.size(),
-                cache.packages.size(),
-                cache.atoms.size(),
-                cache.outputCols.size());
+        logger.info("RID cache [db={}, sid={}]: T:{} C:{} S:{} R:{} P:{} A:{} OC:{}",
+                dbName != null ? dbName : "ad-hoc", sid,
+                cache.tables.size(), cache.columns.size(),
+                cache.statements.size(), cache.routines.size(),
+                cache.packages.size(), cache.atoms.size(), cache.outputCols.size());
         return cache;
     }
 
@@ -900,6 +1253,28 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         } catch (Exception e) {
             logger.warn("RID map failed for {}: {}", type, e.getMessage());
+        }
+        return map;
+    }
+
+    /** Fetches RID map by a filter field other than session_id (used for canonical types). */
+    private Map<String, String> buildRidMapByField(String type, String keyField,
+                                                    String filterField, String filterVal) {
+        Map<String, String> map = new HashMap<>();
+        try {
+            var rs = remoteDb.query("sql",
+                    "SELECT @rid AS rid, " + keyField + " FROM " + type
+                    + " WHERE " + filterField + " = :val",
+                    Map.of("val", filterVal));
+
+            while (rs.hasNext()) {
+                var doc = rs.next().toMap();
+                String key = (String) doc.get(keyField);
+                String rid = (String) doc.get("rid");
+                if (key != null && rid != null) map.put(key, rid);
+            }
+        } catch (Exception e) {
+            logger.warn("RID map by field failed for {}: {}", type, e.getMessage());
         }
         return map;
     }
