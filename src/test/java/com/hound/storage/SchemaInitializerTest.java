@@ -159,13 +159,13 @@ class SchemaInitializerTest {
     }
 
     @Test
-    @DisplayName("Schema version is 19")
-    void schemaVersionIsNineteen() {
+    @DisplayName("Schema version is 20")
+    void schemaVersionIsTwenty() {
         SchemaInitializer.ensureSchema(db);
 
         ResultSet rs = db.query("sql", "SELECT schema_version FROM DaliMeta LIMIT 1");
         assertTrue(rs.hasNext(), "DaliMeta should have a record");
         int version = ((Number) rs.next().toMap().get("schema_version")).intValue();
-        assertEquals(19, version, "Schema version should be 19");
+        assertEquals(20, version, "Schema version should be 20");
     }
 }

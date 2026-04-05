@@ -576,7 +576,19 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (ctx == null) return;
 
         String tableAlias = extractAlias(ctx.table_alias());
-        String tableName  = extractTableNameViaReflection(ctx, tableAlias);
+
+        // TABLE(collection_expr) — extract function name as synthetic table id so alias resolves
+        String collectionName = extractTableCollectionName(ctx, tableAlias);
+        if (collectionName != null) {
+            base.onTableReference(collectionName, tableAlias, getStartLine(ctx), getEndLine(ctx));
+            base.setCurrentTable(collectionName);
+            base.setCurrentTableAlias(tableAlias);
+            base.setSubqueryAlias(tableAlias);
+            base.subqueryAliasStack().add(tableAlias != null ? tableAlias : "");
+            return;
+        }
+
+        String tableName = extractTableNameViaReflection(ctx, tableAlias);
 
         if (tableName != null && !tableName.isBlank()) {
             base.onTableReference(tableName, tableAlias, getStartLine(ctx), getEndLine(ctx));
@@ -1211,12 +1223,62 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         }
     }
 
-    /** Проверяет, является ли текст подзапросом, а не именем таблицы */
+    /**
+     * Если table_ref_aux содержит TABLE(collection_expr), возвращает синтетическое
+     * имя таблицы вида "FUNC_TABLE__schema__pkg__func" (функция без аргументов,
+     * dots заменены на __). Иначе null.
+     *
+     * Пример: TABLE(dwh.parse.strlist(x, ',')) t  →  "FUNC_TABLE__DWH__PARSE__STRLIST"
+     */
+    private String extractTableCollectionName(PlSqlParser.Table_ref_auxContext ctx,
+                                              String alias) {
+        try {
+            java.lang.reflect.Method internalM = ctx.getClass().getMethod("table_ref_aux_internal");
+            Object internal = internalM.invoke(ctx);
+            if (internal == null) return null;
+
+            java.lang.reflect.Method dmlM = internal.getClass().getMethod("dml_table_expression_clause");
+            Object dml = dmlM.invoke(internal);
+            if (dml == null) return null;
+
+            java.lang.reflect.Method tceM = dml.getClass().getMethod("table_collection_expression");
+            Object tce = tceM.invoke(dml);
+            if (tce == null) return null;
+
+            // expression() inside TABLE(...)
+            java.lang.reflect.Method exprM = tce.getClass().getMethod("expression");
+            Object expr = exprM.invoke(tce);
+            String funcName = null;
+            if (expr != null) {
+                String exprText = (String) expr.getClass().getMethod("getText").invoke(expr);
+                // Take only the function name (before first '(')
+                String raw = exprText.contains("(") ? exprText.substring(0, exprText.indexOf('(')) : exprText;
+                raw = BaseSemanticListener.cleanIdentifier(raw); // strip quotes, uppercase
+                if (raw != null && !raw.isBlank()) {
+                    funcName = "FUNC_TABLE__" + raw.replace(".", "__");
+                }
+            }
+            if (funcName == null || funcName.isBlank()) {
+                funcName = alias != null && !alias.isBlank()
+                        ? "FUNC_TABLE__" + alias.toUpperCase()
+                        : "FUNC_TABLE";
+            }
+            return funcName;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Проверяет, является ли текст подзапросом или составным выражением (не простым именем таблицы) */
     private static boolean looksLikeSubquery(String text) {
         if (text == null) return false;
         String upper = text.trim().toUpperCase();
-        return upper.startsWith("(SELECT") || upper.startsWith("SELECT")
-                || upper.startsWith("(WITH") || text.length() > 200;
+        return upper.startsWith("(SELECT")
+                || upper.startsWith("SELECT")
+                || upper.startsWith("(WITH")
+                || upper.startsWith("TABLE(")   // TABLE(collection_expr) — handled separately
+                || upper.startsWith("(")         // parenthesised join: (t1 JOIN t2 ON ...)
+                || text.length() > 200;
     }
 
     /**
