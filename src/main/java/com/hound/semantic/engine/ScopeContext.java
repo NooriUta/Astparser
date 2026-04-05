@@ -36,6 +36,7 @@ public class ScopeContext {
     private boolean isInDmlTarget = false;
     private boolean isInJoinContext = false;
     private boolean isInValuesClause = false;
+    private boolean isInUpdateSetExpr = false;   // right-hand side of UPDATE SET col=expr
     private boolean isMergeInsertPart = false;
     private boolean isMergeUpdatePart = false;
     private boolean isUnion = false;
@@ -158,6 +159,7 @@ public class ScopeContext {
     public boolean isInDmlTarget()      { return isInDmlTarget; }
     public boolean isInJoinContext()     { return isInJoinContext; }
     public boolean isInValuesClause()   { return isInValuesClause; }
+    public boolean isInUpdateSetExpr()  { return isInUpdateSetExpr; }
     public boolean isMergeInsertPart()  { return isMergeInsertPart; }
     public boolean isMergeUpdatePart()  { return isMergeUpdatePart; }
     public boolean isUnion()            { return isUnion; }
@@ -166,6 +168,7 @@ public class ScopeContext {
     public String getActiveClause() {
         if (isInValuesClause)   return "VALUES";
         if (isInJoinContext)    return "JOIN";
+        if (isInUpdateSetExpr)  return "UPDATE_EXPR";
         if (isMergeInsertPart)  return "MERGE_INSERT";
         if (isMergeUpdatePart)  return "MERGE_UPDATE";
         return statementType != null ? statementType : "UNKNOWN";
@@ -182,6 +185,7 @@ public class ScopeContext {
     public void setInDmlTarget(boolean v)     { this.isInDmlTarget = v; }
     public void setInJoinContext(boolean v)    { this.isInJoinContext = v; }
     public void setInValuesClause(boolean v)  { this.isInValuesClause = v; }
+    public void setInUpdateSetExpr(boolean v) { this.isInUpdateSetExpr = v; }
     public void setMergeInsertPart(boolean v) { this.isMergeInsertPart = v; }
     public void setMergeUpdatePart(boolean v) { this.isMergeUpdatePart = v; }
     public void setUnion(boolean v)           { this.isUnion = v; }

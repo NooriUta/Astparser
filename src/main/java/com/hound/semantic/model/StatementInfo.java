@@ -35,6 +35,15 @@ public class StatementInfo {
     // Joins
     private final List<JoinInfo> joins = new ArrayList<>();
 
+    // G1: affected_columns — all column references in this statement (populated at statement exit)
+    // G2: DML target columns carry poliage_update [{type_affect, order_affect}]
+    private final List<Map<String, Object>> affectedColumns = new ArrayList<>();
+    // Per-type_affect order counters (used by addAffectedColumn for G2)
+    private final Map<String, Integer> affectedTypeCounters = new HashMap<>();
+
+    // G5: ordered column list from INSERT INTO t (col1, col2, col3)
+    private final List<String> insertTargetColumns = new ArrayList<>();
+
     // H1.4 — statement-level semantic flags
     private boolean hasAggregation = false;   // GROUP BY present
     private boolean hasWindow      = false;   // OVER() / analytic function present
@@ -194,5 +203,81 @@ public class StatementInfo {
         joins.clear();
         joins.addAll(updatedJoins);
     }
+
+    // ═══════ G1 / G2: affected columns ═══════
+
+    /**
+     * Records a column reference encountered in this statement.
+     *
+     * @param columnRef      fully-qualified ref (TABLE_GEOID.COL or alias.COL); falls back to columnName
+     * @param columnName     bare column name
+     * @param tableGeoid     resolved table geoid, or null
+     * @param datasetAlias   table alias used in the SQL text, or null
+     * @param sourceType     SQL clause context: SELECT, WHERE, ORDER_BY, GROUP_BY, HAVING, JOIN,
+     *                       INSERT, UPDATE, DELETE, MERGE_UPDATE_TARGET, MERGE_INSERT_TARGET
+     * @param resolutionStatus "resolved" | "unresolved" | "constant" | "function_call"
+     */
+    public void addAffectedColumn(String columnRef, String columnName, String tableGeoid,
+                                   String datasetAlias, String sourceType, String resolutionStatus) {
+        addAffectedColumn(columnRef, columnName, tableGeoid, datasetAlias, sourceType, resolutionStatus, null);
+    }
+
+    /**
+     * G7 overload: accepts an explicit order for poliage_update (VALUES position).
+     * When orderOverride is non-null and positive, it is used as order_affect instead of
+     * the per-type counter, and the counter is bumped to max(counter, orderOverride).
+     */
+    public void addAffectedColumn(String columnRef, String columnName, String tableGeoid,
+                                   String datasetAlias, String sourceType, String resolutionStatus,
+                                   Integer orderOverride) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("column_ref",        columnRef != null ? columnRef : columnName);
+        entry.put("column_name",       columnName);
+        entry.put("table_geoid",       tableGeoid);
+        entry.put("dataset_alias",     datasetAlias);
+        entry.put("source_type",       sourceType);
+        entry.put("resolution_status", resolutionStatus);
+
+        // G2: poliage_update — only for explicit DML target columns
+        String typeAffect = toTypeAffect(sourceType);
+        if (typeAffect != null) {
+            int order;
+            if (orderOverride != null && orderOverride > 0) {
+                order = orderOverride;
+                affectedTypeCounters.merge(typeAffect, orderOverride, Math::max);
+            } else {
+                order = affectedTypeCounters.merge(typeAffect, 1, Integer::sum);
+            }
+            Map<String, Object> poliage = new LinkedHashMap<>();
+            poliage.put("type_affect",  typeAffect);
+            poliage.put("order_affect", order);
+            entry.put("poliage_update", List.of(poliage));
+        }
+
+        affectedColumns.add(entry);
+    }
+
+    private static String toTypeAffect(String sourceType) {
+        if (sourceType == null) return null;
+        return switch (sourceType) {
+            case "INSERT", "MERGE_INSERT_TARGET" -> "INSERT";
+            case "UPDATE", "MERGE_UPDATE_TARGET" -> "UPDATE";
+            default                              -> null;
+        };
+    }
+
+    public List<Map<String, Object>> getAffectedColumns() {
+        return Collections.unmodifiableList(affectedColumns);
+    }
+
+    // ═══════ G5: INSERT target column list ═══════
+
+    /** Appends one column name (from INSERT INTO t (col1, col2, ...)) in declaration order. */
+    public void addInsertTargetColumn(String colName) {
+        if (colName != null) insertTargetColumns.add(colName.toUpperCase());
+    }
+
+    /** Ordered list of explicit INSERT target columns; empty if none declared. */
+    public List<String> getInsertTargetColumns() { return insertTargetColumns; }
 }
  

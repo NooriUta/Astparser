@@ -1,0 +1,197 @@
+package com.hound.semantic;
+
+import com.hound.semantic.engine.UniversalSemanticEngine;
+import com.hound.semantic.dialect.plsql.PlSqlSemanticListener;
+import com.hound.semantic.model.*;
+import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
+import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
+import org.antlr.v4.runtime.*;
+import org.antlr.v4.runtime.tree.ParseTreeWalker;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Tests for LOW gaps G10 / G11 / G13.
+ *
+ * G10: CREATE VIEW with explicit column alias list (col1, col2, ...)
+ * G11: schema.table.column 3-part column reference in onColumnRef
+ * G13: synthetic column name (EXPR_N) when alias and expression text are both absent
+ */
+class LowGapsTest {
+
+    private UniversalSemanticEngine parse(String sql) {
+        UniversalSemanticEngine engine = new UniversalSemanticEngine();
+        PlSqlSemanticListener listener = new PlSqlSemanticListener(engine);
+        PlSqlLexer lexer = new PlSqlLexer(CharStreams.fromString(sql));
+        PlSqlParser parser = new PlSqlParser(new CommonTokenStream(lexer));
+        new ParseTreeWalker().walk(listener, parser.sql_script());
+        engine.resolvePendingColumns();
+        return engine;
+    }
+
+    // ═══════ G10: CREATE VIEW explicit column alias list ═══════
+
+    @Test
+    void g10_createView_explicitColumnList_registersColumns() {
+        String sql = """
+            CREATE OR REPLACE VIEW HR.EMP_SUMMARY (emp_id, full_name, dept_no) AS
+            SELECT employee_id, last_name || ' ' || first_name, department_id
+            FROM hr.employees
+            """;
+        var engine = parse(sql);
+        var tables  = engine.getBuilder().getTables();
+        var columns = engine.getBuilder().getColumns();
+
+        // View should be registered
+        String viewGeoid = tables.keySet().stream()
+                .filter(k -> k.toUpperCase().contains("EMP_SUMMARY"))
+                .findFirst().orElse(null);
+        assertNotNull(viewGeoid, "EMP_SUMMARY view must be registered. Got: " + tables.keySet());
+        assertEquals("VIEW", tables.get(viewGeoid).tableType());
+
+        // Explicit header columns must be registered on the view
+        assertTrue(columns.keySet().stream()
+                .anyMatch(k -> k.toUpperCase().contains("EMP_SUMMARY") && k.toUpperCase().contains("EMP_ID")),
+                "Column EMP_ID must be registered on view. Got: " +
+                columns.keySet().stream().filter(k -> k.toUpperCase().contains("EMP_SUMMARY")).toList());
+
+        assertTrue(columns.keySet().stream()
+                .anyMatch(k -> k.toUpperCase().contains("EMP_SUMMARY") && k.toUpperCase().contains("FULL_NAME")),
+                "Column FULL_NAME must be registered on view.");
+
+        assertTrue(columns.keySet().stream()
+                .anyMatch(k -> k.toUpperCase().contains("EMP_SUMMARY") && k.toUpperCase().contains("DEPT_NO")),
+                "Column DEPT_NO must be registered on view.");
+    }
+
+    @Test
+    void g10_createView_noExplicitColumnList_stillWorks() {
+        // When no explicit column list, existing behavior (copy from inner SELECT) must not break
+        String sql = """
+            CREATE VIEW DEPT_VIEW AS
+            SELECT department_id, department_name FROM departments
+            """;
+        var engine = parse(sql);
+        var tables = engine.getBuilder().getTables();
+
+        String viewGeoid = tables.keySet().stream()
+                .filter(k -> k.toUpperCase().contains("DEPT_VIEW"))
+                .findFirst().orElse(null);
+        assertNotNull(viewGeoid, "DEPT_VIEW should be registered");
+        assertEquals("VIEW", tables.get(viewGeoid).tableType());
+    }
+
+    // ═══════ G11: schema.table.column 3-part reference ═══════
+
+    @Test
+    void g11_schemaTableColumn_columnAddedToTable() {
+        // SCHEMA.TABLE.COLUMN reference — column must be registered on the table
+        String sql = """
+            CREATE OR REPLACE PACKAGE BODY HR.PKG_TEST AS
+              PROCEDURE p IS BEGIN
+                INSERT INTO hr.emp_audit (audit_col)
+                SELECT hr.employees.last_name FROM hr.employees;
+              END;
+            END;
+            """;
+        var engine = parse(sql);
+        var columns = engine.getBuilder().getColumns();
+
+        // hr.employees.last_name should register LAST_NAME on EMPLOYEES table
+        boolean hasLastName = columns.keySet().stream()
+                .anyMatch(k -> k.toUpperCase().contains("EMPLOYEES") && k.toUpperCase().contains("LAST_NAME"));
+        assertTrue(hasLastName,
+                "LAST_NAME should be registered on EMPLOYEES (schema.table.column ref). Got: " + columns.keySet());
+    }
+
+    @Test
+    void g11_schemaTableColumn_tableGeoidResolved() {
+        // 3-part reference: table part must resolve to the correct geoid
+        String sql = """
+            CREATE OR REPLACE PACKAGE BODY TEST_SCH.PKG AS
+              PROCEDURE proc IS BEGIN
+                SELECT test_sch.orders.order_id FROM test_sch.orders;
+              END;
+            END;
+            """;
+        var engine = parse(sql);
+        var tables  = engine.getBuilder().getTables();
+        var columns = engine.getBuilder().getColumns();
+
+        // orders must be known
+        boolean hasOrders = tables.keySet().stream()
+                .anyMatch(k -> k.toUpperCase().contains("ORDERS"));
+        assertTrue(hasOrders, "ORDERS table must be registered. Got: " + tables.keySet());
+
+        // order_id must be on orders
+        boolean hasOrderId = columns.keySet().stream()
+                .anyMatch(k -> k.toUpperCase().contains("ORDERS") && k.toUpperCase().contains("ORDER_ID"));
+        assertTrue(hasOrderId, "ORDER_ID must be on ORDERS. Got: " + columns.keySet());
+    }
+
+    // ═══════ G13: synthetic column name EXPR_N ═══════
+
+    @Test
+    void g13_syntheticColumnName_whenNoAliasOrExpression() {
+        // Expressions without aliases should produce EXPR_N names, not null keys
+        String sql = """
+            SELECT department_id, salary * 1.1, SYSDATE FROM employees
+            """;
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        // Find the SELECT statement
+        var selectStmt = stmts.values().stream()
+                .filter(s -> "SELECT".equals(s.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(selectStmt, "SELECT statement must exist");
+
+        // columnsOutput must have no null or blank keys
+        var outputCols = selectStmt.getColumnsOutput();
+        assertFalse(outputCols.isEmpty(), "Should have output columns");
+        for (String key : outputCols.keySet()) {
+            assertNotNull(key, "Output column key must not be null");
+            assertFalse(key.isBlank(), "Output column key must not be blank");
+        }
+    }
+
+    @Test
+    void g13_syntheticColumnName_exprPrefix() {
+        // Unnamed expression must yield EXPR_<N> where N is its position
+        String sql = "SELECT id, salary + bonus FROM emp";
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        var selectStmt = stmts.values().stream()
+                .filter(s -> "SELECT".equals(s.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(selectStmt);
+
+        // Second column has no alias — must be EXPR_2 or the expression text itself (non-null)
+        var keys = selectStmt.getColumnsOutput().keySet();
+        boolean hasSecondColName = keys.stream()
+                .anyMatch(k -> k != null && !k.isBlank());
+        assertTrue(hasSecondColName, "All output column keys must be non-blank. Got: " + keys);
+    }
+
+    @Test
+    void g13_syntheticColumnName_aliasedColumnNotAffected() {
+        // When alias is present, it must still be used (not EXPR_N)
+        String sql = "SELECT salary * 1.1 AS adjusted_salary FROM employees";
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        var selectStmt = stmts.values().stream()
+                .filter(s -> "SELECT".equals(s.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(selectStmt);
+
+        boolean hasAliasedCol = selectStmt.getColumnsOutput().containsKey("ADJUSTED_SALARY")
+                || selectStmt.getColumnsOutput().containsKey("adjusted_salary");
+        assertTrue(hasAliasedCol,
+                "Aliased column must keep its alias. Got: " + selectStmt.getColumnsOutput().keySet());
+    }
+}

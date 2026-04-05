@@ -274,7 +274,7 @@ task diagnostic(type: JavaExec) {
 
 test {
     useJUnitPlatform()
-    maxHeapSize = '1g'
+    maxHeapSize = '2g'
     // AtomQualityProbeTest reads from external corpus dirs — manual probe, not CI
     exclude '**/AtomQualityProbeTest.class'
 }

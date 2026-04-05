@@ -93,6 +93,7 @@ public abstract class BaseSemanticListener {
         current.put("s_operation_part", false);
         current.put("column_output", null);
         current.put("column_affected", null);
+        current.put("in_update_set_expr", false);
     }
 
     // =========================================================================
@@ -147,6 +148,11 @@ public abstract class BaseSemanticListener {
         if (current.get("order") != null)         return "ORDER";
         if (current.get("having") != null)        return "HAVING";
         if (current.get("group_by") != null)      return "GROUP BY";
+        // DML source-expression guards — atoms inside VALUES or UPDATE SET expression
+        // must NOT inherit the statement's DML type (that would give them poliage_update).
+        // These flags are set by onValuesClauseEnter / onUpdateSetColumn / onMergeElementEnter.
+        if (isValuesClause())                      return "INSERT_VALUES";
+        if (Boolean.TRUE.equals(current.get("in_update_set_expr"))) return "UPDATE_EXPR";
         if (isMergeInsert())                       return "INSERT";
         if (isMergeUpdate())                       return "UPDATE";
         if (currentStatement() != null)            return currentStatementType();
@@ -370,7 +376,7 @@ public abstract class BaseSemanticListener {
             current.put("group_by",          pra.get("parent_s_group_by"));
             current.put("having",            pra.get("parent_s_having"));
             current.put("where",             pra.get("parent_s_where"));
-            current.put("statement_type",    pra.get("parent_statement_type"));
+            current.put("statement_type",    pra.get("type"));
             current.put("s_operation_part",  pra.get("parent_s_operation_part"));
             current.put("Merge_insert_part", pra.get("parent_s_Merge_insert_part"));
             current.put("Merge_update_part", pra.get("parent_s_Merge_update_part"));
@@ -702,11 +708,37 @@ public abstract class BaseSemanticListener {
     public void onMergeUpdateEnter() { current.put("Merge_update_part", true); }
     public void onMergeUpdateExit()  { current.put("Merge_update_part", false); }
 
+    /** G3: Called at enterMerge_element — track target column for MERGE UPDATE SET col=expr. */
+    public void onMergeElementEnter(String columnName) {
+        engine.onMergeElementEnter(columnName);
+        // After registering the MERGE_UPDATE_TARGET column, switch to expression context
+        // so atoms in the SET expression get parent_context="UPDATE_EXPR" (no poliage_update).
+        current.put("in_update_set_expr", true);
+    }
+
+    /** G3: Called at exitMerge_element — clear target column context. */
+    public void onMergeElementExit() {
+        current.put("in_update_set_expr", false);
+        engine.onMergeElementExit();
+    }
+
+    /**
+     * G3: Called at enterMerge_insert_clause when a column list (col1, col2, …) is present.
+     * Registers each column as a MERGE_INSERT_TARGET affected column.
+     */
+    public void onMergeInsertColumns(List<String> columnNames) {
+        engine.onMergeInsertColumns(columnNames);
+    }
+
     public void onValuesClauseEnter() {
         current.put("Values_clause", true);
         current.put("Values_clause_cnt", 0);
+        engine.setValuesClause(true);   // propagate to ScopeContext so atoms get parent_context="VALUES"
     }
-    public void onValuesClauseExit() { current.put("Values_clause", false); }
+    public void onValuesClauseExit() {
+        current.put("Values_clause", false);
+        engine.setValuesClause(false);
+    }
 
     /**
      * STAB-6: вызывается из exitExpression когда expression является дочерним
@@ -732,6 +764,92 @@ public abstract class BaseSemanticListener {
     public void onDmlTargetEnter() { current.put("in_dml_target", true); }
     public void onDmlTargetExit()  { current.put("in_dml_target", false); }
 
+    /**
+     * UPDATE SET target column registration (left-hand side of SET col = expr).
+     *
+     * Called from enterColumn_based_update_set_clause for each single-column assignment.
+     * Registers the column as a DML target (UPDATE affected column with poliage_update),
+     * then sets in_update_set_expr=true so that subsequent atoms in the expression
+     * get parent_context="UPDATE_EXPR" instead of "UPDATE" — preventing them from
+     * also receiving a poliage_update entry (fixing Python Bug B4 analog).
+     *
+     * For multi-column assignments (paren_column_list = subquery) each column
+     * is registered via onUpdateSetColumnList; the expr-guard is still set.
+     */
+    public void onUpdateSetColumn(String colName) {
+        if (colName == null || colName.isBlank()) return;
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt == null) return;
+        var si = engine.getBuilder().getStatements().get(stmt);
+        if (si == null) return;
+
+        List<String> targets = si.getTargetTableGeoids();
+        String targetGeoid = targets.isEmpty() ? null : targets.get(0);
+        String columnRef   = targetGeoid != null ? targetGeoid + "." + colName : colName;
+        si.addAffectedColumn(columnRef, colName, targetGeoid, null, "UPDATE", "target");
+
+        // Expose as column_affected for atom binding (mirrors Python _current['column_affected'])
+        List<Map<String, Object>> acList = si.getAffectedColumns();
+        if (!acList.isEmpty()) current.put("column_affected", acList.get(acList.size() - 1));
+
+        // Switch context: atoms in the expression must NOT get poliage_update.
+        // Both current (BaseSemanticListener) and ScopeContext flags are set so that
+        // ScopeContext.getActiveClause() returns "UPDATE_EXPR" for subsequent atoms.
+        current.put("in_update_set_expr", true);
+        engine.setUpdateSetExpr(true);
+        logger.debug("UPDATE SET target: {} table={}", colName, targetGeoid);
+    }
+
+    /** Multi-column UPDATE SET: (col1, col2) = subquery. */
+    public void onUpdateSetColumnList(List<String> colNames) {
+        if (colNames == null || colNames.isEmpty()) return;
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt == null) return;
+        var si = engine.getBuilder().getStatements().get(stmt);
+        if (si == null) return;
+
+        List<String> targets = si.getTargetTableGeoids();
+        String targetGeoid = targets.isEmpty() ? null : targets.get(0);
+        for (String col : colNames) {
+            if (col == null || col.isBlank()) continue;
+            String columnRef = targetGeoid != null ? targetGeoid + "." + col : col;
+            si.addAffectedColumn(columnRef, col, targetGeoid, null, "UPDATE", "target");
+        }
+        current.put("in_update_set_expr", true);
+        engine.setUpdateSetExpr(true);
+    }
+
+    /** Clears UPDATE SET expression context at exitColumn_based_update_set_clause. */
+    public void onUpdateSetExit() {
+        current.put("in_update_set_expr", false);
+        engine.setUpdateSetExpr(false);
+    }
+
+    /**
+     * G5: called from exitInsert_into_clause when INSERT has explicit column list.
+     * Registers columns in StatementInfo (ordered), adds them to the builder,
+     * and registers each as a DaliAffectedColumn target with poliage_update (type_affect=INSERT).
+     */
+    public void onInsertColumnList(List<String> columns) {
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt == null || columns == null || columns.isEmpty()) return;
+        var si = engine.getBuilder().getStatements().get(stmt);
+        if (si == null) return;
+        List<String> targetGeoids = si.getTargetTableGeoids();
+        String targetGeoid = targetGeoids.isEmpty() ? null : targetGeoids.get(0);
+        int order = 0;
+        for (String col : columns) {
+            si.addInsertTargetColumn(col);
+            if (targetGeoid != null) {
+                engine.getBuilder().addColumn(targetGeoid, col, null, null);
+            }
+            order++;
+            String columnRef = targetGeoid != null ? targetGeoid + "." + col : col;
+            si.addAffectedColumn(columnRef, col, targetGeoid, null, "INSERT", "target", order);
+        }
+        logger.debug("G5 INSERT columns [{}]: {}", stmt, columns);
+    }
+
     public void onSchemaEnter(String schemaName) {
         if (schemaName == null || schemaName.isBlank()) return;
         initDatabase("");
@@ -746,6 +864,14 @@ public abstract class BaseSemanticListener {
      */
     public void onViewDeclaration(String viewName, String schemaGeoid, int line) {
         engine.onViewDeclaration(viewName, schemaGeoid, line);
+    }
+
+    /**
+     * G10: called from enterView_alias_constraint when CREATE VIEW has explicit column list.
+     * Registers each column name directly on the view vertex.
+     */
+    public void onViewColumnAliases(List<String> columns) {
+        engine.onViewColumnAliases(columns);
     }
 
     public void onColumnAlias(String alias) {
@@ -782,8 +908,11 @@ public abstract class BaseSemanticListener {
         var stmtInfo = engine.getBuilder().getStatements().get(engineStmt);
         if (stmtInfo == null) return;
 
-        String colName = alias != null ? alias : expressionText;
         int order = stmtInfo.getColumnsOutput().size() + 1;
+        // G13: generate synthetic name when alias and expression are both absent
+        String colName = (alias != null && !alias.isBlank()) ? alias
+                       : (expressionText != null && !expressionText.isBlank()) ? expressionText
+                       : ("EXPR_" + order);
         Map<String, Object> columnInfo = new LinkedHashMap<>();
         columnInfo.put("order", order);
         columnInfo.put("name", colName);
