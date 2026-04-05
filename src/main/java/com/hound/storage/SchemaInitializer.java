@@ -28,6 +28,41 @@ import org.slf4j.LoggerFactory;
  *   Always active (not only --diag mode). Triggers on: quotes, $, :, (), space, dot
  *   in schema name — helps trace where incorrect schema names originate.
  *
+ * Schema v19 additions (subquery atom resolution):
+ *   ATOM_REF_STMT — DaliAtom → DaliStatement (when atom resolves to subquery/CTE source).
+ *   ATOM_REF_OUTPUT_COL — DaliAtom → DaliOutputColumn (specific output column of that subquery).
+ *   DaliResolutionLog enriched: file_path, table_name, column_name, position added to all entries.
+ *   Previously these fields were silently dropped when table_geoid pointed to a statement geoid
+ *   rather than a physical DaliTable, causing atom resolution edges to be missing for subquery sources.
+ *
+ * Schema v18 additions (G1/G2 — affected_columns as graph nodes):
+ *   DaliAffectedColumn — vertex type, one node per column reference in a statement.
+ *   Connected to DaliStatement via HAS_AFFECTED_COL edge.
+ *   Fields: session_id, statement_geoid, column_ref, column_name, table_geoid,
+ *   dataset_alias, source_type, resolution_status;
+ *   DML target columns additionally carry type_affect (INSERT|UPDATE|DELETE)
+ *   and order_affect (1-based ordinal within that DML type in the statement).
+ *
+ * Schema v17 additions (DaliDatabase field name fix):
+ *   The ad-hoc (pool==null) write path was inserting DaliDatabase with wrong field names
+ *   "database_geoid"/"database_name" instead of canonical "db_geoid"/"db_name" (v7).
+ *   Migration: drops legacy DaliDatabase[database_name_ft] FULLTEXT index and creates
+ *   DaliDatabase[db_name_ft] on the canonical db_name field.
+ *   Also fixes ad-hoc inserts to use db_geoid/db_name with find-or-create deduplication.
+ *
+ * Schema v16 additions (HASH index overflow fix):
+ *   session_id indexes switched from NOTUNIQUE_HASH → NOTUNIQUE (LSM_TREE).
+ *   NOTUNIQUE_HASH uses fixed-size buckets per key; with large files (hundreds of rows
+ *   per session) the bucket overflows. LSM_TREE has no per-key size limit.
+ *   Also drops legacy DaliSession[db_name,dialect] UNIQUE index that blocked re-runs.
+ *
+ * Schema v15 additions (FULLTEXT analyzer fix):
+ *   All FULLTEXT indexes rebuilt with KeywordAnalyzer instead of StandardAnalyzer.
+ *   StandardAnalyzer splits on '_', breaking CONTAINSTEXT lookups for identifiers
+ *   like "some_table_name". KeywordAnalyzer treats the entire value as one token.
+ *   Migration: drops all TypeName[fieldName] FULLTEXT indexes and recreates them
+ *   with METADATA {"analyzer": "org.apache.lucene.analysis.core.KeywordAnalyzer"}.
+ *
  * Schema v14 additions (FULLTEXT gaps):
  *   DaliApplication(app_name), DaliOutputColumn(name),
  *   DaliSession(file_path), DaliStatement(stmt_geoid)
@@ -85,7 +120,18 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    private static final int SCHEMA_VERSION = 14;
+    private static final int SCHEMA_VERSION = 19;
+
+    /**
+     * Lucene analyzer applied to all FULL_TEXT indexes.
+     * KeywordAnalyzer treats the entire field value as one token, so SQL identifiers
+     * like "some_table_name" are not split on underscores (unlike the default
+     * StandardAnalyzer). Query with CONTAINSTEXT('some_table_name') works correctly.
+     */
+    private static final String FT_ANALYZER =
+            "org.apache.lucene.analysis.core.KeywordAnalyzer";
+    private static final String FT_METADATA =
+            " METADATA {\"analyzer\": \"" + FT_ANALYZER + "\"}";
 
     private SchemaInitializer() {}
 
@@ -128,17 +174,21 @@ public final class SchemaInitializer {
         c += vtx(schema, "DaliVariable");
         // v8: application-level grouping (above DaliDatabase)
         c += vtx(schema, "DaliApplication");
+        // v18: one vertex per column reference in a statement (G1/G2)
+        c += vtx(schema, "DaliAffectedColumn");
 
-        // Structural edges (v8: +CONTAINS_SCHEMA, +BELONGS_TO_APP)
+        // Structural edges (v8: +CONTAINS_SCHEMA, +BELONGS_TO_APP; v18: +HAS_AFFECTED_COL)
         for (String e : new String[]{
                 "BELONGS_TO_SESSION", "CONTAINS_TABLE", "CONTAINS_ROUTINE",
                 "HAS_COLUMN", "HAS_PARAMETER", "HAS_VARIABLE",
                 "CHILD_OF", "CONTAINS_STMT", "HAS_OUTPUT_COL", "HAS_ATOM", "HAS_JOIN",
                 "READS_FROM", "WRITES_TO", "USES_SUBQUERY", "ROUTINE_USES_TABLE", "CALLS",
-                "ATOM_REF_TABLE", "ATOM_REF_COLUMN", "ATOM_PRODUCES",
+                "ATOM_REF_TABLE", "ATOM_REF_COLUMN", "ATOM_REF_STMT", "ATOM_REF_OUTPUT_COL", "ATOM_PRODUCES",
                 "DATA_FLOW", "FILTER_FLOW", "JOIN_FLOW", "UNION_FLOW",
                 "NESTED_IN",
-                "CONTAINS_SCHEMA", "BELONGS_TO_APP"
+                "CONTAINS_SCHEMA", "BELONGS_TO_APP",
+                "HAS_AFFECTED_COL", "AFFECTED_COL_REF_TABLE",
+                "JOIN_SOURCE_TABLE", "JOIN_TARGET_TABLE"
         }) { c += edg(schema, e); }
 
         // DaliPerfStats — per-session pipeline timing & structural counts (analytics/graphing)
@@ -312,6 +362,42 @@ public final class SchemaInitializer {
         // ── Schema v13: NOTUNIQUE_HASH for point-lookup fields ──
         tryCreateNonUniqueIndex(db, schema, "DaliStatement",   "DaliStatement[short_name]",   "short_name");
 
+        // ── Schema v16: fix HASH index overflow + drop legacy unique constraint ──
+        // a) DaliSession[db_name,dialect] was a UNIQUE index created outside SchemaInitializer.
+        //    It blocks re-running the parser against the same (db_name, dialect) pair.
+        //    Drop it so multiple sessions per DB/dialect are allowed (history of runs).
+        tryDropIndex(db, "DaliSession[db_name,dialect]");
+        // b) session_id NOTUNIQUE_HASH indexes overflow with large files (hundreds of rows
+        //    per session). Drop the HASH variants and replace with LSM_TREE (tryCreateSessionIndex).
+        for (String t : new String[]{
+                "DaliStatement", "DaliRoutine", "DaliAtom", "DaliJoin",
+                "DaliTable", "DaliColumn", "DaliParameter", "DaliVariable", "DaliOutputColumn"
+        }) {
+            tryDropIndex(db, t + "[session_id]");
+            tryCreateSessionIndex(db, schema, t);
+        }
+
+        // ── Schema v17: fix DaliDatabase FULLTEXT index field name ──
+        // The v10-v16 FULLTEXT index was created on "database_name" (wrong alias).
+        // The canonical field written by ensureCanonicalPool is "db_name" (v7).
+        // Drop the old index and create the correct one.
+        tryDropIndex(db, "DaliDatabase[database_name_ft]");
+        tryDropIndex(db, "DaliDatabase[database_name]");
+        tryCreateFullTextIndex(db, schema, "DaliDatabase", "DaliDatabase[db_name_ft]", "db_name");
+
+        // ── Schema v18: G1/G2 — DaliAffectedColumn vertex + HAS_AFFECTED_COL edge ──
+        // DaliAffectedColumn vertex type and HAS_AFFECTED_COL edge created above in vertex/edge lists.
+        // No extra property declarations needed — ArcadeDB schemaless mode handles the fields.
+        // session_id index for DaliAffectedColumn (for fast per-session queries)
+        for (String t : new String[]{ "DaliAffectedColumn" }) {
+            tryDropIndex(db, t + "[session_id]");
+            tryCreateSessionIndex(db, schema, t);
+        }
+
+        // ── Schema v19: ATOM_REF_STMT + ATOM_REF_OUTPUT_COL ──
+        // Edge types created above in the edge list. No extra properties or indexes needed —
+        // these edges are traversed by graph navigation, not by field-level queries.
+
         // Meta version
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");
         db.transaction(() -> {
@@ -360,6 +446,8 @@ public final class SchemaInitializer {
                 "CREATE EDGE TYPE CALLS IF NOT EXISTS",
                 "CREATE EDGE TYPE ATOM_REF_TABLE IF NOT EXISTS",
                 "CREATE EDGE TYPE ATOM_REF_COLUMN IF NOT EXISTS",
+                "CREATE EDGE TYPE ATOM_REF_STMT IF NOT EXISTS",
+                "CREATE EDGE TYPE ATOM_REF_OUTPUT_COL IF NOT EXISTS",
                 "CREATE EDGE TYPE ATOM_PRODUCES IF NOT EXISTS",
                 "CREATE EDGE TYPE DATA_FLOW IF NOT EXISTS",
                 "CREATE EDGE TYPE FILTER_FLOW IF NOT EXISTS",
@@ -477,6 +565,23 @@ public final class SchemaInitializer {
                 "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
                 // v13: point-lookup HASH indexes
                 "CREATE INDEX IF NOT EXISTS ON DaliStatement (short_name) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                // v18: DaliAffectedColumn vertex + HAS_AFFECTED_COL edge (G1/G2)
+                "CREATE VERTEX TYPE DaliAffectedColumn IF NOT EXISTS",
+                "CREATE EDGE TYPE HAS_AFFECTED_COL IF NOT EXISTS",
+                "CREATE PROPERTY DaliAffectedColumn.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.statement_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.column_ref IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.column_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.table_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.dataset_alias IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.source_type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.resolution_status IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.type_affect IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAffectedColumn.order_affect IF NOT EXISTS INTEGER",
+                "CREATE INDEX IF NOT EXISTS ON DaliAffectedColumn (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE EDGE TYPE AFFECTED_COL_REF_TABLE IF NOT EXISTS",
+                "CREATE EDGE TYPE JOIN_SOURCE_TABLE IF NOT EXISTS",
+                "CREATE EDGE TYPE JOIN_TARGET_TABLE IF NOT EXISTS",
         };
     }
 

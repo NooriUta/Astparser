@@ -76,6 +76,16 @@ public class ScopeManager {
         return ctx != null && ctx.isInValuesClause();
     }
 
+    public void setInValuesClause(boolean val) {
+        ScopeContext ctx = peek();
+        if (ctx != null) ctx.setInValuesClause(val);
+    }
+
+    public void setInUpdateSetExpr(boolean val) {
+        ScopeContext ctx = peek();
+        if (ctx != null) ctx.setInUpdateSetExpr(val);
+    }
+
     public String getActiveClause() {
         ScopeContext ctx = peek();
         return ctx != null ? ctx.getActiveClause() : "UNKNOWN";

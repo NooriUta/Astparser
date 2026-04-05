@@ -6,6 +6,7 @@ import com.hound.semantic.model.TableInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+
 import java.util.*;
 
 /**
@@ -27,6 +28,9 @@ public class AtomProcessor {
 
     // S1.PRE: resolution log — one entry per resolved/unresolved column-reference atom
     private final List<Map<String, Object>> resolutionLog = new ArrayList<>();
+
+    // G3: current MERGE UPDATE target column (set at enterMerge_element, cleared at exit)
+    private String currentMergeTargetColumn = null;
 
     // External dependencies
     private NameResolver nameResolver;
@@ -329,6 +333,52 @@ public class AtomProcessor {
         // B2.AR3 — atom resolution audit
         logger.info("DIAG Atoms [{}]: total={} resolved={} const={} func={} failed={}",
                 statementGeoid, total, resolved, constants, functions, failed);
+
+        // G1: build affected_columns on StatementInfo from all resolved atoms
+        buildAffectedColumnsFromAtoms(statementGeoid, stmtAtoms);
+    }
+
+    /**
+     * DaliAffectedColumn = only target table columns (INSERT col list, UPDATE SET cols,
+     * MERGE INSERT/UPDATE targets). Those are registered explicitly during the grammar walk
+     * via onInsertColumnList / onUpdateSetColumn / addMergeTargetColumn.
+     * Atoms (SELECT, WHERE, JOIN, ORDER, HAVING, etc.) do NOT go into affectedColumns.
+     */
+    private void buildAffectedColumnsFromAtoms(String statementGeoid,
+                                                Map<String, Map<String, Object>> stmtAtoms) {
+        // Intentionally empty: all affectedColumns entries are registered explicitly.
+    }
+
+    // =========================================================================
+    // G3: MERGE element target column tracking
+    // =========================================================================
+
+    /** Called at enterMerge_element — sets the target column name for subsequent atoms. */
+    public void setMergeTargetColumn(String columnName) {
+        this.currentMergeTargetColumn = columnName;
+    }
+
+    /** Called at exitMerge_element — clears the target column context. */
+    public void clearMergeTargetColumn() {
+        this.currentMergeTargetColumn = null;
+    }
+
+    /**
+     * G3: Explicitly registers a MERGE UPDATE/INSERT target column as an affected column.
+     * Called at exitMerge_element / enterMerge_insert_clause.
+     *
+     * @param sourceType "MERGE_UPDATE_TARGET" or "MERGE_INSERT_TARGET"
+     */
+    public void addMergeTargetColumn(String statementGeoid, String columnName,
+                                      String targetTableGeoid, String sourceType) {
+        if (statementGeoid == null || columnName == null) return;
+        StatementInfo si = builder == null ? null : builder.getStatements().get(statementGeoid);
+        if (si == null) return;
+
+        String columnRef = (targetTableGeoid != null)
+                ? targetTableGeoid + "." + columnName
+                : columnName;
+        si.addAffectedColumn(columnRef, columnName, targetTableGeoid, null, sourceType, "target");
     }
 
     /**
@@ -839,7 +889,8 @@ public class AtomProcessor {
 
     /** Appends one DaliResolutionLog entry. raw_input captures the exact atom text
      *  as collected by the listener — including any accidentally-grabbed brackets
-     *  or schema prefixes (the primary use-case for this log). */
+     *  or schema prefixes (the primary use-case for this log).
+     *  table_name, column_name, position are included for failed-resolution diagnosis. */
     private void appendLog(String stmtGeoid, Map<String, Object> atomData,
                            Map<String, Object> resolution) {
         Map<String, Object> entry = new LinkedHashMap<>();
@@ -849,8 +900,12 @@ public class AtomProcessor {
         entry.put("is_function_call", Boolean.TRUE.equals(atomData.get("is_function_call")));
         entry.put("atom_context",     atomData.get("atom_context"));
         entry.put("parent_context",   atomData.get("parent_context"));
-        entry.put("note",     resolution != null ? resolution.get("reason")         : null);
-        entry.put("strategy", resolution != null ? resolution.get("reference_type") : null);
+        entry.put("note",        resolution != null ? resolution.get("reason")         : null);
+        entry.put("strategy",    resolution != null ? resolution.get("reference_type") : null);
+        // Variables of the lookup attempt — critical for diagnosing failed resolutions
+        entry.put("table_name",  atomData.get("table_name"));
+        entry.put("column_name", atomData.get("column_name"));
+        entry.put("position",    atomData.get("position"));
         resolutionLog.add(entry);
     }
 

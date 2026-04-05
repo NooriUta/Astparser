@@ -238,6 +238,24 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         base.onDmlTargetExit();
     }
 
+    /**
+     * G5: extract explicit column list from INSERT INTO t (col1, col2, col3).
+     * At this point general_table_ref has already been parsed, so the target table
+     * geoid is available in StatementInfo.targetTables.
+     */
+    @Override
+    public void exitInsert_into_clause(PlSqlParser.Insert_into_clauseContext ctx) {
+        if (ctx == null || ctx.paren_column_list() == null) return;
+        PlSqlParser.Column_listContext colList = ctx.paren_column_list().column_list();
+        if (colList == null || colList.column_name() == null) return;
+        List<String> cols = new ArrayList<>();
+        for (PlSqlParser.Column_nameContext cn : colList.column_name()) {
+            String name = BaseSemanticListener.cleanIdentifier(cn.getText());
+            if (name != null && !name.isBlank()) cols.add(name);
+        }
+        if (!cols.isEmpty()) base.onInsertColumnList(cols);
+    }
+
     @Override
     public void enterUpdate_statement(PlSqlParser.Update_statementContext ctx) {
         base.onDmlTargetEnter();
@@ -248,6 +266,44 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void exitUpdate_statement(PlSqlParser.Update_statementContext ctx) {
         base.onStatementExit();
         base.onDmlTargetExit();
+    }
+
+    /**
+     * UPDATE SET target column registration.
+     *
+     * Handles two forms:
+     *   1. col = expr           → single column_name on left side
+     *   2. (col1, col2) = subq  → paren_column_list on left side
+     *
+     * Registers the left-hand column(s) as UPDATE affected columns (with poliage_update),
+     * then sets in_update_set_expr=true so atoms in the right-hand expression get
+     * parent_context="UPDATE_EXPR" and do NOT receive a duplicate poliage_update.
+     * The flag is cleared at exit.
+     */
+    @Override
+    public void enterColumn_based_update_set_clause(
+            PlSqlParser.Column_based_update_set_clauseContext ctx) {
+        if (ctx == null) return;
+        if (ctx.column_name() != null) {
+            String colName = BaseSemanticListener.cleanIdentifier(ctx.column_name().getText());
+            if (colName != null && !colName.isBlank()) {
+                base.onUpdateSetColumn(colName);
+            }
+        } else if (ctx.paren_column_list() != null
+                && ctx.paren_column_list().column_list() != null) {
+            List<String> cols = new ArrayList<>();
+            for (var cn : ctx.paren_column_list().column_list().column_name()) {
+                String c = BaseSemanticListener.cleanIdentifier(cn.getText());
+                if (c != null && !c.isBlank()) cols.add(c);
+            }
+            if (!cols.isEmpty()) base.onUpdateSetColumnList(cols);
+        }
+    }
+
+    @Override
+    public void exitColumn_based_update_set_clause(
+            PlSqlParser.Column_based_update_set_clauseContext ctx) {
+        base.onUpdateSetExit();
     }
 
     @Override
@@ -431,8 +487,15 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // CTE / WITH clause
     // =========================================================================
 
+    /** Saved is_first_subq marker — restored after WITH clause so the main
+     *  subquery of select_only_statement is still recognized as "first". */
+    private Integer savedFirstSubqLine;
+    private Integer savedFirstSubqCol;
+
     @Override
     public void enterWith_clause(PlSqlParser.With_clauseContext ctx) {
+        savedFirstSubqLine = base.getIsFirstSubq();
+        savedFirstSubqCol  = base.getIsFirstSubqp();
         base.onCTEEnter(extract(ctx), getStartLine(ctx), getEndLine(ctx));
         base.setIsFirstSubq(null);
         base.setIsFirstSubqp(null);
@@ -441,6 +504,9 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void exitWith_clause(PlSqlParser.With_clauseContext ctx) {
         base.onCTEExit();
+        // Restore so main subquery after WITH is recognised as "first" (no extra scope push)
+        base.setIsFirstSubq(savedFirstSubqLine);
+        base.setIsFirstSubqp(savedFirstSubqCol);
     }
 
     // =========================================================================
@@ -769,7 +835,21 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // =========================================================================
 
     @Override
-    public void enterMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx) { base.onMergeInsertEnter(); }
+    public void enterMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx) {
+        base.onMergeInsertEnter();
+        // G3: extract explicit column list (col1, col2, ...) if present
+        if (ctx.paren_column_list() != null
+                && ctx.paren_column_list().column_list() != null) {
+            var colList = ctx.paren_column_list().column_list().column_name();
+            if (colList != null && !colList.isEmpty()) {
+                java.util.List<String> cols = new java.util.ArrayList<>();
+                for (var cn : colList) {
+                    if (cn != null) cols.add(BaseSemanticListener.cleanIdentifier(cn.getText()));
+                }
+                base.onMergeInsertColumns(cols);
+            }
+        }
+    }
     @Override
     public void exitMerge_insert_clause(PlSqlParser.Merge_insert_clauseContext ctx)  { base.onMergeInsertExit(); }
 
@@ -777,6 +857,19 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx) { base.onMergeUpdateEnter(); }
     @Override
     public void exitMerge_update_clause(PlSqlParser.Merge_update_clauseContext ctx)  { base.onMergeUpdateExit(); }
+
+    /** G3: MERGE UPDATE SET col = expr — track per-element target column. */
+    @Override
+    public void enterMerge_element(PlSqlParser.Merge_elementContext ctx) {
+        if (ctx.column_name() != null) {
+            base.onMergeElementEnter(
+                    BaseSemanticListener.cleanIdentifier(ctx.column_name().getText()));
+        }
+    }
+    @Override
+    public void exitMerge_element(PlSqlParser.Merge_elementContext ctx) {
+        base.onMergeElementExit();
+    }
 
     // =========================================================================
     // CALLS (STAB-9): межпроцедурные зависимости
@@ -984,6 +1077,23 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         base.onStatementExit();
         base.setIsFirstSubq(null);
         base.setIsFirstSubqp(null);
+    }
+
+    // =========================================================================
+    // G10: CREATE VIEW (col1, col2, ...) column alias list
+    // =========================================================================
+
+    @Override
+    public void enterView_alias_constraint(PlSqlParser.View_alias_constraintContext ctx) {
+        if (ctx == null) return;
+        var aliasList = ctx.table_alias();
+        if (aliasList == null || aliasList.isEmpty()) return;
+        List<String> cols = new ArrayList<>();
+        for (var ta : aliasList) {
+            String name = BaseSemanticListener.cleanIdentifier(ta.getText());
+            if (name != null && !name.isBlank()) cols.add(name);
+        }
+        if (!cols.isEmpty()) base.onViewColumnAliases(cols);
     }
 
     // =========================================================================

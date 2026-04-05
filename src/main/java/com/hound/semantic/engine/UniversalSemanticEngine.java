@@ -184,6 +184,20 @@ public class UniversalSemanticEngine {
         logger.debug("VIEW declared: '{}' schema='{}' line={}", viewGeoid, schemaGeoid, line);
     }
 
+    /**
+     * G10: called when CREATE VIEW has explicit column alias list — (col1, col2, ...).
+     * Registers each alias as a column directly on the view vertex (before the inner SELECT runs).
+     */
+    public void onViewColumnAliases(List<String> columns) {
+        if (currentViewTargetGeoid == null || columns == null) return;
+        for (String col : columns) {
+            if (col != null && !col.isBlank()) {
+                builder.addColumn(currentViewTargetGeoid, col, null, null);
+            }
+        }
+        logger.debug("G10 VIEW columns [{}]: {}", currentViewTargetGeoid, columns);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Table references
     // ═══════════════════════════════════════════════════════════════
@@ -200,6 +214,29 @@ public class UniversalSemanticEngine {
                                  int line, int endLine) {
         if (tableName == null || tableName.isBlank()) return;
 
+        String currentStmt = scopeManager.currentStatement();
+
+        // G8: detect CTE / inline-view reference in FROM — route to sourceSubquery
+        // instead of creating a spurious physical-table vertex.
+        if ("SOURCE".equals(role) && currentStmt != null) {
+            ResolvedRef cteRef = nameResolver.resolve(tableName, "subquery", currentStmt);
+            if (cteRef.isResolved()
+                    && ("CTE".equals(cteRef.getType()) || "SUBQUERY".equals(cteRef.getType()))) {
+                var stmtInfo = builder.getStatements().get(currentStmt);
+                if (stmtInfo != null) {
+                    stmtInfo.addSourceSubquery(cteRef.getGeoid(), alias, cteRef.getGeoid());
+                    builder.addLineageEdge(cteRef.getGeoid(), currentStmt, "READS_FROM", currentStmt);
+                }
+                if (alias != null && !alias.isBlank()) {
+                    scopeManager.registerAlias(alias.toUpperCase(), cteRef.getGeoid());
+                }
+                scopeManager.registerAlias(tableName.toUpperCase(), cteRef.getGeoid());
+                logger.debug("Table REF (CTE/SQ): {} alias={} role={} → {}",
+                        tableName, alias, role, cteRef.getGeoid());
+                return;
+            }
+        }
+
         String schemaGeoid = scopeManager.currentSchema();
         String tableGeoid = builder.ensureTable(tableName, schemaGeoid);
 
@@ -212,7 +249,6 @@ public class UniversalSemanticEngine {
         scopeManager.registerAlias(tableName.toUpperCase(), tableGeoid);
 
         // Source/Target в текущем statement
-        String currentStmt = scopeManager.currentStatement();
         if (currentStmt != null) {
             var stmtInfo = builder.getStatements().get(currentStmt);
             if (stmtInfo != null) {
@@ -260,10 +296,20 @@ public class UniversalSemanticEngine {
         String currentStmt = scopeManager.currentStatement();
         String parentContext = scopeManager.getActiveClause();
 
-        // Parse "table.column" or "column"
-        String[] parts = fullRef.split("\\.", 2);
-        String tablePart = parts.length > 1 ? parts[0] : null;
-        String columnPart = parts.length > 1 ? parts[1] : parts[0];
+        // G11: parse "schema.table.column", "table.column" or "column"
+        String tablePart;
+        String columnPart;
+        long dotCount = fullRef.chars().filter(c -> c == '.').count();
+        if (dotCount >= 2) {
+            // schema.table.column — treat "schema.table" as the table part
+            int lastDot = fullRef.lastIndexOf('.');
+            tablePart = fullRef.substring(0, lastDot);
+            columnPart = fullRef.substring(lastDot + 1);
+        } else {
+            String[] parts = fullRef.split("\\.", 2);
+            tablePart = parts.length > 1 ? parts[0] : null;
+            columnPart = parts.length > 1 ? parts[1] : parts[0];
+        }
 
         // Resolve table
         String tableGeoid = null;
@@ -277,6 +323,11 @@ public class UniversalSemanticEngine {
             if (implicit.isResolved()) {
                 tableGeoid = implicit.getGeoid();
             }
+        }
+
+        // G9: queue unresolved column for post-walk pending resolution
+        if (tableGeoid == null && currentStmt != null) {
+            addPendingColumn(fullRef, currentStmt);
         }
 
         // Add column to structure + usage tracking
@@ -526,6 +577,16 @@ public class UniversalSemanticEngine {
         return scopeManager.getActiveClause();
     }
 
+    /** Propagates VALUES clause enter/exit to ScopeContext so atoms get parent_context="VALUES". */
+    public void setValuesClause(boolean val) {
+        scopeManager.setInValuesClause(val);
+    }
+
+    /** Propagates UPDATE SET expression context to ScopeContext so atoms get parent_context="UPDATE_EXPR". */
+    public void setUpdateSetExpr(boolean val) {
+        scopeManager.setInUpdateSetExpr(val);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // H1.4 — Statement semantic flags
     // ═══════════════════════════════════════════════════════════════
@@ -689,6 +750,57 @@ public class UniversalSemanticEngine {
     /** Возвращает собранные вызовы для последующей записи CALLS рёбер */
     public Map<String, List<Map<String, String>>> getCalledRoutines() {
         return calledRoutines;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // G3: MERGE element target column tracking
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Called at enterMerge_element (MERGE UPDATE SET col = expr).
+     * Stores the target column so subsequent atoms in the expression can be correlated.
+     * Also immediately creates an affected_column "MERGE_UPDATE_TARGET" entry for that column.
+     */
+    public void onMergeElementEnter(String targetColumnName) {
+        atomProcessor.setMergeTargetColumn(targetColumnName);
+        // Eagerly register the target column in the current statement's affected_columns
+        String stmtGeoid = scopeManager.currentStatement();
+        if (stmtGeoid != null && targetColumnName != null) {
+            // Resolve target table geoid from current statement's target tables
+            String targetTableGeoid = resolveTargetTableGeoid(stmtGeoid);
+            atomProcessor.addMergeTargetColumn(stmtGeoid, targetColumnName,
+                    targetTableGeoid, "MERGE_UPDATE_TARGET");
+        }
+    }
+
+    /** Called at exitMerge_element — clears target column context. */
+    public void onMergeElementExit() {
+        atomProcessor.clearMergeTargetColumn();
+    }
+
+    /**
+     * Called from enterMerge_insert_clause when column list is present.
+     * Registers each column in (col1, col2, ...) as a MERGE_INSERT_TARGET affected column.
+     *
+     * @param columnNames ordered list of target column names
+     */
+    public void onMergeInsertColumns(List<String> columnNames) {
+        String stmtGeoid = scopeManager.currentStatement();
+        if (stmtGeoid == null || columnNames == null) return;
+        String targetTableGeoid = resolveTargetTableGeoid(stmtGeoid);
+        for (String col : columnNames) {
+            if (col != null && !col.isBlank()) {
+                atomProcessor.addMergeTargetColumn(stmtGeoid, col,
+                        targetTableGeoid, "MERGE_INSERT_TARGET");
+            }
+        }
+    }
+
+    /** Returns the first target table geoid for a statement, or null. */
+    private String resolveTargetTableGeoid(String stmtGeoid) {
+        var si = builder.getStatements().get(stmtGeoid);
+        if (si == null) return null;
+        return si.getTargetTableGeoids().stream().findFirst().orElse(null);
     }
 
     /** S1.0: shortcut for diagnostic tests — delegates to AtomProcessor */

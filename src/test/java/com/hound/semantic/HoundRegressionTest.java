@@ -2,6 +2,7 @@ package com.hound.semantic;
 
 import com.hound.semantic.engine.UniversalSemanticEngine;
 import com.hound.semantic.dialect.plsql.PlSqlSemanticListener;
+import com.hound.semantic.model.StatementInfo;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
 import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
 import org.antlr.v4.runtime.*;
@@ -161,6 +162,100 @@ class HoundRegressionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // G1/G2 — affected_columns per-file assertions
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * G1: Every fixture file must produce at least one DaliAffectedColumn entry.
+     * Ensures the affected-column pipeline runs and produces output.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("testFiles")
+    void affectedColumns_nonEmpty(Path file) throws IOException {
+        UniversalSemanticEngine engine = parseFile(file);
+        long total = engine.getBuilder().getStatements().values().stream()
+                .mapToLong(s -> s.getAffectedColumns().size())
+                .sum();
+        assertTrue(total > 0,
+                file.getFileName() + ": expected > 0 affected columns, got 0");
+    }
+
+    /**
+     * G2: All DML target affected columns must have order_affect > 0.
+     * Ensures the poliage_update ordinal counter is wired correctly.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("testFiles")
+    void insertPoliage_orderAffectPositive(Path file) throws IOException {
+        UniversalSemanticEngine engine = parseFile(file);
+        List<String> violations = new ArrayList<>();
+        for (var e : engine.getBuilder().getStatements().entrySet()) {
+            for (Map<String, Object> ac : e.getValue().getAffectedColumns()) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> poliage = (List<Map<String, Object>>) ac.get("poliage_update");
+                if (poliage == null || poliage.isEmpty()) continue;
+                String typeAffect = (String)  poliage.get(0).get("type_affect");
+                Object orderAffect = poliage.get(0).get("order_affect");
+                if (typeAffect != null
+                        && (orderAffect == null || ((Number) orderAffect).intValue() <= 0)) {
+                    violations.add(e.getKey() + "." + ac.get("column_name") + "[" + typeAffect + "]");
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(),
+                file.getFileName() + ": DML affected columns with order_affect <= 0: " + violations);
+    }
+
+    /**
+     * G4: DaliAffectedColumn must contain ONLY target table columns.
+     * source_type must be one of: INSERT, UPDATE, MERGE_INSERT_TARGET, MERGE_UPDATE_TARGET.
+     * SELECT, WHERE, JOIN, ORDER, HAVING, DELETE, VALUES, etc. must not appear.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("testFiles")
+    void affectedColumns_onlyTargetColumns(Path file) throws IOException {
+        UniversalSemanticEngine engine = parseFile(file);
+        Set<String> allowed = Set.of("INSERT", "UPDATE", "MERGE_INSERT_TARGET", "MERGE_UPDATE_TARGET");
+        List<String> violations = new ArrayList<>();
+        for (var e : engine.getBuilder().getStatements().entrySet()) {
+            for (Map<String, Object> ac : e.getValue().getAffectedColumns()) {
+                String st = (String) ac.get("source_type");
+                if (!allowed.contains(st)) {
+                    violations.add(e.getKey() + "." + ac.get("column_name") + "[" + st + "]");
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(),
+                file.getFileName() + ": non-target source_type in affectedColumns: " + violations);
+    }
+
+    /**
+     * G3 / MERGE: Files with MERGE statements must have both
+     * MERGE_UPDATE_TARGET and MERGE_INSERT_TARGET affected columns.
+     * Regression guard for MERGE column-binding (enterMerge_element / paren_column_list).
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("testFiles")
+    void mergeStatements_bindTargetColumns(Path file) throws IOException {
+        UniversalSemanticEngine engine = parseFile(file);
+        boolean hasMerge = engine.getBuilder().getStatements().values().stream()
+                .anyMatch(s -> "MERGE".equals(s.getType()));
+        if (!hasMerge) return;   // skip non-MERGE fixtures
+
+        Set<String> sourceTypes = new HashSet<>();
+        for (StatementInfo s : engine.getBuilder().getStatements().values()) {
+            for (Map<String, Object> ac : s.getAffectedColumns()) {
+                Object st = ac.get("source_type");
+                if (st != null) sourceTypes.add(st.toString());
+            }
+        }
+        assertTrue(sourceTypes.contains("MERGE_UPDATE_TARGET"),
+                file.getFileName() + ": MERGE statement missing MERGE_UPDATE_TARGET in affected columns");
+        assertTrue(sourceTypes.contains("MERGE_INSERT_TARGET"),
+                file.getFileName() + ": MERGE statement missing MERGE_INSERT_TARGET in affected columns");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // S2.Q — summary (informational, non-blocking)
     // ═══════════════════════════════════════════════════════════════
 
@@ -191,8 +286,40 @@ class HoundRegressionTest {
         LOG.info("  Suggested QUALITY_THRESHOLD = {}  (min - 0.10)",
                 String.format("%.2f", Math.max(0, min - 0.10)));
 
+        // ── G1/G2/G4 aggregate summary ──
+        long totalAC = 0, totalInsert = 0, totalUpdate = 0, totalMergeU = 0, totalMergeI = 0;
+        Map<String, Long> bySourceType = new LinkedHashMap<>();
+        for (Path file : (Iterable<Path>) testFiles()::iterator) {
+            UniversalSemanticEngine engine = parseFile(file);
+            for (StatementInfo s : engine.getBuilder().getStatements().values()) {
+                for (Map<String, Object> ac : s.getAffectedColumns()) {
+                    totalAC++;
+                    String src = ac.get("source_type") != null ? ac.get("source_type").toString() : "(null)";
+                    bySourceType.merge(src, 1L, Long::sum);
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> poliage = (List<Map<String, Object>>) ac.get("poliage_update");
+                    if (poliage != null && !poliage.isEmpty()) {
+                        String ta = (String) poliage.get(0).get("type_affect");
+                        if ("INSERT".equals(ta)) totalInsert++;
+                        else if ("UPDATE".equals(ta)) totalUpdate++;
+                    }
+                    if ("MERGE_UPDATE_TARGET".equals(src)) totalMergeU++;
+                    if ("MERGE_INSERT_TARGET".equals(src)) totalMergeI++;
+                }
+            }
+        }
+        LOG.info("=== G1/G2/G4 AffectedColumn Summary (target columns only) ===");
+        LOG.info("  Total DaliAffectedColumn : {}", totalAC);
+        bySourceType.entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                .forEach(e -> LOG.info("    {:<28} {}", e.getKey(), e.getValue()));
+        LOG.info("  type_affect — INSERT:{} UPDATE:{}", totalInsert, totalUpdate);
+        LOG.info("  MERGE targets — UPDATE_TARGET:{} INSERT_TARGET:{}", totalMergeU, totalMergeI);
+
         // Non-blocking structural assertion
         assertTrue(avg > 0,
                 "Average quality must be > 0 across all fixture files");
+        assertTrue(totalAC > 0,
+                "Total affected columns must be > 0 across all fixture files");
     }
 }

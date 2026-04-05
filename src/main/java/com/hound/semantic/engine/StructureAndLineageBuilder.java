@@ -194,6 +194,12 @@ public class StructureAndLineageBuilder {
             geoid = routineType + ":" + upperName;
         }
 
+        // Ensure the owning schema exists for schema-routed standalone routines.
+        if (packageGeoid == null || packageGeoid.isBlank()) {
+            if (schemaGeoid != null && !schemaGeoid.isBlank()) {
+                ensureSchema(schemaGeoid, null);
+            }
+        }
         routines.computeIfAbsent(geoid, k -> {
             logger.debug("New routine registered: {} {} [{}]", routineType, upperName, geoid);
             return new RoutineInfo(geoid, upperName, routineType, packageGeoid, schemaGeoid, parentRoutineGeoid);
@@ -205,11 +211,18 @@ public class StructureAndLineageBuilder {
 
     public void ensurePackage(String name, String schemaGeoid) {
         if (name == null || name.isBlank()) return;
-        String upper = name.toUpperCase();
-        String geoid = (schemaGeoid != null && !schemaGeoid.isBlank())
-                ? schemaGeoid + "." + upper : upper;
+        // 'name' is already the full package geoid (e.g. "DWH.PK_TEST"), NOT a bare name.
+        // Do NOT prepend schemaGeoid again — that would produce "DWH.DWH.PK_TEST".
+        String geoid = name.toUpperCase();
+        String bareName = geoid.contains(".")
+                ? geoid.substring(geoid.lastIndexOf('.') + 1) : geoid;
+        // Ensure the owning schema is registered so the writer can create Schema→Package edges
+        // even for packages whose body contains no DML table references.
+        if (schemaGeoid != null && !schemaGeoid.isBlank()) {
+            ensureSchema(schemaGeoid, null);
+        }
         packages.putIfAbsent(geoid, Map.of(
-                "package_name", upper,
+                "package_name", bareName,
                 "schema_geoid", schemaGeoid != null ? schemaGeoid : ""));
     }
 
