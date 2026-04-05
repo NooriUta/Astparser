@@ -299,8 +299,8 @@ public final class SchemaInitializer {
         declareStringProp(schema, "DaliRoutine",     "session_id");
         declareStringProp(schema, "DaliSchema",      "schema_name");
         declareStringProp(schema, "DaliSchema",      "schema_geoid");
-        declareStringProp(schema, "DaliDatabase",    "db_name");
-        declareStringProp(schema, "DaliDatabase",    "db_geoid");
+        declareStringProp(schema, "DaliDatabase",    "database_name");
+        declareStringProp(schema, "DaliDatabase",    "database_geoid");
         declareStringProp(schema, "DaliStatement",   "snippet");
         declareStringProp(schema, "DaliStatement",   "stmt_geoid");
         declareStringProp(schema, "DaliStatement",   "statement_geoid");
@@ -337,7 +337,7 @@ public final class SchemaInitializer {
         tryCreateFullTextIndex(db, schema, "DaliColumn",    "DaliColumn[column_name_ft]",   "column_name");
         tryCreateFullTextIndex(db, schema, "DaliRoutine",   "DaliRoutine[routine_name_ft]", "routine_name");
         tryCreateFullTextIndex(db, schema, "DaliSchema",    "DaliSchema[schema_name_ft]",   "schema_name");
-        tryCreateFullTextIndex(db, schema, "DaliDatabase",  "DaliDatabase[db_name_ft]",       "db_name");
+        tryCreateFullTextIndex(db, schema, "DaliDatabase",  "DaliDatabase[database_name_ft]","database_name");
         tryCreateFullTextIndex(db, schema, "DaliStatement", "DaliStatement[snippet_ft]",    "snippet");
         tryCreateFullTextIndex(db, schema, "DaliAtom",      "DaliAtom[atom_text_ft]",       "atom_text");
         tryCreateFullTextIndex(db, schema, "DaliPackage",       "DaliPackage[package_name_ft]",      "package_name");
@@ -348,47 +348,18 @@ public final class SchemaInitializer {
         tryCreateFullTextIndex(db, schema, "DaliSession",       "DaliSession[file_path_ft]",         "file_path");
         tryCreateFullTextIndex(db, schema, "DaliStatement",     "DaliStatement[stmt_geoid_ft]",      "stmt_geoid");
 
-        // ── Schema v15: rebuild FULLTEXT indexes with KeywordAnalyzer ──
-        // The default StandardAnalyzer splits on underscores, so identifiers like
-        // "some_table_name" become three separate tokens and CONTAINSTEXT lookups fail.
-        // Drop existing indexes (created with StandardAnalyzer on v10-v14) and recreate
-        // with FT_METADATA so the new analyzer takes effect.
-        for (String[] ft : new String[][]{
-                {"DaliTable",        "table_name"},
-                {"DaliColumn",       "column_name"},
-                {"DaliRoutine",      "routine_name"},
-                {"DaliSchema",       "schema_name"},
-                {"DaliDatabase",     "db_name"},
-                {"DaliStatement",    "snippet"},
-                {"DaliAtom",         "atom_text"},
-                {"DaliPackage",      "package_name"},
-                {"DaliParameter",    "param_name"},
-                {"DaliVariable",     "var_name"},
-                {"DaliApplication",  "app_name"},
-                {"DaliOutputColumn", "name"},
-                {"DaliSession",      "file_path"},
-                {"DaliStatement",    "stmt_geoid"},
-        }) {
-            // Auto-generated index name: TypeName[fieldName]
-            tryDropIndex(db, ft[0] + "[" + ft[1] + "]");
-            tryCreateFullTextIndex(db, schema, ft[0], ft[0] + "[" + ft[1] + "_ft]", ft[1]);
-        }
+        // ── Schema v10→v13: NOTUNIQUE_HASH session_id indexes — all vertex types with session_id ──
+        tryCreateNonUniqueIndex(db, schema, "DaliStatement",   "DaliStatement[session_id]",   "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliRoutine",     "DaliRoutine[session_id]",     "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliAtom",        "DaliAtom[session_id]",        "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliJoin",        "DaliJoin[session_id]",        "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliTable",       "DaliTable[session_id]",       "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliColumn",      "DaliColumn[session_id]",      "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliParameter",   "DaliParameter[session_id]",   "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliVariable",    "DaliVariable[session_id]",    "session_id");
+        tryCreateNonUniqueIndex(db, schema, "DaliOutputColumn","DaliOutputColumn[session_id]","session_id");
 
-        // ── Schema v10→v13: session_id indexes (LSM_TREE since v16) ──
-        // session_id has high cardinality-per-value (many rows per session), so
-        // NOTUNIQUE_HASH is wrong: its fixed-size buckets overflow with large files.
-        // Use NOTUNIQUE (LSM_TREE) which has no per-key size limit.
-        tryCreateSessionIndex(db, schema, "DaliStatement");
-        tryCreateSessionIndex(db, schema, "DaliRoutine");
-        tryCreateSessionIndex(db, schema, "DaliAtom");
-        tryCreateSessionIndex(db, schema, "DaliJoin");
-        tryCreateSessionIndex(db, schema, "DaliTable");
-        tryCreateSessionIndex(db, schema, "DaliColumn");
-        tryCreateSessionIndex(db, schema, "DaliParameter");
-        tryCreateSessionIndex(db, schema, "DaliVariable");
-        tryCreateSessionIndex(db, schema, "DaliOutputColumn");
-
-        // ── Schema v13: NOTUNIQUE_HASH for point-lookup fields (low cardinality per key) ──
+        // ── Schema v13: NOTUNIQUE_HASH for point-lookup fields ──
         tryCreateNonUniqueIndex(db, schema, "DaliStatement",   "DaliStatement[short_name]",   "short_name");
 
         // ── Schema v16: fix HASH index overflow + drop legacy unique constraint ──
@@ -534,8 +505,8 @@ public final class SchemaInitializer {
                 "CREATE PROPERTY DaliRoutine.session_id IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliSchema.schema_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliSchema.schema_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliDatabase.db_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliDatabase.db_geoid IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliDatabase.database_name IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliDatabase.database_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.snippet IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.stmt_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliStatement.statement_geoid IF NOT EXISTS STRING",
@@ -566,32 +537,33 @@ public final class SchemaInitializer {
                 "CREATE PROPERTY DaliSession.session_id IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliSession.file_path IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliSession.dialect IF NOT EXISTS STRING",
-                // v10-v15: FULLTEXT indexes for object name search (KeywordAnalyzer — preserves _)
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (table_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (column_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (routine_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSchema (schema_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (snippet) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliAtom (atom_text) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSession (file_path) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (stmt_geoid) FULL_TEXT" + FT_METADATA,
-                // v16: session_id as NOTUNIQUE (LSM_TREE) — NOTUNIQUE_HASH overflows with large files
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliParameter (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliVariable (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                // v13: NOTUNIQUE_HASH for point-lookup fields (low cardinality per key)
+                // v10: FULLTEXT indexes for object name search
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (table_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (column_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (routine_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliSchema (schema_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (database_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (snippet) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliAtom (atom_text) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT",
+                // v14: FULLTEXT gaps — app_name, output column name, session file_path, stmt_geoid
+                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliSession (file_path) FULL_TEXT",
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (stmt_geoid) FULL_TEXT",
+                // v10→v13: NOTUNIQUE_HASH session_id — all vertex types carrying session_id
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliParameter (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliVariable (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (session_id) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
+                // v13: point-lookup HASH indexes
                 "CREATE INDEX IF NOT EXISTS ON DaliStatement (short_name) NOTUNIQUE_HASH NULL_STRATEGY SKIP",
                 // v18: DaliAffectedColumn vertex + HAS_AFFECTED_COL edge (G1/G2)
                 "CREATE VERTEX TYPE DaliAffectedColumn IF NOT EXISTS",
@@ -651,26 +623,10 @@ public final class SchemaInitializer {
         if (!schema.existsType(typeName)) return;
         try {
             db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") FULL_TEXT" + FT_METADATA);
-            logger.debug("FULL_TEXT index ensured: {} (analyzer=KeywordAnalyzer)", indexName);
+                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (" + propName + ") FULL_TEXT");
+            logger.debug("FULL_TEXT index ensured: {}", indexName);
         } catch (Exception e) {
             logger.debug("FULL_TEXT index {} skipped: {}", indexName, e.getMessage());
-        }
-    }
-
-    /**
-     * Creates a NOTUNIQUE (LSM_TREE) index on session_id with NULL_STRATEGY SKIP.
-     * NOTUNIQUE_HASH overflows when many records share the same session_id key
-     * (fixed bucket capacity). LSM_TREE has no such per-key size limit.
-     */
-    private static void tryCreateSessionIndex(Database db, Schema schema, String typeName) {
-        if (!schema.existsType(typeName)) return;
-        try {
-            db.command("sql",
-                    "CREATE INDEX IF NOT EXISTS ON " + typeName + " (session_id) NOTUNIQUE NULL_STRATEGY SKIP");
-            logger.debug("NOTUNIQUE LSM_TREE session_id index ensured: {}[session_id]", typeName);
-        } catch (Exception e) {
-            logger.debug("session_id index {} skipped: {}", typeName, e.getMessage());
         }
     }
 
