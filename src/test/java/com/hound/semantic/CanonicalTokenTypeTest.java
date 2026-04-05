@@ -50,6 +50,14 @@ class CanonicalTokenTypeTest {
     }
 
     @Test
+    void bindVariable_isConstant() {
+        assertTrue(CanonicalTokenType.BIND_VARIABLE.isConstant(),
+                "BIND_VARIABLE must be treated as a constant (S1.BUG-2)");
+        assertFalse(CanonicalTokenType.BIND_VARIABLE.isIdentifier());
+        assertFalse(CanonicalTokenType.BIND_VARIABLE.isSystemPseudoColumn());
+    }
+
+    @Test
     void isSequenceOp_coversNextvalAndCurrval() {
         assertTrue(CanonicalTokenType.NEXTVAL.isSequenceOp());
         assertTrue(CanonicalTokenType.CURRVAL.isSequenceOp());

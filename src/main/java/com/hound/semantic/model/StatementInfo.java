@@ -35,6 +35,12 @@ public class StatementInfo {
     // Joins
     private final List<JoinInfo> joins = new ArrayList<>();
 
+    // H1.4 — statement-level semantic flags
+    private boolean hasAggregation = false;   // GROUP BY present
+    private boolean hasWindow      = false;   // OVER() / analytic function present
+    private boolean isUnion        = false;   // UNION / INTERSECT / MINUS
+    private String  subtype        = null;    // INSERT_SELECT, SELECT_INTO, …
+
     // Aliases and naming
     private final Set<String> aliases = new LinkedHashSet<>();
     private String shortName;
@@ -63,6 +69,10 @@ public class StatementInfo {
     public String getShortName() { return shortName; }
     public String getAlias() { return alias; }
     public Set<String> getAliases() { return aliases; }
+    public boolean isHasAggregation() { return hasAggregation; }
+    public boolean isHasWindow()      { return hasWindow; }
+    public boolean isUnion()          { return isUnion; }
+    public String  getSubtype()       { return subtype; }
     public List<String> getChildStatements() { return childStatements; }
     public Map<String, SubqueryUsage> getSourceSubqueries() { return sourceSubqueries; }
     public LinkedHashMap<String, Map<String, Object>> getColumnsOutput() { return columnsOutput; }
@@ -146,6 +156,11 @@ public class StatementInfo {
     }
 
     // ═══════ Aliases ═══════
+
+    public void setHasAggregation(boolean v) { this.hasAggregation = v; }
+    public void setHasWindow(boolean v)      { this.hasWindow = v; }
+    public void setIsUnion(boolean v)        { this.isUnion = v; }
+    public void setSubtype(String v)         { this.subtype = v; }
 
     public void setShortName(String shortName) { this.shortName = shortName; }
     public void setAlias(String alias) {

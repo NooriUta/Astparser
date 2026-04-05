@@ -39,3 +39,7 @@ bin/
 /logs/
 /target/
 *.hprof
+
+### Claude Code memory ###
+/.claude/
+/com/

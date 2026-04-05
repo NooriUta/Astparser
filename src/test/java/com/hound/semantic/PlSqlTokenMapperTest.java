@@ -99,6 +99,13 @@ class PlSqlTokenMapperTest {
     }
 
     @Test
+    void directMapping_bindVariable() {
+        // S1.BUG-2: BINDVAR token → BIND_VARIABLE canonical type
+        assertEquals(CanonicalTokenType.BIND_VARIABLE, PlSqlTokenMapper.map("BINDVAR"),
+                "BINDVAR PlSql token must map to BIND_VARIABLE");
+    }
+
+    @Test
     void nullAndEmpty_returnsUnknown() {
         assertEquals(CanonicalTokenType.UNKNOWN, PlSqlTokenMapper.map(null));
         assertEquals(CanonicalTokenType.UNKNOWN, PlSqlTokenMapper.map(""));
