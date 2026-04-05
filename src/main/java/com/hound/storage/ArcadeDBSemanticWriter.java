@@ -1889,28 +1889,46 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     public void cleanAll() {
         String[] edgeTypes = {
-                "BELONGS_TO_SESSION","CONTAINS_TABLE","CONTAINS_ROUTINE",
-                "HAS_COLUMN","HAS_PARAMETER","HAS_VARIABLE",
-                "CHILD_OF","CONTAINS_STMT","HAS_OUTPUT_COL","HAS_ATOM","HAS_JOIN",
-                "READS_FROM","WRITES_TO","USES_SUBQUERY","ROUTINE_USES_TABLE","CALLS",
-                "ATOM_REF_TABLE","ATOM_REF_COLUMN","ATOM_PRODUCES",
-                "DATA_FLOW","FILTER_FLOW","JOIN_FLOW","UNION_FLOW","NESTED_IN"
+                // atom resolution (v19: +ATOM_REF_STMT, +ATOM_REF_OUTPUT_COL)
+                "ATOM_REF_TABLE","ATOM_REF_COLUMN","ATOM_REF_STMT","ATOM_REF_OUTPUT_COL","ATOM_PRODUCES",
+                // data flow
+                "DATA_FLOW","FILTER_FLOW","JOIN_FLOW","UNION_FLOW",
+                // join sources (v18)
+                "JOIN_SOURCE_TABLE","JOIN_TARGET_TABLE",
+                // affected columns (v18/v20)
+                "HAS_AFFECTED_COL","AFFECTED_COL_REF_TABLE","AFFECTED_COL_REF_COLUMN",
+                // statement structure
+                "HAS_ATOM","HAS_OUTPUT_COL","HAS_JOIN","READS_FROM","WRITES_TO",
+                "USES_SUBQUERY","NESTED_IN","CONTAINS_STMT",
+                // routine structure
+                "HAS_PARAMETER","HAS_VARIABLE","CHILD_OF","CONTAINS_ROUTINE",
+                "ROUTINE_USES_TABLE","CALLS",
+                // schema/session structure (v8: +CONTAINS_SCHEMA, +BELONGS_TO_APP)
+                "HAS_COLUMN","CONTAINS_TABLE","CONTAINS_SCHEMA","BELONGS_TO_APP","BELONGS_TO_SESSION"
         };
         String[] vtxTypes = {
-                "DaliAtom","DaliOutputColumn","DaliJoin","DaliParameter","DaliVariable",
-                "DaliStatement","DaliColumn","DaliRoutine","DaliPackage","DaliTable",
-                "DaliSchema","DaliDatabase","DaliSession"
+                // fine-grained first (leaves before roots)
+                "DaliAffectedColumn","DaliAtom","DaliOutputColumn","DaliJoin",
+                "DaliParameter","DaliVariable","DaliStatement",
+                "DaliColumn","DaliPackage","DaliRoutine","DaliTable",
+                "DaliSchema","DaliSession","DaliDatabase",
+                "DaliApplication"   // v8: root of namespace hierarchy
         };
-        String[] docTypes = {"DaliSnippet"};
+        String[] docTypes = {
+                "DaliSnippet","DaliResolutionLog","DaliSchemaLog"
+                // DaliPerfStats intentionally excluded — preserved across cleanAll() for stats review
+        };
 
         if (mode == Mode.EMBEDDED) {
             for (String t : edgeTypes) deleteType(t);
             for (String t : vtxTypes)  deleteType(t);
             for (String t : docTypes)  deleteType(t);
         } else {
-            for (String t : edgeTypes) { try { rcmd("DELETE FROM " + t); } catch (Exception ignored) {} }
-            for (String t : vtxTypes)  { try { rcmd("DELETE FROM " + t); } catch (Exception ignored) {} }
-            for (String t : docTypes)  { try { rcmd("DELETE FROM " + t); } catch (Exception ignored) {} }
+            // Remote: batched DELETE LIMIT 500 to avoid transaction lock timeout on large tables.
+            // Edges first so vertex deletion doesn't touch edge buckets.
+            for (String t : edgeTypes) deleteTypeRemote(t);
+            for (String t : vtxTypes)  deleteTypeRemote(t);
+            for (String t : docTypes)  deleteTypeRemote(t);
         }
         logger.info("ArcadeDB CLEAN: all Dali records deleted ({})", mode);
     }
@@ -1923,6 +1941,32 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         } catch (Exception ignored) {}
         return 0;
+    }
+
+    /**
+     * Remote-mode batched DELETE: runs DELETE FROM T LIMIT 500 in a loop until the type is empty.
+     * Avoids ArcadeDB transaction lock timeouts caused by deleting large vertex types
+     * (each vertex deletion updates edge buckets of related vertices in one transaction).
+     */
+    private void deleteTypeRemote(String typeName) {
+        final int BATCH = 500;
+        try {
+            for (int i = 0; i < 1_000_000; i++) {
+                var rs = remoteDb.query("sql",
+                        "SELECT count(*) as cnt FROM " + typeName + " LIMIT 1");
+                long cnt = rs.hasNext()
+                        ? ((Number) rs.next().toMap().getOrDefault("cnt", 0L)).longValue() : 0;
+                if (cnt == 0) break;
+                try {
+                    remoteDb.command("sql", "DELETE FROM " + typeName + " LIMIT " + BATCH);
+                } catch (Exception e) {
+                    logger.warn("Batch delete failed for {} (batch {}): {}", typeName, i, e.getMessage());
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("deleteTypeRemote failed for {}: {}", typeName, e.getMessage());
+        }
     }
 
     @Override
