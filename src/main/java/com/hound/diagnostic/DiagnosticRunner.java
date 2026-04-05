@@ -480,11 +480,13 @@ public class DiagnosticRunner {
                 println("    Functions: %d (%.1f%%)", funcCalls, 100.0 * funcCalls / total);
                 println("    Failed:    %d (%.1f%%)", failed, 100.0 * failed / total);
 
-                double resolvedPct = 100.0 * resolved / total;
-                String quality = resolvedPct > 90 ? "ОТЛИЧНО (>90%%)" :
-                                 resolvedPct > 80 ? "ХОРОШО (>80%%)" :
-                                 resolvedPct > 70 ? "МИНИМУМ (>70%%)" : "НИЖЕ НОРМЫ (<70%%)";
-                println("    Quality:   %s", quality);
+                // Quality = (resolved + constants + functions) / total
+                // Constants and function_calls are correctly handled — not failures
+                double qualityPct = 100.0 * (resolved + constants + funcCalls) / total;
+                String quality = qualityPct > 90 ? "ОТЛИЧНО (>90%%)" :
+                                 qualityPct > 80 ? "ХОРОШО (>80%%)" :
+                                 qualityPct > 70 ? "МИНИМУМ (>70%%)" : "НИЖЕ НОРМЫ (<70%%)";
+                println("    Quality:   %.1f%% %s", qualityPct, quality);
             }
         } catch (Exception ignored) {}
     }

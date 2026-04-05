@@ -206,8 +206,8 @@ public class AtomProcessor {
         }
 
         // --- DATE / TIMESTAMP 'string' (ANSI date/timestamp literal) ---
+        // DATE maps to IDENTIFIER; TIMESTAMP maps to UNKNOWN — check text explicitly for both
         if (tokenDetails.size() >= 2
-                && getCanonical(tokenDetails.get(0)).isIdentifier()
                 && getCanonical(tokenDetails.get(1)) == CanonicalTokenType.STRING_LITERAL) {
             String firstText = tokenDetails.get(0).get("text");
             if (firstText != null
@@ -425,6 +425,32 @@ public class AtomProcessor {
                         }
                     }
                 }
+
+                // Cursor record alias: rec.FIELD where rec = FOR loop variable
+                // rec acts as an alias for the cursor's scope (its SELECT's source tables)
+                if (scopeManager != null) {
+                    String cursorStmtGeoid = scopeManager.getCursorRecordStmt(tableAlias);
+                    if (cursorStmtGeoid != null) {
+                        String sourceTableGeoid = findCursorSourceTable(cursorStmtGeoid);
+                        if (sourceTableGeoid != null) {
+                            result.put("resolved", true);
+                            result.put("table_geoid", sourceTableGeoid);
+                            result.put("table_name", tableAlias);
+                            result.put("column_name", columnName);
+                            result.put("reference_type", "cursor_record");
+                            result.put("is_column_reference", true);
+                            result.put("reason", "cursor record: " + tableAlias + "." + columnName);
+                        } else {
+                            // Cursor exists but source table unknown (e.g., computed column)
+                            result.put("resolved", true);
+                            result.put("reference_type", "cursor_record_expr");
+                            result.put("column_name", columnName);
+                            result.put("reason", "cursor record expr: " + tableAlias + "." + columnName);
+                        }
+                        return result;
+                    }
+                }
+
                 result.put("reason", "Таблица/подзапрос не найден для: " + tableAlias);
                 return result;
             }
@@ -546,15 +572,19 @@ public class AtomProcessor {
 
     /**
      * Fallback resolution при отсутствии token_details (backward compat).
+     * S2.BUG-1: added multi-level parent scope traversal for table.column case;
+     * strategy is always set to "text_fallback" so the resolution log entry is complete.
      */
     private Map<String, Object> resolveByText(String atomText, String statementGeoid,
                                                Map<String, Object> result) {
+        result.put("strategy", "text_fallback");
         String text = atomText.trim();
         String[] parts = text.split("\\.", 2);
         String tablePart = parts.length > 1 ? parts[0] : null;
         String columnPart = parts.length > 1 ? parts[1] : parts[0];
 
         if (tablePart != null) {
+            // Try current statement scope first
             ResolvedRef tableRef = nameResolver.resolve(tablePart, "any", statementGeoid);
             if (tableRef.isResolved()) {
                 result.put("resolved", true);
@@ -564,6 +594,47 @@ public class AtomProcessor {
                 result.put("reference_type", tableRef.getType());
                 result.put("is_column_reference", true);
                 return result;
+            }
+            // Walk parent statement scopes (e.g. SOURCE.* in MERGE WHEN UPDATE SET)
+            if (builder != null) {
+                StatementInfo si = builder.getStatements().get(statementGeoid);
+                while (si != null && si.getParentStatementGeoid() != null) {
+                    String parentGeoid = si.getParentStatementGeoid();
+                    ResolvedRef parentRef = nameResolver.resolve(tablePart, "any", parentGeoid);
+                    if (parentRef.isResolved()) {
+                        result.put("resolved", true);
+                        result.put("table_geoid", parentRef.getGeoid());
+                        result.put("table_name", tablePart);
+                        result.put("column_name", columnPart);
+                        result.put("reference_type", parentRef.getType());
+                        result.put("is_column_reference", true);
+                        result.put("reason", "resolved via parent scope: " + parentGeoid);
+                        return result;
+                    }
+                    si = builder.getStatements().get(parentGeoid);
+                }
+            }
+            // Cursor record alias: rec.FIELD in text-fallback path
+            if (scopeManager != null) {
+                String cursorStmtGeoid = scopeManager.getCursorRecordStmt(tablePart);
+                if (cursorStmtGeoid != null) {
+                    String sourceTableGeoid = findCursorSourceTable(cursorStmtGeoid);
+                    if (sourceTableGeoid != null) {
+                        result.put("resolved", true);
+                        result.put("table_geoid", sourceTableGeoid);
+                        result.put("table_name", tablePart);
+                        result.put("column_name", columnPart);
+                        result.put("reference_type", "cursor_record");
+                        result.put("is_column_reference", true);
+                        result.put("reason", "cursor record (text): " + tablePart + "." + columnPart);
+                    } else {
+                        result.put("resolved", true);
+                        result.put("reference_type", "cursor_record_expr");
+                        result.put("column_name", columnPart);
+                        result.put("reason", "cursor record expr (text): " + tablePart + "." + columnPart);
+                    }
+                    return result;
+                }
             }
         }
 
@@ -579,6 +650,27 @@ public class AtomProcessor {
 
         result.put("reason", "Could not resolve table for atom");
         return result;
+    }
+
+    /**
+     * Returns the first source table geoid for a cursor's SELECT statement,
+     * or null if the cursor has no registered source table (e.g. CURSOR IS SELECT expr).
+     * Used for cursor FOR-loop record alias resolution (rec.FIELD).
+     */
+    private String findCursorSourceTable(String cursorStmtGeoid) {
+        if (builder == null || cursorStmtGeoid == null) return null;
+        StatementInfo si = builder.getStatements().get(cursorStmtGeoid);
+        if (si == null) return null;
+        // Direct source tables (unusual, but check first)
+        if (!si.getSourceTables().isEmpty())
+            return si.getSourceTables().keySet().iterator().next();
+        // Cursor body is a child SELECT — look there
+        for (String childGeoid : si.getChildStatements()) {
+            StatementInfo child = builder.getStatements().get(childGeoid);
+            if (child != null && !child.getSourceTables().isEmpty())
+                return child.getSourceTables().keySet().iterator().next();
+        }
+        return null;
     }
 
     // =========================================================================

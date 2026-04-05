@@ -31,17 +31,17 @@ public abstract class BaseSemanticListener {
     public final Map<String, Map<String, Object>> routines   = new LinkedHashMap<>();
     public final Map<String, Map<String, Object>> statements = new LinkedHashMap<>();
 
-    public final Map<String, Map<String, Object>> lineageDatabases  = new LinkedHashMap<>();
-    public final Map<String, Map<String, Object>> lineageSchemas    = new LinkedHashMap<>();
-    public final Map<String, Map<String, Object>> lineagePackages   = new LinkedHashMap<>();
-    public final Map<String, Map<String, Object>> lineageTables     = new LinkedHashMap<>();
-    public final Map<String, Map<String, Object>> lineageRoutines   = new LinkedHashMap<>();
-    public final Map<String, Map<String, Object>> lineageStatements = new LinkedHashMap<>();
-
     // ====================== current-контекст ======================
     public final Map<String, Object> current = new HashMap<>();
     // Routine stack: каждый элемент = {parentRoutine, parentRoutineType}
     public final Deque<String[]> routineStack = new ArrayDeque<>();
+
+    /**
+     * Default schema: used as fallback when no explicit schema context is active.
+     * Set to the DB folder name so that packages without "SCHEMA.PKG" prefix still
+     * get schema_geoid = dbName → CONTAINS_ROUTINE edge is created.
+     */
+    public String defaultSchema = null;
 
     // ====================== Конструктор ======================
     public BaseSemanticListener(UniversalSemanticEngine engine) {
@@ -88,17 +88,6 @@ public abstract class BaseSemanticListener {
         current.put("parent_is_union", false);
         current.put("parent_statement", null);
         current.put("parent_statement_type", null);
-        current.put("parent_s_selected_list", null);
-        current.put("parent_s_where", null);
-        current.put("parent_s_from", null);
-        current.put("parent_s_join", null);
-        current.put("parent_s_order", null);
-        current.put("parent_s_group_by", null);
-        current.put("parent_s_having", null);
-        current.put("parent_s_Merge_insert_part", false);
-        current.put("parent_s_Merge_update_part", false);
-        current.put("parent_s_operation_part", false);
-        current.put("parent_column_output", null);
         current.put("unattached_atoms", new HashMap<String, Object>());
         current.put("subquery_alias_stack", new ArrayList<String>());
         current.put("s_operation_part", false);
@@ -114,7 +103,10 @@ public abstract class BaseSemanticListener {
     public String currentStatementType() { return (String) current.get("statement_type"); }
     public String currentRoutine()       { return (String) current.get("routine"); }
     public String currentRoutineType()   { return (String) current.get("routine_type"); }
-    public String currentSchema()        { return (String) current.get("schema"); }
+    public String currentSchema() {
+        String explicit = (String) current.get("schema");
+        return explicit != null ? explicit : defaultSchema;
+    }
     public String currentPackage()       { return (String) current.get("package"); }
     public String parentStatement()      { return (String) current.get("parent_statement"); }
     public String currentTable()         { return (String) current.get("table"); }
@@ -172,7 +164,6 @@ public abstract class BaseSemanticListener {
             Map<String, Object> db = new LinkedHashMap<>();
             db.put("db_name", dbName);
             db.put("schemas", new HashSet<String>());
-            lineageDatabases.put(dbName, db);
             return db;
         });
     }
@@ -183,12 +174,10 @@ public abstract class BaseSemanticListener {
                 ? databaseGeoid + "." + schemaName : schemaName;
         schemas.computeIfAbsent(geoid, k -> {
             Map<String, Object> s = new LinkedHashMap<>();
-            s.put("database_geoid", databaseGeoid);
             s.put("schema_name", schemaName);
             s.put("tables", new HashSet<String>());
             s.put("routines", new HashSet<String>());
             s.put("packages", new HashSet<String>());
-            lineageSchemas.put(geoid, s);
             if (databaseGeoid != null && databases.containsKey(databaseGeoid)) {
                 @SuppressWarnings("unchecked")
                 Set<String> dbSchemas = (Set<String>) databases.get(databaseGeoid).get("schemas");
@@ -208,7 +197,6 @@ public abstract class BaseSemanticListener {
             p.put("schema_geoid", schemaGeoid);
             p.put("package_name", packageName);
             p.put("routines", new HashSet<String>());
-            lineagePackages.put(geoid, p);
             return p;
         });
         if (schemaGeoid != null && schemas.containsKey(schemaGeoid)) {
@@ -245,7 +233,6 @@ public abstract class BaseSemanticListener {
             usage.put("routines", new HashSet<String>());
             usage.put("statements", new HashSet<String>());
             t.put("usage", usage);
-            lineageTables.put(geoid, t);
             return t;
         });
 
@@ -293,7 +280,6 @@ public abstract class BaseSemanticListener {
             r.put("variables", new ArrayList<>());
             r.put("return_type", null);
             r.put("called_routines", new ArrayList<>());
-            lineageRoutines.put(geoid, r);
             return r;
         });
 
@@ -335,7 +321,6 @@ public abstract class BaseSemanticListener {
         stmtInfo.put("parent_s_operation_part",    current.get("s_operation_part"));
         stmtInfo.put("parent_s_Merge_insert_part", current.get("Merge_insert_part"));
         stmtInfo.put("parent_s_Merge_update_part", current.get("Merge_update_part"));
-        stmtInfo.put("parent_column_output",       current.get("column_output"));
 
         stmtInfo.put("child_statements",  new HashSet<String>());
         stmtInfo.put("used_in_routines",  new HashSet<String>());
@@ -353,25 +338,15 @@ public abstract class BaseSemanticListener {
             Set<String> children = (Set<String>) statements.get(parentStmt).get("child_statements");
             if (children != null) children.add(stmtName);
 
-            current.put("parent_statement",           parentStmt);
-            current.put("parent_statement_type",      current.get("statement_type"));
-            current.put("parent_s_where",             current.get("where"));
-            current.put("parent_is_union",            current.get("is_union"));
-            current.put("parent_s_from",              current.get("from"));
-            current.put("parent_s_selected_list",     current.get("selected_list"));
-            current.put("parent_s_order",             current.get("order"));
-            current.put("parent_s_group_by",          current.get("group_by"));
-            current.put("parent_s_having",            current.get("having"));
-            current.put("parent_s_operation_part",    current.get("s_operation_part"));
-            current.put("parent_s_Merge_insert_part", current.get("Merge_insert_part"));
-            current.put("parent_s_Merge_update_part", current.get("Merge_update_part"));
+            current.put("parent_statement",      parentStmt);
+            current.put("parent_statement_type", current.get("statement_type"));
+            current.put("parent_is_union",       current.get("is_union"));
         }
 
         current.put("statement",      stmtName);
         current.put("statement_type", stmtType);
 
         statements.put(stmtName, stmtInfo);
-        lineageStatements.put(stmtName, stmtInfo);
 
         String routine = currentRoutine();
         if (routine != null && parentStmt == null && routines.containsKey(routine)) {
@@ -415,18 +390,10 @@ public abstract class BaseSemanticListener {
             current.put("group_by",                null);
             current.put("having",                  null);
             current.put("in_dml_target",           false);
-            current.put("parent_statement",        null);
-            current.put("parent_statement_type",   null);
-            current.put("parent_s_where",          null);
-            current.put("parent_s_from",           null);
-            current.put("parent_s_selected_list",  null);
-            current.put("parent_s_order",          null);
-            current.put("parent_s_group_by",       null);
-            current.put("parent_s_having",         null);
-            current.put("parent_is_union",         false);
-            current.put("parent_s_operation_part", false);
-            current.put("parent_column_output",    null);
-            current.put("Merge_insert_part",       false);
+            current.put("parent_statement",      null);
+            current.put("parent_statement_type", null);
+            current.put("parent_is_union",       false);
+            current.put("Merge_insert_part",     false);
             current.put("Merge_update_part",       false);
         }
     }
@@ -592,6 +559,22 @@ public abstract class BaseSemanticListener {
         engine.onRoutineReturnType(returnType);
     }
 
+    /** Called just before exitCursor_declaration: registers cursor name → its statement geoid. */
+    public void onCursorDeclared(String cursorName) {
+        engine.onCursorDeclared(cursorName);
+    }
+
+    /** Called at exitCursor_loop_param for named cursor: FOR rec IN cursor_name LOOP. */
+    public void onCursorRecordNamed(String recordVar, String cursorName) {
+        engine.onCursorRecordNamed(recordVar, cursorName);
+    }
+
+    /** Called at exitCursor_loop_param for inline cursor: FOR rec IN (SELECT ...) LOOP. */
+    public void onCursorRecordInline(String recordVar) {
+        String stmtGeoid = currentStatement();
+        if (stmtGeoid != null) engine.onCursorRecordInline(recordVar, stmtGeoid);
+    }
+
     /**
      * STAB-9: регистрирует вызов процедуры/функции из текущей routine.
      * Вызывается из PlSqlSemanticListener.enterCall_statement().
@@ -707,8 +690,12 @@ public abstract class BaseSemanticListener {
     public void onHavingExit()           { current.put("having", null); }
     public void onOrderByEnter(int line) { current.put("order", line); }
     public void onOrderByExit()          { current.put("order", null); }
-    public void onGroupByEnter(int line) { current.put("group_by", line); }
+    public void onGroupByEnter(int line) {
+        current.put("group_by", line);
+        engine.flagCurrentStatementAggregation();
+    }
     public void onGroupByExit()          { current.put("group_by", null); }
+    public void onAnalyticEnter()        { engine.flagCurrentStatementWindow(); }
 
     public void onMergeInsertEnter() { current.put("Merge_insert_part", true); }
     public void onMergeInsertExit()  { current.put("Merge_insert_part", false); }

@@ -10,6 +10,8 @@ import com.hound.semantic.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -22,6 +24,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(ArcadeDBSemanticWriter.class);
     private static final int SNIPPET_MAX = 4000;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private Database embeddedDb;
     private RemoteDatabase remoteDb;
@@ -357,11 +360,20 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 for (var e : str.getDatabases().entrySet()) {
                     @SuppressWarnings("unchecked")
                     Map<String, Object> d = (Map<String, Object>) e.getValue();
-                    MutableVertex v = embeddedDb.newVertex("DaliDatabase")
-                            .set("session_id",    sid)
-                            .set("database_geoid", e.getKey())
-                            .set("database_name",  d.get("name"))
-                            .save();
+                    // find-or-create: DaliDatabase[db_geoid] UNIQUE index deduplicates across runs
+                    var existRs = embeddedDb.query("sql",
+                            "SELECT FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
+                            Map.of("g", e.getKey()));
+                    MutableVertex v;
+                    if (existRs.hasNext()) {
+                        v = (MutableVertex) existRs.next().toElement();
+                    } else {
+                        v = embeddedDb.newVertex("DaliDatabase")
+                                .set("db_geoid",   e.getKey())
+                                .set("db_name",    d.get("name"))
+                                .set("created_at", System.currentTimeMillis())
+                                .save();
+                    }
                     dbV.put(e.getKey(), v);
                 }
             }
@@ -389,7 +401,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                                     .set("db_geoid",       dbName)
                                     .set("schema_geoid",   e.getKey())
                                     .set("schema_name",    sc.get("name"))
-                                    .set("database_geoid", sc.get("db"))
                                     .save();
                             // CONTAINS_SCHEMA: DaliDatabase → DaliSchema (new schema only)
                             if (pool.getDatabaseVtx() != null) {
@@ -404,7 +415,6 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("session_id",     sid)
                             .set("schema_geoid",   e.getKey())
                             .set("schema_name",    sc.get("name"))
-                            .set("database_geoid", sc.get("db"))
                             .save();
                 }
                 schV.put(e.getKey(), v);
@@ -427,6 +437,17 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 String sg = (String) pkg.get("schema_geoid");
                 if (sg != null && !sg.isEmpty()) {
                     MutableVertex sv2 = schV.get(sg.toUpperCase());
+                    // Fallback 1: schema created by a previous file in this batch (pool cache)
+                    if (sv2 == null && pool != null) {
+                        sv2 = pool.getSchemaVtx(pool.canonicalSchema(sg));
+                    }
+                    // Fallback 2: schema exists in DB from a prior run (cross-run)
+                    if (sv2 == null) {
+                        var rsSchema = embeddedDb.query("sql",
+                                "SELECT FROM DaliSchema WHERE schema_geoid = :s LIMIT 1",
+                                Map.of("s", sg));
+                        if (rsSchema.hasNext()) sv2 = (MutableVertex) rsSchema.next().toElement();
+                    }
                     if (sv2 != null) sv2.newEdge("CONTAINS_ROUTINE", v, true);
                 }
             }
@@ -603,23 +624,41 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 StatementInfo s = e.getValue();
                 String snippet = truncate(s.getSnippet(), SNIPPET_MAX);
                 MutableVertex v = embeddedDb.newVertex("DaliStatement")
-                        .set("session_id", sid)
-                        .set("stmt_geoid", e.getKey())
-                        .set("type", s.getType())
-                        .set("snippet", snippet)
-                        .set("line_start", s.getLineStart())
-                        .set("line_end", s.getLineEnd())
-                        .set("parent_statement", s.getParentStatementGeoid())
+                        .set("session_id",            sid)
+                        .set("stmt_geoid",            e.getKey())
+                        .set("type",                  s.getType())
+                        .set("subtype",               s.getSubtype())
+                        .set("snippet",               snippet)
+                        .set("line_start",            s.getLineStart())
+                        .set("line_end",              s.getLineEnd())
+                        .set("parent_statement",      s.getParentStatementGeoid())
                         .set("parent_statement_type", parentType(s.getParentStatementGeoid(), str))
-                        .set("routine_geoid", s.getRoutineGeoid())
-                        .set("short_name", s.getShortName())
-                        .set("aliases", new ArrayList<>(s.getAliases()))
-                        .set("child_statements", new ArrayList<>(s.getChildStatements()))
-                        .set("source_table_geoids", new ArrayList<>(s.getSourceTables().keySet()))
-                        .set("target_table_geoids", new ArrayList<>(s.getTargetTables().keySet()))
+                        .set("routine_geoid",         s.getRoutineGeoid())
+                        .set("short_name",            s.getShortName())
+                        .set("aliases",               new ArrayList<>(s.getAliases()))
+                        .set("child_statements",      new ArrayList<>(s.getChildStatements()))
+                        .set("source_table_geoids",   new ArrayList<>(s.getSourceTables().keySet()))
+                        .set("target_table_geoids",   new ArrayList<>(s.getTargetTables().keySet()))
+                        .set("source_subquery_geoids",new ArrayList<>(s.getSourceSubqueries().keySet()))
+                        .set("source_tables_json",    toJson(new ArrayList<>(s.getSourceTables().values())))
+                        .set("target_tables_json",    toJson(new ArrayList<>(s.getTargetTables().values())))
+                        .set("is_union",              s.isUnion())
+                        .set("is_dml",                isDml(s.getType()))
+                        .set("is_ddl",                isDdl(s.getType()))
+                        .set("has_aggregation",       s.isHasAggregation())
+                        .set("has_window",            s.isHasWindow())
+                        .set("has_cte",               hasCte(s, str.getStatements()))
+                        .set("join_count",            s.getJoins().size())
+                        .set("col_count_output",      s.getColumnsOutput().size())
+                        .set("col_count_input",       countInputColumns(s))
+                        .set("depth",                 computeDepth(s.getParentStatementGeoid(), str.getStatements()))
+                        .set("quality",               computeStatementQuality(s))
                         .save();
                 stV.put(e.getKey(), v);
             }
+
+            // H1.5/H1.6: output-column lookup map, keyed by "stmtGeoid:col_order"
+            Map<String, MutableVertex> ocByKey = new LinkedHashMap<>();
 
             for (var e : str.getStatements().entrySet()) {
                 StatementInfo s = e.getValue();
@@ -686,6 +725,9 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("table_ref", col.get("table_ref"))
                             .save();
                     sv.newEdge("HAS_OUTPUT_COL", ocV, true);
+                    // Register in ocByKey for ATOM_PRODUCES / DATA_FLOW lookups
+                    Object order = col.get("order");
+                    if (order != null) ocByKey.put(e.getKey() + ":" + order, ocV);
                 }
 
                 for (JoinInfo j : s.getJoins()) {
@@ -755,6 +797,37 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             String colGeoid = atomTableGeoid + "." + atomColName.toUpperCase();
                             MutableVertex acol = colV.get(colGeoid);
                             if (acol != null) aV.newEdge("ATOM_REF_COLUMN", acol, true);
+                        }
+                    }
+
+                    // H1.6 — ATOM_PRODUCES: DaliAtom → DaliOutputColumn
+                    Object outSeq = a.get("output_column_sequence");
+                    if (outSeq != null) {
+                        String outColKey = stmtGeoid + ":" + outSeq;
+                        MutableVertex ocV2 = ocByKey.get(outColKey);
+                        if (ocV2 != null) {
+                            aV.newEdge("ATOM_PRODUCES", ocV2, true)
+                                    .set("session_id", sid)
+                                    .save();
+                        }
+                    }
+
+                    // H1.5 — DATA_FLOW: DaliColumn → DaliOutputColumn (resolved atoms only)
+                    if ("Обработано".equals(a.get("status")) && outSeq != null) {
+                        String atomColName2 = (String) a.get("column_name");
+                        if (atomTableGeoid != null && atomColName2 != null) {
+                            String srcColGeoid = atomTableGeoid + "." + atomColName2.toUpperCase();
+                            MutableVertex srcCol = colV.get(srcColGeoid);
+                            String outColKey2 = stmtGeoid + ":" + outSeq;
+                            MutableVertex tgtOcV = ocByKey.get(outColKey2);
+                            if (srcCol != null && tgtOcV != null) {
+                                srcCol.newEdge("DATA_FLOW", tgtOcV, true)
+                                        .set("session_id",      sid)
+                                        .set("statement_geoid", stmtGeoid)
+                                        .set("atom_id",         atomId)
+                                        .set("flow_type",       resolveFlowType(a, str.getStatements().get(stmtGeoid)))
+                                        .save();
+                            }
                         }
                     }
 
@@ -866,8 +939,20 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             for (var e : str.getDatabases().entrySet()) {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> d = (Map<String, Object>) e.getValue();
-                rcmd("INSERT INTO DaliDatabase SET session_id=?, database_geoid=?, database_name=?",
-                        sid, e.getKey(), d.get("name"));
+                // find-or-create: avoid duplicates across re-runs (UNIQUE_HASH on db_geoid)
+                boolean dbExists = false;
+                try {
+                    var rs = remoteDb.query("sql",
+                            "SELECT @rid FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
+                            Map.of("g", e.getKey()));
+                    dbExists = rs.hasNext();
+                } catch (Exception ex) {
+                    logger.debug("DaliDatabase lookup (ad-hoc) failed for '{}': {}", e.getKey(), ex.getMessage());
+                }
+                if (!dbExists) {
+                    rcmd("INSERT INTO DaliDatabase SET db_geoid=?, db_name=?, created_at=?",
+                            e.getKey(), d.get("name"), System.currentTimeMillis());
+                }
             }
         }
 
@@ -882,14 +967,14 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             if (pool != null) {
                 String cg = pool.canonicalSchema(e.getKey());
                 if (!pool.hasSchemaRid(cg)) {
-                    rcmd("INSERT INTO DaliSchema SET db_name=?, db_geoid=?, schema_geoid=?, schema_name=?, database_geoid=?",
-                            dbName, dbName, e.getKey(), sc.get("name"), sc.get("db"));
+                    rcmd("INSERT INTO DaliSchema SET db_name=?, db_geoid=?, schema_geoid=?, schema_name=?",
+                            dbName, dbName, e.getKey(), sc.get("name"));
                     pool.putSchemaRid(cg, cg); // placeholder — real RID fetched in buildRidCache
                     newSchemaGeoids.add(e.getKey()); // will need CONTAINS_SCHEMA edge
                 }
             } else {
-                rcmd("INSERT INTO DaliSchema SET session_id=?, schema_geoid=?, schema_name=?, database_geoid=?",
-                        sid, e.getKey(), sc.get("name"), sc.get("db"));
+                rcmd("INSERT INTO DaliSchema SET session_id=?, schema_geoid=?, schema_name=?",
+                        sid, e.getKey(), sc.get("name"));
             }
         }
 
@@ -1498,6 +1583,67 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         if (parentGeoid == null) return null;
         StatementInfo p = str.getStatements().get(parentGeoid);
         return p != null ? p.getType() : null;
+    }
+
+    private static String toJson(Object value) {
+        if (value == null) return null;
+        try { return MAPPER.writeValueAsString(value); }
+        catch (JsonProcessingException e) { return null; }
+    }
+
+    private static boolean isDml(String type) {
+        return type != null && switch (type) {
+            case "INSERT", "UPDATE", "DELETE", "MERGE" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isDdl(String type) {
+        if (type == null) return false;
+        return type.startsWith("CREATE") || type.startsWith("ALTER") || type.startsWith("DROP");
+    }
+
+    private static int computeDepth(String parentGeoid, Map<String, StatementInfo> allStatements) {
+        int depth = 0;
+        String current = parentGeoid;
+        while (current != null && depth < 50) {
+            StatementInfo parent = allStatements.get(current);
+            if (parent == null) break;
+            depth++;
+            current = parent.getParentStatementGeoid();
+        }
+        return depth;
+    }
+
+    private static double computeStatementQuality(StatementInfo s) {
+        Map<String, Map<String, Object>> atoms = s.getAtoms();
+        if (atoms.isEmpty()) return 0.0;
+        int total = atoms.size();
+        long resolved  = atoms.values().stream().filter(a -> "Обработано".equals(a.get("status"))).count();
+        long constants = atoms.values().stream().filter(a -> Boolean.TRUE.equals(a.get("is_constant"))).count();
+        long functions = atoms.values().stream().filter(a -> Boolean.TRUE.equals(a.get("is_function_call"))).count();
+        return (resolved + constants + functions) / (double) total;
+    }
+
+    private static boolean hasCte(StatementInfo s, Map<String, StatementInfo> allStatements) {
+        for (String childGeoid : s.getChildStatements()) {
+            StatementInfo child = allStatements.get(childGeoid);
+            if (child != null && "CTE".equals(child.getType())) return true;
+        }
+        return false;
+    }
+
+    private static int countInputColumns(StatementInfo s) {
+        return (int) s.getAtoms().values().stream()
+                .filter(a -> Boolean.TRUE.equals(a.get("is_column_reference")))
+                .count();
+    }
+
+    private static String resolveFlowType(Map<String, Object> atom, StatementInfo stmt) {
+        if (stmt != null && stmt.isHasAggregation()
+                && "GROUP BY".equals(atom.get("parent_context"))) return "AGGREGATE";
+        if (Boolean.TRUE.equals(atom.get("is_function_call")))    return "TRANSFORM";
+        return "DIRECT";
     }
 
     @SafeVarargs

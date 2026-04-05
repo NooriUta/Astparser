@@ -34,6 +34,11 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         this.base = new BaseSemanticListener(engine) {};
     }
 
+    /** Sets the fallback schema name used when no explicit SCHEMA. prefix is found. */
+    public void setDefaultSchema(String dbName) {
+        base.defaultSchema = dbName;
+    }
+
     // =========================================================================
     // Процедуры и функции
     // =========================================================================
@@ -195,8 +200,12 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterSelect_statement(PlSqlParser.Select_statementContext ctx) {
         // STAB-13 Part B: if this SELECT is in a FROM position (inline subquery FROM (SELECT...) alias),
         // pass the alias so it gets registered on the parent scope for alias resolution.
+        // Also handles MERGE USING (SELECT ...) alias — grammar: selected_tableview → '(' select_statement ')'
+        // In that case getCurrentParentContext() returns "MERGE" (not "FROM"), so we include it here.
         List<String> aliasStack = base.subqueryAliasStack();
-        String inlineAlias = (!aliasStack.isEmpty() && "FROM".equals(base.getCurrentParentContext()))
+        String parentCtx = base.getCurrentParentContext();
+        String inlineAlias = (!aliasStack.isEmpty()
+                && ("FROM".equals(parentCtx) || "MERGE".equals(parentCtx)))
                 ? aliasStack.get(aliasStack.size() - 1) : null;
         if (inlineAlias != null && !inlineAlias.isBlank()) {
             base.onStatementEnter("SELECT", extract(ctx), getStartLine(ctx), getEndLine(ctx), inlineAlias);
@@ -336,6 +345,11 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void exitCursor_declaration(PlSqlParser.Cursor_declarationContext ctx) {
+        // Register cursor name → statement geoid BEFORE the statement scope is popped
+        if (ctx.identifier() != null) {
+            String cursorName = BaseSemanticListener.cleanIdentifier(ctx.identifier().getText());
+            base.onCursorDeclared(cursorName);
+        }
         base.onStatementExit();
         base.setIsFirstSubq(null);
         base.setIsFirstSubqp(null);
@@ -371,19 +385,45 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         PlSqlParser.Cursor_loop_paramContext cursorParam = ctx.cursor_loop_param();
         PlSqlParser.Select_statementContext selectCtx = cursorParam.select_statement();
         if (selectCtx != null) {
+            // Inline cursor: FOR rec IN (SELECT ...) LOOP
             base.setIsFirstSubq(selectCtx.getStart().getLine());
             base.setIsFirstSubqp(selectCtx.getStart().getCharPositionInLine());
             base.onStatementEnter("DINAMIC_CURSOR", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        } else if (cursorParam.cursor_name() != null) {
+            // Named cursor: FOR rec IN cursor_name LOOP — create scope for loop body
+            base.onStatementEnter("CURSOR_LOOP", extract(ctx), getStartLine(ctx), getEndLine(ctx));
         }
     }
 
     @Override
     public void exitLoop_statement(PlSqlParser.Loop_statementContext ctx) {
-        if (ctx != null && ctx.cursor_loop_param() != null
-                && ctx.cursor_loop_param().select_statement() != null) {
+        if (ctx == null || ctx.cursor_loop_param() == null) return;
+        PlSqlParser.Cursor_loop_paramContext cursorParam = ctx.cursor_loop_param();
+        if (cursorParam.select_statement() != null) {
             base.onStatementExit();
             base.setIsFirstSubq(null);
             base.setIsFirstSubqp(null);
+        } else if (cursorParam.cursor_name() != null) {
+            base.onStatementExit();
+        }
+    }
+
+    @Override
+    public void exitCursor_loop_param(PlSqlParser.Cursor_loop_paramContext ctx) {
+        if (ctx == null || ctx.record_name() == null) return;
+        String recName = BaseSemanticListener.cleanIdentifier(ctx.record_name().getText());
+        if (ctx.cursor_name() != null) {
+            // Named cursor: rec aliases the cursor's scope
+            // cursor_name uses general_element which may include arguments: c_txns(p1,p2)
+            // Strip arguments to get the bare cursor name for registry lookup
+            String rawCursorName = ctx.cursor_name().getText();
+            int parenIdx = rawCursorName.indexOf('(');
+            String cursorNameOnly = parenIdx >= 0 ? rawCursorName.substring(0, parenIdx) : rawCursorName;
+            String cursorName = BaseSemanticListener.cleanIdentifier(cursorNameOnly);
+            base.onCursorRecordNamed(recName, cursorName);
+        } else if (ctx.select_statement() != null) {
+            // Inline cursor: rec aliases the DINAMIC_CURSOR scope (current statement)
+            base.onCursorRecordInline(recName);
         }
     }
 
@@ -721,6 +761,9 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void exitGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx)  { base.onGroupByExit(); }
 
+    @Override
+    public void enterOver_clause_keyword(PlSqlParser.Over_clause_keywordContext ctx) { base.onAnalyticEnter(); }
+
     // =========================================================================
     // MERGE insert/update parts
     // =========================================================================
@@ -1040,6 +1083,11 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         } catch (Exception ignored) {}
 
         // Стратегия 3: getText() ctx минус алиас в конце (но НЕ подзапросы)
+        // Guard: skip if token span is too large — definitely a subquery, not a table name
+        if (ctx.stop != null && ctx.start != null
+                && (ctx.stop.getTokenIndex() - ctx.start.getTokenIndex()) > 50) {
+            return null;
+        }
         try {
             String full = ctx.getText();
             if (full == null || full.isBlank()) return null;

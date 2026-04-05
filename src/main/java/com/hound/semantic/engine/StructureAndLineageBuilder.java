@@ -388,22 +388,79 @@ public class StructureAndLineageBuilder {
         for (var entry : statements.entrySet()) {
             StatementInfo s = entry.getValue();
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("geoid", s.getGeoid());
-            m.put("type", s.getType());
-            m.put("snippet", s.getSnippet());
-            m.put("line_start", s.getLineStart());
-            m.put("line_end", s.getLineEnd());
-            m.put("parent_statement", s.getParentStatementGeoid());
-            m.put("routine_geoid", s.getRoutineGeoid());
-            m.put("alias", s.getAlias());
-            m.put("source_tables", new ArrayList<>(s.getSourceTables().values()));
-            m.put("target_tables", new ArrayList<>(s.getTargetTables().values()));
-            m.put("child_statements", new ArrayList<>(s.getChildStatements()));
-            m.put("columns_output", new ArrayList<>(s.getColumnsOutput().values()));
-            m.put("joins_count", s.getJoins().size());
+            m.put("geoid",              s.getGeoid());
+            m.put("type",               s.getType());
+            m.put("snippet",            s.getSnippet());
+            m.put("line_start",         s.getLineStart());
+            m.put("line_end",           s.getLineEnd());
+            m.put("parent_statement",   s.getParentStatementGeoid());
+            m.put("routine_geoid",      s.getRoutineGeoid());
+            m.put("alias",              s.getAlias());
+            m.put("source_tables",      new ArrayList<>(s.getSourceTables().values()));
+            m.put("target_tables",      new ArrayList<>(s.getTargetTables().values()));
+            m.put("child_statements",   new ArrayList<>(s.getChildStatements()));
+            m.put("source_subquery_geoids", new ArrayList<>(s.getSourceSubqueries().keySet()));
+            m.put("columns_output",     new ArrayList<>(s.getColumnsOutput().values()));
+            m.put("join_count",         s.getJoins().size());
+            m.put("col_count_output",   s.getColumnsOutput().size());
+            m.put("has_aggregation",    s.isHasAggregation());
+            m.put("has_window",         s.isHasWindow());
+            m.put("is_union",           s.isUnion());
+            m.put("subtype",            s.getSubtype());
+            m.put("is_dml",             isDml(s.getType()));
+            m.put("is_ddl",             isDdl(s.getType()));
+            m.put("has_cte",            hasCte(s, statements));
+            m.put("depth",              computeDepth(s.getParentStatementGeoid(), statements));
+            m.put("quality",            computeStatementQuality(s));
             result.add(m);
         }
         return result;
+    }
+
+    private static boolean isDml(String type) {
+        return type != null && switch (type) {
+            case "INSERT", "UPDATE", "DELETE", "MERGE" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isDdl(String type) {
+        return type != null && switch (type) {
+            case "CREATE_VIEW", "CREATE_TABLE", "ALTER_TABLE", "DROP_TABLE",
+                 "CREATE_INDEX", "CREATE_SEQUENCE", "CREATE_PROCEDURE",
+                 "CREATE_FUNCTION", "CREATE_PACKAGE", "CREATE_TRIGGER" -> true;
+            default -> type.startsWith("CREATE") || type.startsWith("ALTER") || type.startsWith("DROP");
+        };
+    }
+
+    private static boolean hasCte(StatementInfo s, Map<String, StatementInfo> allStatements) {
+        for (String childGeoid : s.getChildStatements()) {
+            StatementInfo child = allStatements.get(childGeoid);
+            if (child != null && "CTE".equals(child.getType())) return true;
+        }
+        return false;
+    }
+
+    private static int computeDepth(String parentGeoid, Map<String, StatementInfo> allStatements) {
+        int depth = 0;
+        String current = parentGeoid;
+        while (current != null && depth < 50) {
+            StatementInfo parent = allStatements.get(current);
+            if (parent == null) break;
+            depth++;
+            current = parent.getParentStatementGeoid();
+        }
+        return depth;
+    }
+
+    private static double computeStatementQuality(StatementInfo s) {
+        Map<String, Map<String, Object>> atoms = s.getAtoms();
+        if (atoms.isEmpty()) return 0.0;
+        int total = atoms.size();
+        long resolved  = atoms.values().stream().filter(a -> "Обработано".equals(a.get("status"))).count();
+        long constants = atoms.values().stream().filter(a -> Boolean.TRUE.equals(a.get("is_constant"))).count();
+        long functions = atoms.values().stream().filter(a -> Boolean.TRUE.equals(a.get("is_function_call"))).count();
+        return (resolved + constants + functions) / (double) total;
     }
 
     /**
@@ -442,30 +499,59 @@ public class StructureAndLineageBuilder {
      */
     public Map<String, Object> getFullStructure() {
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("databases", new ArrayList<>(databases.values()));
-        result.put("schemas", new ArrayList<>(schemas.values()));
-        result.put("tables", serializeTables());
-        result.put("columns", serializeColumns());
-        result.put("routines", serializeRoutines());
+        result.put("databases",  new ArrayList<>(databases.values()));
+        result.put("schemas",    new ArrayList<>(schemas.values()));
+        result.put("packages",   new ArrayList<>(packages.values()));
+        result.put("tables",     serializeTables());
+        result.put("columns",    serializeColumns());
+        result.put("routines",   serializeRoutines());
         result.put("statements", serializeStatements());
-        result.put("tables_usage", buildTablesUsage());
         return result;
     }
 
     /**
-     * Полный lineage — список edges для Arrow/JSON сериализации.
+     * Полный lineage — {atoms, joins, tables_usage} для Arrow/JSON сериал��зации.
      * Порт Python: get_lineage()
      */
-    public List<Map<String, Object>> getFullLineage() {
+    public Map<String, Object> getFullLineage() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("atoms",        buildAtomsLineage());
+        result.put("joins",        buildJoinsLineage());
+        result.put("tables_usage", buildTablesUsage());
+        return result;
+    }
+
+    /** Aggregates all atoms from all statements for lineage output. */
+    private List<Map<String, Object>> buildAtomsLineage() {
         List<Map<String, Object>> result = new ArrayList<>();
-        for (LineageEdge e : lineageEdges) {
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("source", e.sourceGeoid());
-            m.put("target", e.targetGeoid());
-            m.put("type", e.relationType());
-            m.put("statement_geoid", e.statementGeoid());
-            m.put("usage_context", e.usageContext());
-            result.add(m);
+        for (var entry : statements.entrySet()) {
+            String stmtGeoid = entry.getKey();
+            for (var atomEntry : entry.getValue().getAtoms().entrySet()) {
+                Map<String, Object> a = new LinkedHashMap<>(atomEntry.getValue());
+                a.put("atom_text",       atomEntry.getKey());
+                a.put("statement_geoid", stmtGeoid);
+                result.add(a);
+            }
+        }
+        return result;
+    }
+
+    /** Aggregates all joins from all statements for lineage output. */
+    private List<Map<String, Object>> buildJoinsLineage() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (var entry : statements.entrySet()) {
+            String stmtGeoid = entry.getKey();
+            for (JoinInfo j : entry.getValue().getJoins()) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("statement_geoid",     stmtGeoid);
+                m.put("join_type",           j.joinType());
+                m.put("source_table_geoid",  j.sourceTableGeoid());
+                m.put("source_alias",        j.sourceTableAlias());
+                m.put("target_table_geoid",  j.targetTableGeoid());
+                m.put("target_alias",        j.targetTableAlias());
+                m.put("conditions",          j.conditions());
+                result.add(m);
+            }
         }
         return result;
     }

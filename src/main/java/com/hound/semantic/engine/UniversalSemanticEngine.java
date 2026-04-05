@@ -68,6 +68,13 @@ public class UniversalSemanticEngine {
         builder.addStatement(ctx.getStatementGeoid(), type, snippet, lineStart, lineEnd,
                 parentStmt, routineGeoid);
 
+        // S2.BUG-1: persist alias on StatementInfo so resolveSubqueryByAlias finds it
+        // after the scope stack is unwound (e.g. MERGE USING (SELECT...) SOURCE).
+        if (alias != null && !alias.isBlank()) {
+            var newStmtInfo = builder.getStatements().get(ctx.getStatementGeoid());
+            if (newStmtInfo != null) newStmtInfo.setAlias(alias);
+        }
+
         if (parentStmt != null) {
             var parentInfo = builder.getStatements().get(parentStmt);
             if (parentInfo != null) {
@@ -97,10 +104,11 @@ public class UniversalSemanticEngine {
             atomProcessor.resolveAtomsOnStatementExit(stmt);
             // 3. Post-process joins (check unresolved sources)
             postProcessJoins(stmt);
-            // 4. UNION column merging
+            // 4. UNION column merging + flag transfer
             ScopeContext current = scopeManager.peek();
             if (current != null && current.isUnion()) {
                 mergeUnionColumns(stmt);
+                if (si != null) si.setIsUnion(true);
             }
 
             // B2.SQ1+SQ2 — subquery source registration in parent
@@ -373,6 +381,8 @@ public class UniversalSemanticEngine {
             logger.warn("Routine EXIT: auto-closing orphan statement scope [{}]",
                     popped.getStatementGeoid());
         }
+        // Clear cursor state — cursors and record vars are routine-scoped
+        scopeManager.clearCursorState();
         logger.debug("Routine EXIT: {}",
                 popped != null ? popped.getRoutineGeoid() : "?");
     }
@@ -399,6 +409,40 @@ public class UniversalSemanticEngine {
             RoutineInfo ri = builder.getRoutines().get(routine);
             if (ri != null) ri.setReturnType(returnType);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Cursors
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Called on exitCursor_declaration (before onStatementExit).
+     * Registers cursor_name → current statement geoid so FOR loops can look it up.
+     */
+    public void onCursorDeclared(String cursorName) {
+        String stmtGeoid = scopeManager.currentStatement();
+        if (cursorName != null && stmtGeoid != null) {
+            scopeManager.registerCursor(cursorName, stmtGeoid);
+            logger.debug("Cursor declared: {} → {}", cursorName, stmtGeoid);
+        }
+    }
+
+    /**
+     * Called on exitCursor_loop_param for a NAMED cursor (FOR rec IN cursor_name LOOP).
+     * rec becomes an alias for the cursor's statement scope.
+     */
+    public void onCursorRecordNamed(String recordVar, String cursorName) {
+        scopeManager.registerCursorRecord(recordVar, cursorName, false);
+        logger.debug("Cursor record (named): {} → cursor {}", recordVar, cursorName);
+    }
+
+    /**
+     * Called on exitCursor_loop_param for an INLINE cursor (FOR rec IN (SELECT ...) LOOP).
+     * The DINAMIC_CURSOR statement geoid is passed directly.
+     */
+    public void onCursorRecordInline(String recordVar, String dinamicCursorStmtGeoid) {
+        scopeManager.registerCursorRecord(recordVar, dinamicCursorStmtGeoid, true);
+        logger.debug("Cursor record (inline): {} → stmt {}", recordVar, dinamicCursorStmtGeoid);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -480,6 +524,26 @@ public class UniversalSemanticEngine {
 
     public String getCurrentParentContext() {
         return scopeManager.getActiveClause();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H1.4 — Statement semantic flags
+    // ═══════════════════════════════════════════════════════════════
+
+    /** Called when GROUP BY clause is entered — marks current statement as having aggregation. */
+    public void flagCurrentStatementAggregation() {
+        String stmt = scopeManager.currentStatement();
+        if (stmt == null) return;
+        StatementInfo si = builder.getStatements().get(stmt);
+        if (si != null) si.setHasAggregation(true);
+    }
+
+    /** Called when analytic OVER() clause is entered — marks current statement as having window functions. */
+    public void flagCurrentStatementWindow() {
+        String stmt = scopeManager.currentStatement();
+        if (stmt == null) return;
+        StatementInfo si = builder.getStatements().get(stmt);
+        if (si != null) si.setHasWindow(true);
     }
 
     // ═══════════════════════════════════════════════════════════════
