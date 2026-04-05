@@ -86,6 +86,7 @@ public class DiagnosticRunner {
         section11_DrillDown();
         section12_GraphAnalytics();
         section13_ResolutionLog();
+        section14_SchemaLog();
 
         long elapsed = System.currentTimeMillis() - t0;
         println("");
@@ -629,6 +630,25 @@ public class DiagnosticRunner {
                 "SELECT statement_geoid, count(*) as unresolved_cnt FROM DaliResolutionLog " +
                 "WHERE result_kind = 'unresolved' " +
                 "GROUP BY statement_geoid ORDER BY unresolved_cnt DESC LIMIT 20");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 14. DaliSchemaLog — suspicious schema registrations
+    // ═══════════════════════════════════════════════════════════════
+
+    private void section14_SchemaLog() {
+        header("14. DALIESCHEMALOG — SUSPICIOUS SCHEMA REGISTRATIONS");
+
+        query("Всего записей в DaliSchemaLog",
+                "SELECT count(*) as total FROM DaliSchemaLog");
+
+        query("Разбивка по reason",
+                "SELECT reason, count(*) as cnt FROM DaliSchemaLog " +
+                "GROUP BY reason ORDER BY cnt DESC");
+
+        query("Топ-30 уникальных schema_name по frequency",
+                "SELECT schema_name, reason, count(*) as cnt FROM DaliSchemaLog " +
+                "GROUP BY schema_name, reason ORDER BY cnt DESC LIMIT 30");
     }
 
     // ═══════════════════════════════════════════════════════════════
