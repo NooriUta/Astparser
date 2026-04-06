@@ -377,6 +377,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                                 .save();
                     }
                     dbV.put(e.getKey(), v);
+                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 }
             }
 
@@ -428,6 +429,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("db_geoid",     schDbGeoid != null ? schDbGeoid : schDbName)
                             .save();
                 }
+                sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 schV.put(e.getKey(), v);
             }
 
@@ -445,6 +447,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .set("routine_type", "PACKAGE")
                         .save();
                 pkgV.put(e.getKey(), v);
+                sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 String sg = (String) pkg.get("schema_geoid");
                 if (sg != null && !sg.isEmpty()) {
                     MutableVertex sv2 = schV.get(sg.toUpperCase());
@@ -497,7 +500,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         }
                         pool.putTableVtx(cg, v);
                     }
-                    // No BELONGS_TO_SESSION for canonical tables
+                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 } else {
                     // Ad-hoc mode: per-session table vertex (old behavior)
                     v = embeddedDb.newVertex("DaliTable")
@@ -551,7 +554,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         }
                         pool.putColumnVtx(cg, v);
                     }
-                    // Existing canonical column: skip (already linked to its table)
+                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 } else {
                     // Ad-hoc mode: per-session column (old behavior)
                     v = embeddedDb.newVertex("DaliColumn")
@@ -567,6 +570,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .save();
                     MutableVertex tv = tblV.get(c.getTableGeoid());
                     if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
+                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 }
                 colV.put(e.getKey(), v);
             }
@@ -618,6 +622,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("param_mode", p.mode())
                             .save();
                     rv.newEdge("HAS_PARAMETER", pV, true);
+                    sessionV.newEdge("BELONGS_TO_SESSION", pV, true);
                 }
                 for (RoutineInfo.VariableInfo v : r.getTypedVariables()) {
                     MutableVertex vV = embeddedDb.newVertex("DaliVariable")
@@ -627,6 +632,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("var_type", v.type())
                             .save();
                     rv.newEdge("HAS_VARIABLE", vV, true);
+                    sessionV.newEdge("BELONGS_TO_SESSION", vV, true);
                 }
             }
 
@@ -665,6 +671,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .set("quality",               computeStatementQuality(s))
                         .save();
                 stV.put(e.getKey(), v);
+                sessionV.newEdge("BELONGS_TO_SESSION", v, true);
             }
 
             // H1.5/H1.6: output-column lookup map, keyed by "stmtGeoid:col_order"
@@ -739,6 +746,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("table_ref", col.get("table_ref"))
                             .save();
                     sv.newEdge("HAS_OUTPUT_COL", ocV, true);
+                    sessionV.newEdge("BELONGS_TO_SESSION", ocV, true);
                     // Register in ocByKey for ATOM_PRODUCES / DATA_FLOW lookups
                     Object order = col.get("order");
                     if (order != null) ocByKey.put(e.getKey() + ":" + order, ocV);
@@ -762,6 +770,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("line_start", j.lineStart())
                             .save();
                     sv.newEdge("HAS_JOIN", jV, true);
+                    sessionV.newEdge("BELONGS_TO_SESSION", jV, true);
                     if (j.sourceTableGeoid() != null) {
                         MutableVertex srcTbl = tblV.get(j.sourceTableGeoid());
                         if (srcTbl != null) jV.newEdge("JOIN_SOURCE_TABLE", srcTbl, true);
@@ -798,6 +807,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     sv.newEdge("HAS_AFFECTED_COL", acV, true)
                             .set("session_id", sid)
                             .save();
+                    sessionV.newEdge("BELONGS_TO_SESSION", acV, true);
                     String acColRef = (String) ac.get("column_ref");
                     if (acColRef != null) affColByRef.put(e.getKey() + ":" + acColRef, acV);
                     String acTblGeoid = (String) ac.get("table_geoid");
@@ -846,6 +856,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             .set("nested_atoms_count", a.get("nested_atoms_count"))
                             .save();
                     sv.newEdge("HAS_ATOM", aV, true);
+                    sessionV.newEdge("BELONGS_TO_SESSION", aV, true);
 
                     String atomTableGeoid = (String) a.get("table_geoid");
                     if (atomTableGeoid != null) {
@@ -1399,6 +1410,31 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     "DaliRoutine", "routine_geoid", rg, sid);
         }
 
+        // BELONGS_TO_SESSION for all remaining entity types (remote path)
+        if (rid.sessionRid != null) {
+            for (String entityRid : rid.schemas.values())
+                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
+            for (String entityRid : rid.packages.values())
+                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
+            for (String entityRid : rid.columns.values())
+                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
+            for (String entityRid : rid.statements.values())
+                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
+            for (String entityRid : rid.atoms.values())
+                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
+            for (String entityRid : rid.outputCols.values())
+                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
+            for (String entityRid : rid.affCols.values())
+                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
+        }
+        // DaliJoin, DaliParameter, DaliVariable — always per-session; use session_id filter
+        edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
+                "DaliJoin", "session_id", sid, sid);
+        edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
+                "DaliParameter", "session_id", sid, sid);
+        edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
+                "DaliVariable", "session_id", sid, sid);
+
         for (var e : str.getRoutines().entrySet()) {
             if (!e.getValue().getTypedParameters().isEmpty())
                 edgeRemote("HAS_PARAMETER", "DaliRoutine", "routine_geoid", e.getKey(),
@@ -1667,6 +1703,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         Map<String, String> ocByOrder   = new HashMap<>();
         /** key = "stmtGeoid:column_ref" → RID  (for DATA_FLOW → DaliAffectedColumn) */
         Map<String, String> affCols     = new HashMap<>();
+        /** RID of the DaliSession vertex for this session (for BELONGS_TO_SESSION edges) */
+        String sessionRid = null;
     }
 
     private RidCache buildRidCache(String sid) {
@@ -1703,6 +1741,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         cache.outputCols = buildRidMap("DaliOutputColumn", "col_key",      sid);
         cache.ocByOrder  = buildOcByOrderMap(sid);
         cache.affCols    = buildAffColMap(sid);
+        cache.sessionRid = buildRidMap("DaliSession", "session_id", sid)
+                .values().stream().findFirst().orElse(null);
 
         logger.info("RID cache [db={}, sid={}]: T:{} C:{} S:{} R:{} P:{} A:{} OC:{} OCo:{} AC:{}",
                 dbName != null ? dbName : "ad-hoc", sid,
