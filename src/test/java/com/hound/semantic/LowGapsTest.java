@@ -312,4 +312,47 @@ class LowGapsTest {
             }
         }
     }
+
+    // ═══════ OC-propagation: SELECT→SUBQUERY→CTE output column lift ═══════
+
+    @Test
+    void cte_outputColumnsLiftedToCteScope() {
+        // CTE: SELECT → SUBQUERY → CTE chain.
+        // The CTE statement must have output columns so ATOM_REF_OUTPUT_COL can be built.
+        String sql = """
+            CREATE OR REPLACE PACKAGE BODY PKG_TEST AS
+              PROCEDURE p IS
+              BEGIN
+                INSERT INTO target_tbl (col_a, col_b)
+                SELECT t.col_a, t.col_b FROM (
+                  WITH inc AS (
+                    SELECT src.col_a, src.col_b FROM source_tbl src
+                  )
+                  SELECT * FROM inc
+                ) t;
+              END;
+            END;
+            """;
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        // Find the CTE statement (type=CTE, geoid contains "INC" or "inc")
+        var cteStmt = stmts.values().stream()
+                .filter(s -> "CTE".equals(s.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(cteStmt, "CTE statement must exist. Got types: " +
+                stmts.values().stream().map(s -> s.getType() + ":" + s.getGeoid()).toList());
+
+        // CTE must have output columns propagated from the inner SELECT
+        assertFalse(cteStmt.getColumnsOutput().isEmpty(),
+                "CTE output columns must be propagated from inner SELECT. Got: " +
+                cteStmt.getColumnsOutput().keySet());
+
+        // Keys may carry table-alias prefix (e.g. "src.col_a") — just check col_a is present
+        boolean hasColA = cteStmt.getColumnsOutput().keySet().stream()
+                .anyMatch(k -> k != null && k.toUpperCase().endsWith("COL_A"));
+        assertTrue(hasColA,
+                "COL_A must be in CTE output columns (with or without alias prefix). Got: "
+                + cteStmt.getColumnsOutput().keySet());
+    }
 }

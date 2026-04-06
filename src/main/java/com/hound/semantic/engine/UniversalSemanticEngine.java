@@ -159,17 +159,37 @@ public class UniversalSemanticEngine {
                 currentViewTargetGeoid = null;
             }
 
-            // CURSOR-OC: propagate SELECT child's output columns to the CURSOR parent.
-            // CURSOR / REF CURSOR / DINAMIC_CURSOR never receive output cols directly —
-            // they go to the child SELECT scope.  Copy them up so DaliOutputColumn records
-            // are written under the cursor's own statement_geoid.
-            if (si != null && "SELECT".equals(si.getType())) {
+            // OC propagation: lift output columns up the scope chain so that DaliOutputColumn
+            // records are written under the geoid that atoms reference as their table_geoid.
+            //
+            // CTE chain: SELECT → SUBQUERY → CTE
+            //   Atoms resolve table_geoid to the CTE geoid.
+            //   Output cols are registered on the inner SELECT.
+            //   We must propagate: SELECT → SUBQUERY, then SUBQUERY → CTE.
+            //
+            // CURSOR chain: SELECT → CURSOR (direct child)
+            //   Propagate SELECT → CURSOR.
+            if (si != null) {
                 String parentGeoid = si.getParentStatementGeoid();
                 if (parentGeoid != null) {
                     StatementInfo parentSi = builder.getStatements().get(parentGeoid);
-                    if (parentSi != null && isCursorStatementType(parentSi.getType())) {
-                        for (var entry : si.getColumnsOutput().entrySet()) {
-                            parentSi.getColumnsOutput().putIfAbsent(entry.getKey(), entry.getValue());
+                    if (parentSi != null) {
+                        String siType     = si.getType();
+                        String parentType = parentSi.getType();
+                        boolean shouldPropagate =
+                                // SELECT → CURSOR
+                                ("SELECT".equals(siType) && isCursorStatementType(parentType))
+                                // SELECT → SUBQUERY (middle of CTE chain)
+                             || ("SELECT".equals(siType) && "SUBQUERY".equals(parentType))
+                                // SUBQUERY → CTE (top of CTE chain)
+                             || ("SUBQUERY".equals(siType) && "CTE".equals(parentType));
+                        if (shouldPropagate) {
+                            for (var entry : si.getColumnsOutput().entrySet()) {
+                                parentSi.getColumnsOutput().putIfAbsent(entry.getKey(), entry.getValue());
+                            }
+                            logger.debug("OC-propagate: {} {} → {} {}",
+                                    siType, si.getGeoid(),
+                                    parentType, parentGeoid);
                         }
                     }
                 }
