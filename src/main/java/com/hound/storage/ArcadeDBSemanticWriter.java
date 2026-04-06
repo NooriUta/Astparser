@@ -1074,15 +1074,17 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 // Namespace mode: upsert canonical table
                 String cg = pool.canonical(e.getKey());
                 if (!pool.hasTableRid(cg)) {
-                    rcmd("INSERT INTO DaliTable SET db_name=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, column_count=?",
-                            dbName, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(), t.columnCount());
+                    rcmd("INSERT INTO DaliTable SET db_name=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?",
+                            dbName, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(),
+                            toJson(new ArrayList<>(t.aliases())), t.columnCount());
                     pool.putTableRid(cg, cg); // placeholder — real RID fetched in buildRidCache
                     newTableGeoids.add(e.getKey()); // will need CONTAINS_TABLE edge
                 }
             } else {
                 // Ad-hoc mode: per-session table
-                rcmd("INSERT INTO DaliTable SET session_id=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, column_count=?",
-                        sid, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(), t.columnCount());
+                rcmd("INSERT INTO DaliTable SET session_id=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?",
+                        sid, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(),
+                        toJson(new ArrayList<>(t.aliases())), t.columnCount());
             }
         }
 
@@ -1092,16 +1094,18 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 // Namespace mode: upsert canonical column
                 String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
                 if (!pool.hasColumnRid(cg)) {
-                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?",
+                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?",
                             dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
-                            c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder());
+                            c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder(),
+                            toJson(new ArrayList<>(c.getUsedInStatements())));
                     pool.putColumnRid(cg, cg); // placeholder
                     newColumnGeoids.add(e.getKey()); // will need HAS_COLUMN edge
                 }
             } else {
                 // Ad-hoc mode: per-session column
-                rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?",
-                        sid, e.getKey(), c.getTableGeoid(), c.getColumnName(), c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder());
+                rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?",
+                        sid, e.getKey(), c.getTableGeoid(), c.getColumnName(), c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder(),
+                        toJson(new ArrayList<>(c.getUsedInStatements())));
             }
         }
 
@@ -1188,9 +1192,9 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             for (var oc : e.getValue().getColumnsOutput().entrySet()) {
                 Map<String, Object> col = oc.getValue();
                 rcmd("INSERT INTO DaliOutputColumn SET session_id=?, statement_geoid=?, col_key=?, " +
-                                "name=?, expression=?, alias=?, col_order=?, source_type=?",
+                                "name=?, expression=?, alias=?, col_order=?, source_type=?, table_ref=?",
                         sid, e.getKey(), oc.getKey(), col.get("name"), col.get("expression"),
-                        col.get("alias"), col.get("order"), col.get("source_type"));
+                        col.get("alias"), col.get("order"), col.get("source_type"), col.get("table_ref"));
             }
         }
 
