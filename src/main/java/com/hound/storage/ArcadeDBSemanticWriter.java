@@ -1454,6 +1454,29 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     }
                 }
 
+                // H1.6 — ATOM_PRODUCES: DaliAtom → DaliOutputColumn
+                Object outSeq = a.get("output_column_sequence");
+                if (outSeq != null && atomRid != null) {
+                    String ocRid = rid.ocByOrder.get(stmtGeoid + ":" + outSeq);
+                    if (ocRid != null)
+                        edgeByRid("ATOM_PRODUCES", atomRid, ocRid, sid);
+                }
+
+                // H1.5 — DATA_FLOW: DaliColumn → DaliOutputColumn (resolved atoms in SELECT only)
+                if ("Обработано".equals(a.get("status")) && outSeq != null
+                        && tableGeoid != null && atomRid != null) {
+                    String colName = (String) a.get("column_name");
+                    if (colName != null) {
+                        String colRid = rid.columns.get(tableGeoid + "." + colName.toUpperCase());
+                        String ocRid  = rid.ocByOrder.get(stmtGeoid + ":" + outSeq);
+                        if (colRid != null && ocRid != null)
+                            edgeByRid("DATA_FLOW", colRid, ocRid, sid,
+                                    "statement_geoid", stmtGeoid,
+                                    "atom_id",         atomId,
+                                    "flow_type",       resolveFlowType(a, str.getStatements().get(stmtGeoid)));
+                    }
+                }
+
                 String parentCtx = (String) a.get("parent_context");
                 if (("WHERE".equals(parentCtx) || "HAVING".equals(parentCtx))
                         && "Обработано".equals(a.get("status"))
@@ -1598,6 +1621,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         Map<String, String> schemas     = new HashMap<>();
         Map<String, String> atoms       = new HashMap<>();
         Map<String, String> outputCols  = new HashMap<>();
+        /** key = "stmtGeoid:col_order" → RID  (for ATOM_PRODUCES / DATA_FLOW lookups) */
+        Map<String, String> ocByOrder   = new HashMap<>();
     }
 
     private RidCache buildRidCache(String sid) {
@@ -1632,12 +1657,14 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         cache.packages   = buildRidMap("DaliPackage",   "package_geoid",   sid);
         cache.atoms      = buildRidMap("DaliAtom",      "atom_id",         sid);
         cache.outputCols = buildRidMap("DaliOutputColumn", "col_key",      sid);
+        cache.ocByOrder  = buildOcByOrderMap(sid);
 
-        logger.info("RID cache [db={}, sid={}]: T:{} C:{} S:{} R:{} P:{} A:{} OC:{}",
+        logger.info("RID cache [db={}, sid={}]: T:{} C:{} S:{} R:{} P:{} A:{} OC:{} OCo:{}",
                 dbName != null ? dbName : "ad-hoc", sid,
                 cache.tables.size(), cache.columns.size(),
                 cache.statements.size(), cache.routines.size(),
-                cache.packages.size(), cache.atoms.size(), cache.outputCols.size());
+                cache.packages.size(), cache.atoms.size(),
+                cache.outputCols.size(), cache.ocByOrder.size());
         return cache;
     }
 
@@ -1656,6 +1683,30 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         } catch (Exception e) {
             logger.warn("RID map failed for {}: {}", type, e.getMessage());
+        }
+        return map;
+    }
+
+    /**
+     * Builds "stmtGeoid:col_order → RID" map for all DaliOutputColumn rows of this session.
+     * Used for ATOM_PRODUCES and DATA_FLOW edge creation in remote path.
+     */
+    private Map<String, String> buildOcByOrderMap(String sid) {
+        Map<String, String> map = new HashMap<>();
+        try {
+            var rs = remoteDb.query("sql",
+                    "SELECT @rid AS rid, statement_geoid, col_order FROM DaliOutputColumn WHERE session_id = :sid",
+                    Map.of("sid", sid));
+            while (rs.hasNext()) {
+                var doc = rs.next().toMap();
+                String stmtG   = (String) doc.get("statement_geoid");
+                Object colOrd  = doc.get("col_order");
+                String rid     = (String) doc.get("rid");
+                if (stmtG != null && colOrd != null && rid != null)
+                    map.put(stmtG + ":" + colOrd, rid);
+            }
+        } catch (Exception e) {
+            logger.warn("ocByOrder map failed: {}", e.getMessage());
         }
         return map;
     }
@@ -1694,18 +1745,38 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private void edgeByRid(String edgeType, String fromRid, String toRid, String sid,
                            String extraField, Object extraVal) {
+        edgeByRid(edgeType, fromRid, toRid, sid, extraField, extraVal, (Object[]) null);
+    }
+
+    /**
+     * Creates a remote edge with session_id + any number of additional key/value pairs.
+     * extraKV must be even-length: [key1, val1, key2, val2, ...].
+     */
+    private void edgeByRid(String edgeType, String fromRid, String toRid, String sid,
+                           String firstKey, Object firstVal, Object... extraKV) {
         try {
             Map<String, Object> params = new LinkedHashMap<>();
             params.put("sid", sid);
-            if (extraVal != null) params.put("extraVal", extraVal);
+            StringBuilder sql = new StringBuilder(
+                    "CREATE EDGE " + edgeType + " FROM " + fromRid + " TO " + toRid +
+                    " SET session_id = :sid");
 
-            String sql = "CREATE EDGE " + edgeType + " FROM " + fromRid + " TO " + toRid +
-                    " SET session_id = :sid";
-            if (extraField != null) sql += ", " + extraField + " = :extraVal";
-
-            remoteDb.command("sql", sql, params);
+            if (firstKey != null) {
+                params.put("p0", firstVal);
+                sql.append(", ").append(firstKey).append(" = :p0");
+            }
+            if (extraKV != null) {
+                for (int i = 0; i + 1 < extraKV.length; i += 2) {
+                    String k = (String) extraKV[i];
+                    Object v = extraKV[i + 1];
+                    String pk = "p" + (i / 2 + 1);
+                    params.put(pk, v);
+                    sql.append(", ").append(k).append(" = :").append(pk);
+                }
+            }
+            remoteDb.command("sql", sql.toString(), params);
         } catch (Exception e) {
-            logger.debug("edgeByRid+extra failed");
+            logger.debug("edgeByRid {} failed: {}", edgeType, e.getMessage());
         }
     }
 
