@@ -496,17 +496,37 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterWith_clause(PlSqlParser.With_clauseContext ctx) {
         savedFirstSubqLine = base.getIsFirstSubq();
         savedFirstSubqCol  = base.getIsFirstSubqp();
+        // CTE scope opened per-factoring-clause in enterSubquery_factoring_clause
+    }
+
+    @Override
+    public void exitWith_clause(PlSqlParser.With_clauseContext ctx) {
+        // CTE scope closed per-factoring-clause in exitSubquery_factoring_clause
+        // Restore so the main subquery after WITH is recognised as "first" (no extra scope push)
+        base.setIsFirstSubq(savedFirstSubqLine);
+        base.setIsFirstSubqp(savedFirstSubqCol);
+    }
+
+    /**
+     * H1.1 — CTE alias registration.
+     * Each individual WITH x AS (...) registers alias "x" on the outer scope
+     * so that FROM x in the main query resolves to this CTE.
+     */
+    @Override
+    public void enterSubquery_factoring_clause(PlSqlParser.Subquery_factoring_clauseContext ctx) {
+        if (ctx == null || ctx.query_name() == null) return;
+        String cteName = BaseSemanticListener.cleanIdentifier(ctx.query_name().getText());
+        if (cteName == null || cteName.isBlank()) return;
+        base.setSubqueryAlias(cteName.toUpperCase());
         base.onCTEEnter(extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        // Clear first-subquery marker so the CTE body is processed (not skipped)
         base.setIsFirstSubq(null);
         base.setIsFirstSubqp(null);
     }
 
     @Override
-    public void exitWith_clause(PlSqlParser.With_clauseContext ctx) {
+    public void exitSubquery_factoring_clause(PlSqlParser.Subquery_factoring_clauseContext ctx) {
         base.onCTEExit();
-        // Restore so main subquery after WITH is recognised as "first" (no extra scope push)
-        base.setIsFirstSubq(savedFirstSubqLine);
-        base.setIsFirstSubqp(savedFirstSubqCol);
     }
 
     // =========================================================================
@@ -838,6 +858,71 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx) { base.onGroupByEnter(getStartLine(ctx)); }
     @Override
     public void exitGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx)  { base.onGroupByExit(); }
+
+    // =========================================================================
+    // H1.1 — CONNECT BY (hierarchical queries)
+    // Column refs inside START WITH / CONNECT BY are already tracked by enterColumn_name.
+    // This handler marks the statement so it can be classified as hierarchical.
+    // =========================================================================
+
+    @Override
+    public void enterHierarchical_query_clause(PlSqlParser.Hierarchical_query_clauseContext ctx) {
+        // Mark current statement as hierarchical; column refs handled by enterColumn_name
+        String stmtGeoid = base.currentStatement();
+        if (stmtGeoid != null) {
+            var si = base.engine.getBuilder().getStatements().get(stmtGeoid);
+            if (si != null) si.setSubtype("HIERARCHICAL");
+        }
+    }
+
+    // =========================================================================
+    // H1.1 — PIVOT / UNPIVOT
+    // The pivot result becomes a virtual table; alias is registered via table_ref_aux.
+    // Column refs in FOR / IN clauses are tracked by enterColumn_name automatically.
+    // =========================================================================
+
+    @Override
+    public void enterPivot_clause(PlSqlParser.Pivot_clauseContext ctx) {
+        // Pivot FOR / IN column refs handled by enterColumn_name
+        if (ctx == null) return;
+        if (ctx.table_alias() != null) {
+            String alias = extractAlias(ctx.table_alias());
+            if (alias != null && !alias.isBlank()) {
+                base.setCurrentTableAlias(alias);
+                base.setSubqueryAlias(alias);
+            }
+        }
+    }
+
+    @Override
+    public void enterUnpivot_clause(PlSqlParser.Unpivot_clauseContext ctx) {
+        // Unpivot FOR / IN column refs handled by enterColumn_name
+        if (ctx == null) return;
+        if (ctx.table_alias() != null) {
+            String alias = extractAlias(ctx.table_alias());
+            if (alias != null && !alias.isBlank()) {
+                base.setCurrentTableAlias(alias);
+                base.setSubqueryAlias(alias);
+            }
+        }
+    }
+
+    // =========================================================================
+    // H1.1 — SELECT INTO (PL/SQL variable assignment)
+    // Only active in query_block context, not in INSERT INTO or RETURNING INTO.
+    // =========================================================================
+
+    @Override
+    public void enterInto_clause(PlSqlParser.Into_clauseContext ctx) {
+        if (ctx == null || ctx.parent == null) return;
+        // Only handle SELECT INTO (query_block), not INSERT INTO or RETURNING INTO
+        if (!(ctx.parent instanceof PlSqlParser.Query_blockContext)) return;
+        String stmtGeoid = base.currentStatement();
+        if (stmtGeoid == null) return;
+        var si = base.engine.getBuilder().getStatements().get(stmtGeoid);
+        if (si != null) si.setSubtype("SELECT_INTO");
+        // Variable names are tracked as column refs via general_element / bind_variable children
+    }
 
     @Override
     public void enterOver_clause_keyword(PlSqlParser.Over_clause_keywordContext ctx) { base.onAnalyticEnter(); }
