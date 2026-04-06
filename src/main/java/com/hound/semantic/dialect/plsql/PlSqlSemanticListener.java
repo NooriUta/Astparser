@@ -320,7 +320,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (colList == null || colList.column_name() == null) return;
         List<String> cols = new ArrayList<>();
         for (PlSqlParser.Column_nameContext cn : colList.column_name()) {
-            String name = BaseSemanticListener.cleanIdentifier(cn.getText());
+            String name = BaseSemanticListener.cleanColumnName(cn.getText());
             if (name != null && !name.isBlank()) cols.add(name);
         }
         if (!cols.isEmpty()) base.onInsertColumnList(cols);
@@ -355,7 +355,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
             PlSqlParser.Column_based_update_set_clauseContext ctx) {
         if (ctx == null) return;
         if (ctx.column_name() != null) {
-            String colName = BaseSemanticListener.cleanIdentifier(ctx.column_name().getText());
+            String colName = BaseSemanticListener.cleanColumnName(ctx.column_name().getText());
             if (colName != null && !colName.isBlank()) {
                 base.onUpdateSetColumn(colName);
             }
@@ -363,7 +363,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
                 && ctx.paren_column_list().column_list() != null) {
             List<String> cols = new ArrayList<>();
             for (var cn : ctx.paren_column_list().column_list().column_name()) {
-                String c = BaseSemanticListener.cleanIdentifier(cn.getText());
+                String c = BaseSemanticListener.cleanColumnName(cn.getText());
                 if (c != null && !c.isBlank()) cols.add(c);
             }
             if (!cols.isEmpty()) base.onUpdateSetColumnList(cols);
@@ -1011,7 +1011,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
             if (colList != null && !colList.isEmpty()) {
                 java.util.List<String> cols = new java.util.ArrayList<>();
                 for (var cn : colList) {
-                    if (cn != null) cols.add(BaseSemanticListener.cleanIdentifier(cn.getText()));
+                    if (cn != null) cols.add(BaseSemanticListener.cleanColumnName(cn.getText()));
                 }
                 base.onMergeInsertColumns(cols);
             }
@@ -1030,7 +1030,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterMerge_element(PlSqlParser.Merge_elementContext ctx) {
         if (ctx.column_name() != null) {
             base.onMergeElementEnter(
-                    BaseSemanticListener.cleanIdentifier(ctx.column_name().getText()));
+                    BaseSemanticListener.cleanColumnName(ctx.column_name().getText()));
         }
     }
     @Override

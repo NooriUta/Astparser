@@ -31,7 +31,8 @@ import org.slf4j.LoggerFactory;
  *                 USES_SUBQUERY, NESTED_IN, ROUTINE_USES_TABLE, CALLS
  *   Atom:         ATOM_REF_TABLE, ATOM_REF_COLUMN, ATOM_REF_STMT, ATOM_REF_OUTPUT_COL,
  *                 ATOM_PRODUCES
- *   Flow:         DATA_FLOW, FILTER_FLOW, JOIN_FLOW, UNION_FLOW
+ *   Flow:         DATA_FLOW (flow_type: DIRECT|AGGREGATE|INSERT|UPDATE|MERGE),
+ *                FILTER_FLOW, JOIN_FLOW, UNION_FLOW
  *   AffectedCol:  HAS_AFFECTED_COL, AFFECTED_COL_REF_TABLE
  *   Join:         JOIN_SOURCE_TABLE, JOIN_TARGET_TABLE
  *
@@ -47,7 +48,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    static final int SCHEMA_VERSION = 20;
+    static final int SCHEMA_VERSION = 21;
 
     private static final String FT_ANALYZER =
             "org.apache.lucene.analysis.core.KeywordAnalyzer";

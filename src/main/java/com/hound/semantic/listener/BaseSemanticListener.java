@@ -499,6 +499,15 @@ public abstract class BaseSemanticListener {
         atomContext.put("token_details", tokenDetails);
         atomContext.put("nested_atoms_count", nestedAtomCount);
 
+        // DML lineage: atoms in UPDATE SET / MERGE UPDATE SET expressions carry a reference
+        // to the target affected column so the writer can create DATA_FLOW edges.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> colAffected = (Map<String, Object>) current.get("column_affected");
+        if (colAffected != null) {
+            String ref = (String) colAffected.get("column_ref");
+            if (ref != null) atomContext.put("dml_target_ref", ref);
+        }
+
         String atomKey = text + "~" + line + ":" + col;
         String stmt = currentStatement();
         if (stmt != null && statements.containsKey(stmt)) {
@@ -520,6 +529,20 @@ public abstract class BaseSemanticListener {
     public static String cleanIdentifier(String name) {
         if (name == null) return null;
         return name.replaceAll("[\"'`\\[\\]]", "").trim().toUpperCase();
+    }
+
+    /**
+     * Cleans a column_name grammar node text: strips quotes and strips any
+     * leading table-alias or schema prefix (takes only the last dot-segment).
+     *
+     * Grammar rule: column_name : identifier ('.' id_expression)*
+     * So SET t.col1 = ... gives getText() = "t.col1"; we want "COL1".
+     */
+    public static String cleanColumnName(String name) {
+        if (name == null) return null;
+        String cleaned = name.replaceAll("[\"'`\\[\\]]", "").trim().toUpperCase();
+        int dot = cleaned.lastIndexOf('.');
+        return dot >= 0 ? cleaned.substring(dot + 1) : cleaned;
     }
 
     // =========================================================================
@@ -711,14 +734,23 @@ public abstract class BaseSemanticListener {
     /** G3: Called at enterMerge_element — track target column for MERGE UPDATE SET col=expr. */
     public void onMergeElementEnter(String columnName) {
         engine.onMergeElementEnter(columnName);
-        // After registering the MERGE_UPDATE_TARGET column, switch to expression context
-        // so atoms in the SET expression get parent_context="UPDATE_EXPR" (no poliage_update).
+        // Expose the just-registered MERGE_UPDATE_TARGET as column_affected so that
+        // addAtom can attach dml_target_ref to atoms in this expression.
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt != null) {
+            var si = engine.getBuilder().getStatements().get(stmt);
+            if (si != null) {
+                var acList = si.getAffectedColumns();
+                if (!acList.isEmpty()) current.put("column_affected", acList.get(acList.size() - 1));
+            }
+        }
         current.put("in_update_set_expr", true);
     }
 
     /** G3: Called at exitMerge_element — clear target column context. */
     public void onMergeElementExit() {
         current.put("in_update_set_expr", false);
+        current.put("column_affected", null);
         engine.onMergeElementExit();
     }
 
