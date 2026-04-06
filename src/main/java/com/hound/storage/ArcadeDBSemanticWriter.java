@@ -1125,11 +1125,35 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         for (var e : str.getStatements().entrySet()) {
             StatementInfo s = e.getValue();
-            // snippet omitted from vertex INSERT — full text lives in DaliSnippet document
-            rcmd("INSERT INTO DaliStatement SET session_id=?, stmt_geoid=?, type=?, " +
-                            "line_start=?, line_end=?, parent_statement=?, routine_geoid=?, short_name=?",
-                    sid, e.getKey(), s.getType(),
-                    s.getLineStart(), s.getLineEnd(), s.getParentStatementGeoid(), s.getRoutineGeoid(), s.getShortName());
+            // H1.4: full 30-prop parity with embedded path (snippet lives in DaliSnippet document)
+            rcmd("INSERT INTO DaliStatement SET " +
+                            "session_id=?, stmt_geoid=?, type=?, subtype=?, " +
+                            "line_start=?, line_end=?, " +
+                            "parent_statement=?, parent_statement_type=?, " +
+                            "routine_geoid=?, short_name=?, " +
+                            "aliases=?, child_statements=?, " +
+                            "source_table_geoids=?, target_table_geoids=?, source_subquery_geoids=?, " +
+                            "source_tables_json=?, target_tables_json=?, " +
+                            "is_union=?, is_dml=?, is_ddl=?, " +
+                            "has_aggregation=?, has_window=?, has_cte=?, " +
+                            "join_count=?, col_count_output=?, col_count_input=?, " +
+                            "depth=?, quality=?",
+                    sid, e.getKey(), s.getType(), s.getSubtype(),
+                    s.getLineStart(), s.getLineEnd(),
+                    s.getParentStatementGeoid(), parentType(s.getParentStatementGeoid(), str),
+                    s.getRoutineGeoid(), s.getShortName(),
+                    toJson(new java.util.ArrayList<>(s.getAliases())),
+                    toJson(new java.util.ArrayList<>(s.getChildStatements())),
+                    toJson(new java.util.ArrayList<>(s.getSourceTables().keySet())),
+                    toJson(new java.util.ArrayList<>(s.getTargetTables().keySet())),
+                    toJson(new java.util.ArrayList<>(s.getSourceSubqueries().keySet())),
+                    toJson(new java.util.ArrayList<>(s.getSourceTables().values())),
+                    toJson(new java.util.ArrayList<>(s.getTargetTables().values())),
+                    s.isUnion(), isDml(s.getType()), isDdl(s.getType()),
+                    s.isHasAggregation(), s.isHasWindow(), hasCte(s, str.getStatements()),
+                    s.getJoins().size(), s.getColumnsOutput().size(), countInputColumns(s),
+                    computeDepth(s.getParentStatementGeoid(), str.getStatements()),
+                    computeStatementQuality(s));
         }
 
         for (var e : str.getStatements().entrySet()) {
