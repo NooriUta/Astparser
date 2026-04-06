@@ -158,6 +158,80 @@ public class UniversalSemanticEngine {
             if (si != null && "CREATE_VIEW".equals(si.getType())) {
                 currentViewTargetGeoid = null;
             }
+
+            // CURSOR-OC: propagate SELECT child's output columns to the CURSOR parent.
+            // CURSOR / REF CURSOR / DINAMIC_CURSOR never receive output cols directly —
+            // they go to the child SELECT scope.  Copy them up so DaliOutputColumn records
+            // are written under the cursor's own statement_geoid.
+            if (si != null && "SELECT".equals(si.getType())) {
+                String parentGeoid = si.getParentStatementGeoid();
+                if (parentGeoid != null) {
+                    StatementInfo parentSi = builder.getStatements().get(parentGeoid);
+                    if (parentSi != null && isCursorStatementType(parentSi.getType())) {
+                        for (var entry : si.getColumnsOutput().entrySet()) {
+                            parentSi.getColumnsOutput().putIfAbsent(entry.getKey(), entry.getValue());
+                        }
+                    }
+                }
+            }
+
+            // H1.2-INS: INSERT INTO t (cols) SELECT … — bind SELECT output cols to INSERT
+            // target cols by position so table_ref carries the target column reference.
+            // Only fires when the INSERT has an explicit column list (insertTargetColumns non-empty).
+            if (si != null && "SELECT".equals(si.getType())) {
+                String parentGeoid = si.getParentStatementGeoid();
+                if (parentGeoid != null) {
+                    StatementInfo parentSi = builder.getStatements().get(parentGeoid);
+                    if (parentSi != null && "INSERT".equals(parentSi.getType())
+                            && !parentSi.getInsertTargetColumns().isEmpty()) {
+                        List<String> insertCols = parentSi.getInsertTargetColumns();
+                        List<String> tgtGeoids  = parentSi.getTargetTableGeoids();
+                        String tgtGeoid = tgtGeoids.isEmpty() ? null : tgtGeoids.get(0);
+                        if (tgtGeoid != null) {
+                            var ocEntries = new java.util.ArrayList<>(si.getColumnsOutput().entrySet());
+                            for (int i = 0; i < Math.min(ocEntries.size(), insertCols.size()); i++) {
+                                ocEntries.get(i).getValue().put("table_ref",
+                                        tgtGeoid + "." + insertCols.get(i).toUpperCase());
+                            }
+                            parentSi.setSubtype("INSERT_SELECT");
+                            logger.debug("H1.2-INS: {} SELECT cols → INSERT target {}", insertCols.size(), tgtGeoid);
+                        }
+                    }
+                }
+            }
+
+            // H1.2-UPD: UPDATE SET col = (subquery) — bind USUBQUERY output cols to the
+            // UPDATE target column(s) registered just before this subquery was opened.
+            // Handles both single: SET col=(SELECT…) and multi: SET (c1,c2)=(SELECT…).
+            if (si != null && "USUBQUERY".equals(si.getType())) {
+                String parentGeoid = si.getParentStatementGeoid();
+                if (parentGeoid != null) {
+                    StatementInfo parentSi = builder.getStatements().get(parentGeoid);
+                    if (parentSi != null && "UPDATE".equals(parentSi.getType())) {
+                        int ocCount = si.getColumnsOutput().size();
+                        if (ocCount > 0) {
+                            // Collect UPDATE-type affected cols registered so far (in order)
+                            var updateTargets = new java.util.ArrayList<Map<String, Object>>();
+                            for (Map<String, Object> ac : parentSi.getAffectedColumns()) {
+                                if ("UPDATE".equals(ac.get("source_type"))) updateTargets.add(ac);
+                            }
+                            // The last ocCount entries correspond to this subquery's targets
+                            int from = Math.max(0, updateTargets.size() - ocCount);
+                            var relevant = updateTargets.subList(from, updateTargets.size());
+                            var ocEntries = new java.util.ArrayList<>(si.getColumnsOutput().entrySet());
+                            for (int i = 0; i < Math.min(ocEntries.size(), relevant.size()); i++) {
+                                Map<String, Object> ac = relevant.get(i);
+                                String tblGeoid = (String) ac.get("table_geoid");
+                                String colName  = (String) ac.get("column_name");
+                                if (tblGeoid != null && colName != null)
+                                    ocEntries.get(i).getValue().putIfAbsent("table_ref",
+                                            tblGeoid + "." + colName.toUpperCase());
+                            }
+                            logger.debug("H1.2-UPD: USUBQUERY {} cols → UPDATE target", ocCount);
+                        }
+                    }
+                }
+            }
         }
         // STAB-4: уровень 1 — resolve pending columns пока scope ещё открыт
         if (stmt != null) resolvePartialPendingForStatement(stmt);
@@ -689,6 +763,10 @@ public class UniversalSemanticEngine {
         }
 
         if (changed) si.setJoins(updatedJoins);
+    }
+
+    private static boolean isCursorStatementType(String type) {
+        return "CURSOR".equals(type) || "REF CURSOR".equals(type) || "DINAMIC_CURSOR".equals(type);
     }
 
     private void mergeUnionColumns(String stmtGeoid) {

@@ -122,6 +122,76 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // Пакеты
     // =========================================================================
 
+    /** H1.3: tracks whether we are currently inside a PACKAGE SPEC (vs BODY).
+     *  procedure_spec / function_spec are only processed in SPEC context to avoid
+     *  double-registration when forward-declarations appear in PACKAGE BODY. */
+    private boolean inPackageSpec = false;
+
+    /** H1.3 — CREATE PACKAGE ... IS (specification, no body). */
+    @Override
+    public void enterCreate_package(PlSqlParser.Create_packageContext ctx) {
+        if (ctx.package_name() == null || ctx.package_name().isEmpty()) return;
+        String schemaName = null;
+        if (ctx.schema_object_name() != null && ctx.PERIOD() != null) {
+            schemaName = BaseSemanticListener.cleanIdentifier(ctx.schema_object_name().getText());
+            if (schemaName != null && !schemaName.isBlank()) {
+                base.onSchemaEnter(schemaName);
+            }
+        }
+        var pkgCtxList = ctx.package_name();
+        PlSqlParser.Package_nameContext pkgCtx = pkgCtxList.get(pkgCtxList.size() - 1);
+        String packageName = BaseSemanticListener.cleanIdentifier(pkgCtx.getText());
+        if (packageName.contains(".")) {
+            String[] parts = packageName.split("\\.", 2);
+            if (schemaName == null) schemaName = parts[0];
+            packageName = parts[1];
+        }
+        String effectiveSchema = (schemaName != null && !schemaName.isBlank())
+                ? schemaName : base.currentSchema();
+        String pkgGeoid = base.initPackage(packageName, effectiveSchema);
+        base.setPackage(pkgGeoid);
+        inPackageSpec = true;
+    }
+
+    @Override
+    public void exitCreate_package(PlSqlParser.Create_packageContext ctx) {
+        inPackageSpec = false;
+        base.setPackage(null);
+    }
+
+    /** H1.3 — PROCEDURE identifier (...); in package spec: register as PROCEDURE_SPEC routine. */
+    @Override
+    public void enterProcedure_spec(PlSqlParser.Procedure_specContext ctx) {
+        if (!inPackageSpec || ctx == null || ctx.identifier() == null) return;
+        String name = BaseSemanticListener.cleanIdentifier(ctx.identifier().getText());
+        base.onRoutineEnter(name, "PROCEDURE_SPEC", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        extractParameters(ctx.parameter());
+    }
+
+    @Override
+    public void exitProcedure_spec(PlSqlParser.Procedure_specContext ctx) {
+        if (!inPackageSpec) return;
+        base.onRoutineExit();
+    }
+
+    /** H1.3 — FUNCTION identifier (...) RETURN type; in package spec. */
+    @Override
+    public void enterFunction_spec(PlSqlParser.Function_specContext ctx) {
+        if (!inPackageSpec || ctx == null || ctx.identifier() == null) return;
+        String name = BaseSemanticListener.cleanIdentifier(ctx.identifier().getText());
+        base.onRoutineEnter(name, "FUNCTION_SPEC", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        extractParameters(ctx.parameter());
+        if (ctx.type_spec() != null) {
+            base.onRoutineReturnType(ctx.type_spec().getText());
+        }
+    }
+
+    @Override
+    public void exitFunction_spec(PlSqlParser.Function_specContext ctx) {
+        if (!inPackageSpec) return;
+        base.onRoutineExit();
+    }
+
     @Override
     public void enterCreate_package_body(PlSqlParser.Create_package_bodyContext ctx) {
         if (ctx.package_name() == null || ctx.package_name().isEmpty()) return;
@@ -250,7 +320,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (colList == null || colList.column_name() == null) return;
         List<String> cols = new ArrayList<>();
         for (PlSqlParser.Column_nameContext cn : colList.column_name()) {
-            String name = BaseSemanticListener.cleanIdentifier(cn.getText());
+            String name = BaseSemanticListener.cleanColumnName(cn.getText());
             if (name != null && !name.isBlank()) cols.add(name);
         }
         if (!cols.isEmpty()) base.onInsertColumnList(cols);
@@ -285,7 +355,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
             PlSqlParser.Column_based_update_set_clauseContext ctx) {
         if (ctx == null) return;
         if (ctx.column_name() != null) {
-            String colName = BaseSemanticListener.cleanIdentifier(ctx.column_name().getText());
+            String colName = BaseSemanticListener.cleanColumnName(ctx.column_name().getText());
             if (colName != null && !colName.isBlank()) {
                 base.onUpdateSetColumn(colName);
             }
@@ -293,7 +363,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
                 && ctx.paren_column_list().column_list() != null) {
             List<String> cols = new ArrayList<>();
             for (var cn : ctx.paren_column_list().column_list().column_name()) {
-                String c = BaseSemanticListener.cleanIdentifier(cn.getText());
+                String c = BaseSemanticListener.cleanColumnName(cn.getText());
                 if (c != null && !c.isBlank()) cols.add(c);
             }
             if (!cols.isEmpty()) base.onUpdateSetColumnList(cols);
@@ -496,17 +566,37 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterWith_clause(PlSqlParser.With_clauseContext ctx) {
         savedFirstSubqLine = base.getIsFirstSubq();
         savedFirstSubqCol  = base.getIsFirstSubqp();
+        // CTE scope opened per-factoring-clause in enterSubquery_factoring_clause
+    }
+
+    @Override
+    public void exitWith_clause(PlSqlParser.With_clauseContext ctx) {
+        // CTE scope closed per-factoring-clause in exitSubquery_factoring_clause
+        // Restore so the main subquery after WITH is recognised as "first" (no extra scope push)
+        base.setIsFirstSubq(savedFirstSubqLine);
+        base.setIsFirstSubqp(savedFirstSubqCol);
+    }
+
+    /**
+     * H1.1 — CTE alias registration.
+     * Each individual WITH x AS (...) registers alias "x" on the outer scope
+     * so that FROM x in the main query resolves to this CTE.
+     */
+    @Override
+    public void enterSubquery_factoring_clause(PlSqlParser.Subquery_factoring_clauseContext ctx) {
+        if (ctx == null || ctx.query_name() == null) return;
+        String cteName = BaseSemanticListener.cleanIdentifier(ctx.query_name().getText());
+        if (cteName == null || cteName.isBlank()) return;
+        base.setSubqueryAlias(cteName.toUpperCase());
         base.onCTEEnter(extract(ctx), getStartLine(ctx), getEndLine(ctx));
+        // Clear first-subquery marker so the CTE body is processed (not skipped)
         base.setIsFirstSubq(null);
         base.setIsFirstSubqp(null);
     }
 
     @Override
-    public void exitWith_clause(PlSqlParser.With_clauseContext ctx) {
+    public void exitSubquery_factoring_clause(PlSqlParser.Subquery_factoring_clauseContext ctx) {
         base.onCTEExit();
-        // Restore so main subquery after WITH is recognised as "first" (no extra scope push)
-        base.setIsFirstSubq(savedFirstSubqLine);
-        base.setIsFirstSubqp(savedFirstSubqCol);
     }
 
     // =========================================================================
@@ -839,6 +929,71 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     @Override
     public void exitGroup_by_clause(PlSqlParser.Group_by_clauseContext ctx)  { base.onGroupByExit(); }
 
+    // =========================================================================
+    // H1.1 — CONNECT BY (hierarchical queries)
+    // Column refs inside START WITH / CONNECT BY are already tracked by enterColumn_name.
+    // This handler marks the statement so it can be classified as hierarchical.
+    // =========================================================================
+
+    @Override
+    public void enterHierarchical_query_clause(PlSqlParser.Hierarchical_query_clauseContext ctx) {
+        // Mark current statement as hierarchical; column refs handled by enterColumn_name
+        String stmtGeoid = base.currentStatement();
+        if (stmtGeoid != null) {
+            var si = base.engine.getBuilder().getStatements().get(stmtGeoid);
+            if (si != null) si.setSubtype("HIERARCHICAL");
+        }
+    }
+
+    // =========================================================================
+    // H1.1 — PIVOT / UNPIVOT
+    // The pivot result becomes a virtual table; alias is registered via table_ref_aux.
+    // Column refs in FOR / IN clauses are tracked by enterColumn_name automatically.
+    // =========================================================================
+
+    @Override
+    public void enterPivot_clause(PlSqlParser.Pivot_clauseContext ctx) {
+        // Pivot FOR / IN column refs handled by enterColumn_name
+        if (ctx == null) return;
+        if (ctx.table_alias() != null) {
+            String alias = extractAlias(ctx.table_alias());
+            if (alias != null && !alias.isBlank()) {
+                base.setCurrentTableAlias(alias);
+                base.setSubqueryAlias(alias);
+            }
+        }
+    }
+
+    @Override
+    public void enterUnpivot_clause(PlSqlParser.Unpivot_clauseContext ctx) {
+        // Unpivot FOR / IN column refs handled by enterColumn_name
+        if (ctx == null) return;
+        if (ctx.table_alias() != null) {
+            String alias = extractAlias(ctx.table_alias());
+            if (alias != null && !alias.isBlank()) {
+                base.setCurrentTableAlias(alias);
+                base.setSubqueryAlias(alias);
+            }
+        }
+    }
+
+    // =========================================================================
+    // H1.1 — SELECT INTO (PL/SQL variable assignment)
+    // Only active in query_block context, not in INSERT INTO or RETURNING INTO.
+    // =========================================================================
+
+    @Override
+    public void enterInto_clause(PlSqlParser.Into_clauseContext ctx) {
+        if (ctx == null || ctx.parent == null) return;
+        // Only handle SELECT INTO (query_block), not INSERT INTO or RETURNING INTO
+        if (!(ctx.parent instanceof PlSqlParser.Query_blockContext)) return;
+        String stmtGeoid = base.currentStatement();
+        if (stmtGeoid == null) return;
+        var si = base.engine.getBuilder().getStatements().get(stmtGeoid);
+        if (si != null) si.setSubtype("SELECT_INTO");
+        // Variable names are tracked as column refs via general_element / bind_variable children
+    }
+
     @Override
     public void enterOver_clause_keyword(PlSqlParser.Over_clause_keywordContext ctx) { base.onAnalyticEnter(); }
 
@@ -856,7 +1011,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
             if (colList != null && !colList.isEmpty()) {
                 java.util.List<String> cols = new java.util.ArrayList<>();
                 for (var cn : colList) {
-                    if (cn != null) cols.add(BaseSemanticListener.cleanIdentifier(cn.getText()));
+                    if (cn != null) cols.add(BaseSemanticListener.cleanColumnName(cn.getText()));
                 }
                 base.onMergeInsertColumns(cols);
             }
@@ -875,7 +1030,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     public void enterMerge_element(PlSqlParser.Merge_elementContext ctx) {
         if (ctx.column_name() != null) {
             base.onMergeElementEnter(
-                    BaseSemanticListener.cleanIdentifier(ctx.column_name().getText()));
+                    BaseSemanticListener.cleanColumnName(ctx.column_name().getText()));
         }
     }
     @Override

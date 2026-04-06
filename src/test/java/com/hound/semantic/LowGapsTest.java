@@ -9,16 +9,18 @@ import org.antlr.v4.runtime.*;
 import org.antlr.v4.runtime.tree.ParseTreeWalker;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Tests for LOW gaps G10 / G11 / G13.
+ * Tests for LOW gaps G10 / G11 / G13 and column alias stripping.
  *
  * G10: CREATE VIEW with explicit column alias list (col1, col2, ...)
  * G11: schema.table.column 3-part column reference in onColumnRef
  * G13: synthetic column name (EXPR_N) when alias and expression text are both absent
+ * cleanColumnName: DML target columns with alias prefix (t.col1) must strip the prefix
  */
 class LowGapsTest {
 
@@ -193,5 +195,121 @@ class LowGapsTest {
                 || selectStmt.getColumnsOutput().containsKey("adjusted_salary");
         assertTrue(hasAliasedCol,
                 "Aliased column must keep its alias. Got: " + selectStmt.getColumnsOutput().keySet());
+    }
+
+    // ═══════ cleanColumnName: alias-prefix stripping for DML target columns ═══════
+
+    @Test
+    void mergeUpdate_aliasedTargetColumn_stripsAlias() {
+        // MERGE UPDATE SET t.col1 = ... — column_name in grammar is "t.col1"
+        // DaliAffectedColumn.column_name must be "COL1", not "T.COL1"
+        String sql = """
+            MERGE INTO target_tbl t
+            USING source_tbl s ON (t.id = s.id)
+            WHEN MATCHED THEN UPDATE SET t.col1 = s.val1, t.col2 = s.val2
+            """;
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        var mergeStmt = stmts.values().stream()
+                .filter(si -> "MERGE".equals(si.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(mergeStmt, "MERGE statement must be parsed");
+
+        List<Map<String, Object>> affected = mergeStmt.getAffectedColumns();
+        assertFalse(affected.isEmpty(), "MERGE should produce affected columns");
+
+        for (var ac : affected) {
+            String colName = (String) ac.get("column_name");
+            if (colName != null) {
+                assertFalse(colName.contains("."),
+                        "column_name must not contain alias prefix, got: " + colName);
+            }
+        }
+
+        // col1 and col2 must appear as column_name (not t.col1 / t.col2)
+        boolean hasCol1 = affected.stream().anyMatch(a -> "COL1".equals(a.get("column_name")));
+        boolean hasCol2 = affected.stream().anyMatch(a -> "COL2".equals(a.get("column_name")));
+        assertTrue(hasCol1, "COL1 must be in affected columns. Got: " +
+                affected.stream().map(a -> a.get("column_name")).toList());
+        assertTrue(hasCol2, "COL2 must be in affected columns");
+    }
+
+    @Test
+    void mergeInsert_aliasedTargetColumn_stripsAlias() {
+        // MERGE INSERT (t.col1, t.col2) — column names must strip alias prefix
+        String sql = """
+            MERGE INTO target_tbl t
+            USING source_tbl s ON (t.id = s.id)
+            WHEN NOT MATCHED THEN INSERT (t.col1, t.col2) VALUES (s.val1, s.val2)
+            """;
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        var mergeStmt = stmts.values().stream()
+                .filter(si -> "MERGE".equals(si.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(mergeStmt, "MERGE statement must be parsed");
+
+        List<Map<String, Object>> affected = mergeStmt.getAffectedColumns();
+        for (var ac : affected) {
+            String colName = (String) ac.get("column_name");
+            if (colName != null) {
+                assertFalse(colName.contains("."),
+                        "column_name must not contain alias prefix, got: " + colName);
+            }
+        }
+    }
+
+    @Test
+    void updateSet_aliasedTargetColumn_stripsAlias() {
+        // UPDATE t SET t.col1 = ... — column_name node text is "t.col1"
+        String sql = """
+            UPDATE employees t SET t.salary = t.salary * 1.1 WHERE t.dept_id = 10
+            """;
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        var updateStmt = stmts.values().stream()
+                .filter(si -> "UPDATE".equals(si.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(updateStmt, "UPDATE statement must be parsed");
+
+        List<Map<String, Object>> affected = updateStmt.getAffectedColumns();
+        for (var ac : affected) {
+            String colName = (String) ac.get("column_name");
+            if (colName != null) {
+                assertFalse(colName.contains("."),
+                        "column_name must not contain alias prefix, got: " + colName);
+            }
+        }
+
+        boolean hasSalary = affected.stream().anyMatch(a -> "SALARY".equals(a.get("column_name")));
+        assertTrue(hasSalary, "SALARY must be in affected columns (stripped). Got: " +
+                affected.stream().map(a -> a.get("column_name")).toList());
+    }
+
+    @Test
+    void insertColumnList_aliasedColumn_stripsAlias() {
+        // INSERT INTO t (t.col1, t.col2) — unusual but grammar allows it
+        String sql = """
+            INSERT INTO orders (order_id, amount) VALUES (1, 100)
+            """;
+        var engine = parse(sql);
+        var stmts = engine.getBuilder().getStatements();
+
+        var insertStmt = stmts.values().stream()
+                .filter(si -> "INSERT".equals(si.getType()))
+                .findFirst().orElse(null);
+        assertNotNull(insertStmt, "INSERT statement must be parsed");
+
+        List<Map<String, Object>> affected = insertStmt.getAffectedColumns();
+        for (var ac : affected) {
+            String colName = (String) ac.get("column_name");
+            if (colName != null) {
+                assertFalse(colName.contains("."),
+                        "column_name must not contain prefix, got: " + colName);
+            }
+        }
     }
 }

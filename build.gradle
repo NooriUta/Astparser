@@ -52,10 +52,6 @@ dependencies {
     implementation 'com.arcadedb:arcadedb-engine:24.11.1'
     implementation 'com.arcadedb:arcadedb-network:24.11.1'
 
-    // Apache Arrow (Arrow IPC формат для передачи Hound → Dali)
-    implementation platform('org.apache.arrow:arrow-bom:17.0.0')
-    implementation 'org.apache.arrow:arrow-vector'
-    implementation 'org.apache.arrow:arrow-memory-netty'
 }
 
 // ==================== SOURCE SETS ====================

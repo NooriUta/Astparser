@@ -53,18 +53,40 @@ public class SemanticResult {
     public List<Map<String, Object>> getSchemaRegistrationLog() { return schemaRegistrationLog; }
 
     /**
-     * Arrow Flight compatible serialization.
+     * Serializes the full semantic result into a plain Map suitable for
+     * JSON serialization, diagnostic output, or downstream consumers (Dali, KNOT, etc.).
+     *
+     * Returns structure via getFullStructure() — includes tables, columns, routines,
+     * schemas, statements, packages, databases — not the raw Structure object.
      */
-    public Map<String, Object> toArrowCompatibleMap() {
+    public Map<String, Object> toSerializableMap() {
         Map<String, Object> result = new java.util.LinkedHashMap<>();
-        result.put("structure", structure);
-        result.put("lineage", lineage);
-        result.put("atoms", atoms);
-        result.put("session_id", sessionId);
-        result.put("file_path", filePath);
-        result.put("dialect", dialect);
+        if (structure != null) {
+            Map<String, Object> structMap = new java.util.LinkedHashMap<>();
+            structMap.put("databases",  structure.getDatabases());
+            structMap.put("schemas",    structure.getSchemas());
+            structMap.put("packages",   structure.getPackages());
+            structMap.put("tables",     structure.getTables());
+            structMap.put("columns",    structure.getColumns());
+            structMap.put("routines",   structure.getRoutines());
+            structMap.put("statements", structure.getStatements());
+            result.put("structure", structMap);
+        } else {
+            result.put("structure", null);
+        }
+        result.put("lineage",   lineage);
+        result.put("atoms",     atoms);
+        result.put("session_id",         sessionId);
+        result.put("file_path",          filePath);
+        result.put("dialect",            dialect);
         result.put("processing_time_ms", processingTimeMs);
         return result;
+    }
+
+    /** @deprecated Use {@link #toSerializableMap()} instead. */
+    @Deprecated
+    public Map<String, Object> toArrowCompatibleMap() {
+        return toSerializableMap();
     }
 
     @Override
