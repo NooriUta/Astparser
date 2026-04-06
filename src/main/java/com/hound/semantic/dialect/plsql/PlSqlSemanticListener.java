@@ -122,6 +122,76 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     // Пакеты
     // =========================================================================
 
+    /** H1.3: tracks whether we are currently inside a PACKAGE SPEC (vs BODY).
+     *  procedure_spec / function_spec are only processed in SPEC context to avoid
+     *  double-registration when forward-declarations appear in PACKAGE BODY. */
+    private boolean inPackageSpec = false;
+
+    /** H1.3 — CREATE PACKAGE ... IS (specification, no body). */
+    @Override
+    public void enterCreate_package(PlSqlParser.Create_packageContext ctx) {
+        if (ctx.package_name() == null || ctx.package_name().isEmpty()) return;
+        String schemaName = null;
+        if (ctx.schema_object_name() != null && ctx.PERIOD() != null) {
+            schemaName = BaseSemanticListener.cleanIdentifier(ctx.schema_object_name().getText());
+            if (schemaName != null && !schemaName.isBlank()) {
+                base.onSchemaEnter(schemaName);
+            }
+        }
+        var pkgCtxList = ctx.package_name();
+        PlSqlParser.Package_nameContext pkgCtx = pkgCtxList.get(pkgCtxList.size() - 1);
+        String packageName = BaseSemanticListener.cleanIdentifier(pkgCtx.getText());
+        if (packageName.contains(".")) {
+            String[] parts = packageName.split("\\.", 2);
+            if (schemaName == null) schemaName = parts[0];
+            packageName = parts[1];
+        }
+        String effectiveSchema = (schemaName != null && !schemaName.isBlank())
+                ? schemaName : base.currentSchema();
+        String pkgGeoid = base.initPackage(packageName, effectiveSchema);
+        base.setPackage(pkgGeoid);
+        inPackageSpec = true;
+    }
+
+    @Override
+    public void exitCreate_package(PlSqlParser.Create_packageContext ctx) {
+        inPackageSpec = false;
+        base.setPackage(null);
+    }
+
+    /** H1.3 — PROCEDURE identifier (...); in package spec: register as PROCEDURE_SPEC routine. */
+    @Override
+    public void enterProcedure_spec(PlSqlParser.Procedure_specContext ctx) {
+        if (!inPackageSpec || ctx == null || ctx.identifier() == null) return;
+        String name = BaseSemanticListener.cleanIdentifier(ctx.identifier().getText());
+        base.onRoutineEnter(name, "PROCEDURE_SPEC", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        extractParameters(ctx.parameter());
+    }
+
+    @Override
+    public void exitProcedure_spec(PlSqlParser.Procedure_specContext ctx) {
+        if (!inPackageSpec) return;
+        base.onRoutineExit();
+    }
+
+    /** H1.3 — FUNCTION identifier (...) RETURN type; in package spec. */
+    @Override
+    public void enterFunction_spec(PlSqlParser.Function_specContext ctx) {
+        if (!inPackageSpec || ctx == null || ctx.identifier() == null) return;
+        String name = BaseSemanticListener.cleanIdentifier(ctx.identifier().getText());
+        base.onRoutineEnter(name, "FUNCTION_SPEC", base.currentSchema(), base.currentPackage(), getStartLine(ctx));
+        extractParameters(ctx.parameter());
+        if (ctx.type_spec() != null) {
+            base.onRoutineReturnType(ctx.type_spec().getText());
+        }
+    }
+
+    @Override
+    public void exitFunction_spec(PlSqlParser.Function_specContext ctx) {
+        if (!inPackageSpec) return;
+        base.onRoutineExit();
+    }
+
     @Override
     public void enterCreate_package_body(PlSqlParser.Create_package_bodyContext ctx) {
         if (ctx.package_name() == null || ctx.package_name().isEmpty()) return;
