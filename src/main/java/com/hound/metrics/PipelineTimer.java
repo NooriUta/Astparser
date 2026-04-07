@@ -45,11 +45,17 @@ public class PipelineTimer {
     }
 
     /**
-     * Sum of the four pipeline phases: parse + walk + resolve + write.vtx + write.edge.
-     * For embedded mode write.edge is 0; for no-writer all write phases are 0.
+     * Sum of all pipeline phases: parse + walk + resolve + write.
+     * Write phase is write.vtx+write.edge (EMBEDDED/REMOTE) or write.batch (REMOTE_BATCH).
      */
     public long totalMs() {
-        return ms("parse") + ms("walk") + ms("resolve") + ms("write.vtx") + ms("write.edge");
+        return ms("parse") + ms("walk") + ms("resolve") + writeMs();
+    }
+
+    /** DB write time regardless of mode (write.batch takes priority over write.vtx+write.edge). */
+    public long writeMs() {
+        long batch = ms("write.batch");
+        return batch > 0 ? batch : ms("write.vtx") + ms("write.edge");
     }
 
     /** Integer counter value (0 if never counted). */

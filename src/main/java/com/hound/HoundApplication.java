@@ -493,7 +493,7 @@ public class HoundApplication {
         long p  = timer.ms("parse");
         long w  = timer.ms("walk");
         long rv = timer.ms("resolve");
-        long db = timer.ms("write.vtx") + timer.ms("write.edge");
+        long db = timer.writeMs();
 
         System.out.printf("  %-30s %5d lines  P:%-4d W:%-5d Rv:%-4d DB:%-5d  T:%-3d C:%-4d S:%-3d Rt:%-2d J:%-2d A:%-3d L:%-3d%n",
                 file.getFileName(), lineCount,
@@ -613,7 +613,8 @@ public class HoundApplication {
         long rvTotal    = timers.stream().mapToLong(t -> t.ms("resolve")).sum();
         long vtxTotal   = timers.stream().mapToLong(t -> t.ms("write.vtx")).sum();
         long edgeTotal  = timers.stream().mapToLong(t -> t.ms("write.edge")).sum();
-        long dbTotal    = vtxTotal + edgeTotal;
+        long batchTotal = timers.stream().mapToLong(t -> t.ms("write.batch")).sum();
+        long dbTotal    = batchTotal > 0 ? batchTotal : vtxTotal + edgeTotal;
         long total      = parseTotal + walkTotal + rvTotal + dbTotal;
 
         int n = timers.size();
@@ -628,7 +629,9 @@ public class HoundApplication {
         printPhaseLine("Walk",     walkTotal,  n, total);
         printPhaseLine("Resolve",  rvTotal,    n, total);
         printPhaseLine("DB Write", dbTotal,    n, total);
-        if (edgeTotal > 0) {
+        if (batchTotal > 0) {
+            printSubPhaseLine("batch", batchTotal, total);
+        } else if (edgeTotal > 0) {
             printSubPhaseLine("vtx",  vtxTotal,  total);
             printSubPhaseLine("edge", edgeTotal, total);
         }
