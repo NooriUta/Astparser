@@ -30,9 +30,10 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private Database embeddedDb;
     private RemoteDatabase remoteDb;
+    private HttpBatchClient batchClient;
     private final Mode mode;
 
-    public enum Mode { EMBEDDED, REMOTE }
+    public enum Mode { EMBEDDED, REMOTE, REMOTE_BATCH }
 
     // ═══════════════════════════════════════════════════════════════
     // Constructors
@@ -53,6 +54,21 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             try { remoteDb.command("sql", cmd); } catch (Exception ignored) {}
         }
         logger.info("ArcadeDB REMOTE: {}:{}/{}", host, port, dbName);
+    }
+
+    public ArcadeDBSemanticWriter(String host, int port, String dbName,
+                                   String user, String password, boolean useBatch) {
+        this.mode = useBatch ? Mode.REMOTE_BATCH : Mode.REMOTE;
+        this.remoteDb = new RemoteDatabase(host, port, dbName, user, password);
+        for (String cmd : SchemaInitializer.remoteSchemaCommands()) {
+            try { remoteDb.command("sql", cmd); } catch (Exception ignored) {}
+        }
+        if (useBatch) {
+            this.batchClient = new HttpBatchClient(host, port, dbName, user, password);
+            logger.info("ArcadeDB REMOTE_BATCH: {}:{}/{}", host, port, dbName);
+        } else {
+            logger.info("ArcadeDB REMOTE: {}:{}/{}", host, port, dbName);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -80,6 +96,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         if (mode == Mode.EMBEDDED) {
             saveEmbedded(sid, result, timer, pool, dbName);
+        } else if (mode == Mode.REMOTE_BATCH) {
+            saveRemoteBatch(sid, result, timer);
         } else {
             saveRemote(sid, result, timer, pool, dbName);
         }
@@ -1013,6 +1031,31 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
         });
         timer.stop("write.vtx");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // REMOTE_BATCH mode — single HTTP POST per file
+    // ═══════════════════════════════════════════════════════════════
+
+    private void saveRemoteBatch(String sid, SemanticResult result, PipelineTimer timer) {
+        Structure str = result.getStructure();
+        if (str == null) return;
+
+        timer.start("write.batch");
+
+        JsonlBatchBuilder builder = JsonlBatchBuilder.buildFromResult(sid, result);
+        String payload = builder.build();
+
+        logger.debug("Batch payload: {} vertices, {} edges, {} bytes",
+                builder.vertexCount(), builder.edgeCount(), payload.length());
+
+        batchClient.send(payload, sid);
+
+        timer.stop("write.batch");
+
+        logger.info("ArcadeDB REMOTE_BATCH: sid={} V:{} E:{} raw:{}b [{}]",
+                sid, builder.vertexCount(), builder.edgeCount(),
+                payload.length(), formatTime(timer.ms("write.batch")));
     }
 
     // ═══════════════════════════════════════════════════════════════

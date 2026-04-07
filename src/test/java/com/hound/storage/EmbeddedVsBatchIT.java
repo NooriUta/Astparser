@@ -1,0 +1,460 @@
+package com.hound.storage;
+
+import com.arcadedb.database.Database;
+import com.arcadedb.database.DatabaseFactory;
+import com.hound.metrics.PipelineTimer;
+import com.hound.parser.base.grammars.sql.plsql.PlSqlLexer;
+import com.hound.parser.base.grammars.sql.plsql.PlSqlParser;
+import com.hound.semantic.dialect.plsql.PlSqlSemanticListener;
+import com.hound.semantic.engine.UniversalSemanticEngine;
+import com.hound.semantic.model.SemanticResult;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
+import org.antlr.v4.runtime.tree.ParseTreeWalker;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Интеграционный тест: сравниваем COUNT(*) вершин и рёбер между тремя режимами записи:
+ * <ul>
+ *   <li><b>EMBEDDED</b> — локальная ArcadeDB (tmpdir, не затрагивает сервер)</li>
+ *   <li><b>REMOTE</b>   → изолированная тестовая база {@value #DB_REMOTE}</li>
+ *   <li><b>REMOTE_BATCH</b> → изолированная тестовая база {@value #DB_BATCH}</li>
+ * </ul>
+ *
+ * <p>Фикстуры берутся из реального корпуса: {@value #TEST_DATA_ROOT}
+ * <p>Продакшн-база {@code hound} <b>не затрагивается</b>.
+ *
+ * <h3>Запуск</h3>
+ * <pre>
+ *   # 1. Поднять ArcadeDB
+ *   docker run -d --name arcade -p 2480:2480 \
+ *     -e ARCADEDB_SERVER_ROOT_PASSWORD=playwithdata \
+ *     arcadedata/arcadedb:latest
+ *
+ *   # 2. Запустить все IT-тесты
+ *   ./gradlew test --tests "*EmbeddedVsBatchIT*" -Dintegration=true
+ *
+ *   # 3. Только быстрый smoke
+ *   ./gradlew test --tests "*EmbeddedVsBatchIT#smoke*" -Dintegration=true
+ * </pre>
+ */
+@Tag("integration")
+@EnabledIfSystemProperty(named = "integration", matches = "true")
+class EmbeddedVsBatchIT {
+
+    // ─── ArcadeDB connection ─────────────────────────────────────────────────
+    private static final String HOST = "localhost";
+    private static final int    PORT = 2480;
+    private static final String USER = "root";
+    private static final String PASS = "playwithdata";
+
+    /** Изолированные тестовые БД — продакшн-база "hound" не затрагивается. */
+    private static final String DB_REMOTE = "hound_remote";
+    private static final String DB_BATCH  = "hound_remote_batch";
+
+    /** Локальная embedded БД для эталонных сравнений. */
+    private static final String DB_EMBEDDED = "target/test-db-embedded-it";
+
+    /**
+     * Корень реального тестового корпуса.
+     * Структура: test_plsql/DWH2/…  и  test_plsql/ODS/…
+     */
+    private static final String TEST_DATA_ROOT = "C:/AIDA/Dali4/HOUND/test_plsql";
+
+    /**
+     * Конкретные пакеты для детерминированных сравнительных тестов.
+     * Выбраны как представительные (DML + SELECT, разные базы).
+     */
+    private static final String FIXTURE_DWH2 =
+            TEST_DATA_ROOT + "/DWH2/Test_group_1/package_RMS/DM_LOADER_SET_DEFAULT.pck";
+    private static final String FIXTURE_ODS =
+            TEST_DATA_ROOT + "/ODS/ODS/SCR_CDWH_DET_ACCOUNT_PKG.pck";
+
+    // Fallback: маленькие встроенные фикстуры из classpath
+    private static final String FIXTURE_FALLBACK_DML = "pkg_dml_basic.pck";
+    private static final String FIXTURE_FALLBACK_CTE = "pkg_select_cte.pck";
+
+    // ─── Vertex / Edge types to compare ──────────────────────────────────────
+    private static final String[] VERTEX_TYPES = {
+        "DaliSession", "DaliSchema", "DaliTable", "DaliColumn",
+        "DaliRoutine", "DaliPackage", "DaliStatement",
+        "DaliAtom", "DaliOutputColumn", "DaliJoin",
+        "DaliParameter", "DaliVariable"
+    };
+
+    private static final String[] EDGE_TYPES = {
+        "READS_FROM", "WRITES_TO", "HAS_COLUMN", "CONTAINS_TABLE",
+        "CONTAINS_STMT", "HAS_ATOM", "BELONGS_TO_SESSION",
+        "HAS_OUTPUT_COL", "HAS_JOIN", "FILTER_FLOW",
+        "CONTAINS_ROUTINE", "HAS_PARAMETER", "HAS_VARIABLE"
+    };
+
+    // ─── Lifecycle ───────────────────────────────────────────────────────────
+
+    @BeforeEach
+    void setUp() throws Exception {
+        wipe(Path.of(DB_EMBEDDED));
+        recreateRemoteDb(DB_REMOTE);
+        recreateRemoteDb(DB_BATCH);
+    }
+
+    @AfterEach
+    void tearDown() throws IOException {
+        wipe(Path.of(DB_EMBEDDED));
+        // remote БД оставляем после теста — удобно для ручной инспекции в ArcadeDB Studio
+        // Следующий @BeforeEach пересоздаст их заново
+    }
+
+    // ─── Test 1: REMOTE vs REMOTE_BATCH — DWH2 пакет ─────────────────────────
+
+    @Test
+    void remoteAndBatchProduceSameCounts_dwh2() throws Exception {
+        Path fixture = resolveFixture(FIXTURE_DWH2, FIXTURE_FALLBACK_DML);
+        SemanticResult base = parseFixture(fixture);
+
+        assertHasStatements(base, fixture);
+
+        Map<String, Long> remoteCounts = writeRemote(reSid(base, base.getSessionId() + "-r"));
+        Map<String, Long> batchCounts  = writeBatch (reSid(base, base.getSessionId() + "-b"));
+
+        printTable("REMOTE vs REMOTE_BATCH | " + fixture.getFileName(),
+                "REMOTE", remoteCounts, "BATCH", batchCounts);
+        assertCountsMatch("REMOTE", remoteCounts, "REMOTE_BATCH", batchCounts);
+    }
+
+    // ─── Test 2: REMOTE vs REMOTE_BATCH — ODS пакет ──────────────────────────
+
+    @Test
+    void remoteAndBatchProduceSameCounts_ods() throws Exception {
+        Path fixture = resolveFixture(FIXTURE_ODS, FIXTURE_FALLBACK_CTE);
+        SemanticResult base = parseFixture(fixture);
+
+        assertHasStatements(base, fixture);
+
+        Map<String, Long> remoteCounts = writeRemote(reSid(base, base.getSessionId() + "-r"));
+        Map<String, Long> batchCounts  = writeBatch (reSid(base, base.getSessionId() + "-b"));
+
+        printTable("REMOTE vs REMOTE_BATCH | " + fixture.getFileName(),
+                "REMOTE", remoteCounts, "BATCH", batchCounts);
+        assertCountsMatch("REMOTE", remoteCounts, "REMOTE_BATCH", batchCounts);
+    }
+
+    // ─── Test 3: EMBEDDED vs REMOTE_BATCH — эталонное сравнение ─────────────
+
+    @Test
+    void embeddedAndBatchProduceSameCounts() throws Exception {
+        Path fixture = resolveFixture(FIXTURE_DWH2, FIXTURE_FALLBACK_DML);
+        SemanticResult base = parseFixture(fixture);
+
+        assertHasStatements(base, fixture);
+
+        Map<String, Long> embeddedCounts = writeEmbedded(base);
+        Map<String, Long> batchCounts    = writeBatch(reSid(base, base.getSessionId() + "-b"));
+
+        printTable("EMBEDDED vs REMOTE_BATCH | " + fixture.getFileName(),
+                "EMBEDDED", embeddedCounts, "BATCH", batchCounts);
+        assertCountsMatch("EMBEDDED", embeddedCounts, "REMOTE_BATCH", batchCounts);
+    }
+
+    // ─── Test 4: Параметрический — несколько пакетов из реального корпуса ────
+
+    /**
+     * Для каждого из выбранных пакетов: REMOTE vs REMOTE_BATCH должны совпадать.
+     * Использует небольшую выборку (не весь корпус) чтобы тест был управляемым.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("sampledFixtures")
+    void remoteAndBatchMatch_parameterized(String label, Path fixture) throws Exception {
+        SemanticResult base = parseFixture(fixture);
+        if (base.getStructure() == null ||
+            base.getStructure().getStatements().isEmpty()) {
+            System.out.println("SKIP (пустой результат): " + fixture.getFileName());
+            return; // не падаем — пустой файл не является ошибкой
+        }
+
+        // Пересоздаём БД для изоляции между параметрами
+        recreateRemoteDb(DB_REMOTE);
+        recreateRemoteDb(DB_BATCH);
+
+        Map<String, Long> remoteCounts = writeRemote(reSid(base, base.getSessionId() + "-r"));
+        Map<String, Long> batchCounts  = writeBatch (reSid(base, base.getSessionId() + "-b"));
+
+        printTable("REMOTE vs BATCH | " + fixture.getFileName(),
+                "REMOTE", remoteCounts, "BATCH", batchCounts);
+        assertCountsMatch("REMOTE", remoteCounts, "REMOTE_BATCH", batchCounts);
+    }
+
+    /**
+     * Выборка: по 5 пакетов из каждой базы = 10 файлов итого.
+     * Берём каждый N-й файл, чтобы покрыть разные паттерны SQL.
+     */
+    static Stream<org.junit.jupiter.params.provider.Arguments> sampledFixtures() throws Exception {
+        List<org.junit.jupiter.params.provider.Arguments> result = new ArrayList<>();
+
+        String[] roots = {
+            TEST_DATA_ROOT + "/DWH2/Test_group_1/package_RMS",
+            TEST_DATA_ROOT + "/ODS/ODS"
+        };
+
+        for (String root : roots) {
+            Path dir = Path.of(root);
+            if (!Files.exists(dir)) continue;
+
+            List<Path> files;
+            try (var stream = Files.list(dir)) {
+                files = stream
+                    .filter(p -> {
+                        String name = p.getFileName().toString().toLowerCase();
+                        return name.endsWith(".pck") || name.endsWith(".sql");
+                    })
+                    .sorted()
+                    .toList();
+            }
+
+            // Выбираем каждый 10-й файл, минимум 5
+            int step = Math.max(1, files.size() / 5);
+            for (int i = 0; i < files.size(); i += step) {
+                Path f = files.get(i);
+                result.add(org.junit.jupiter.params.provider.Arguments.of(
+                    f.getParent().getFileName() + "/" + f.getFileName(), f));
+            }
+        }
+
+        // Fallback на classpath если реального корпуса нет
+        if (result.isEmpty()) {
+            Path fallback = classpathFixture(FIXTURE_FALLBACK_DML);
+            if (fallback != null)
+                result.add(org.junit.jupiter.params.provider.Arguments.of("fallback/pkg_dml_basic.pck", fallback));
+        }
+
+        return result.stream();
+    }
+
+    // ─── Test 5: Smoke — batch пишет хоть что-то ─────────────────────────────
+
+    @Test
+    void smokeTest_batchProducesNonZeroVertices() throws Exception {
+        Path fixture = resolveFixture(FIXTURE_DWH2, FIXTURE_FALLBACK_DML);
+        SemanticResult result = parseFixture(fixture);
+
+        Map<String, Long> counts = writeBatch(reSid(result, result.getSessionId() + "-smoke"));
+
+        long stmts   = counts.getOrDefault("DaliStatement", 0L);
+        long tables  = counts.getOrDefault("DaliTable", 0L);
+        long sessions = counts.getOrDefault("DaliSession", 0L);
+
+        System.out.printf("Smoke OK: DaliSession=%d DaliStatement=%d DaliTable=%d%n",
+                sessions, stmts, tables);
+
+        assertTrue(sessions  > 0, "REMOTE_BATCH: DaliSession must exist");
+        assertTrue(stmts     > 0, "REMOTE_BATCH: DaliStatement must exist");
+        assertTrue(tables    > 0, "REMOTE_BATCH: DaliTable must exist");
+    }
+
+    // ─── Write helpers ───────────────────────────────────────────────────────
+
+    private Map<String, Long> writeEmbedded(SemanticResult result) throws IOException {
+        String dbPath = Path.of(DB_EMBEDDED).toAbsolutePath().toString();
+        try (ArcadeDBSemanticWriter writer = new ArcadeDBSemanticWriter(dbPath)) {
+            writer.saveResult(result, new PipelineTimer());
+        }
+        return countEmbedded(dbPath);
+    }
+
+    private Map<String, Long> writeRemote(SemanticResult result) throws Exception {
+        try (ArcadeDBSemanticWriter writer = new ArcadeDBSemanticWriter(
+                HOST, PORT, DB_REMOTE, USER, PASS, false)) {
+            writer.saveResult(result, new PipelineTimer());
+        }
+        return countRemote(DB_REMOTE);
+    }
+
+    private Map<String, Long> writeBatch(SemanticResult result) throws Exception {
+        try (ArcadeDBSemanticWriter writer = new ArcadeDBSemanticWriter(
+                HOST, PORT, DB_BATCH, USER, PASS, true)) {
+            writer.saveResult(result, new PipelineTimer());
+        }
+        return countRemote(DB_BATCH);
+    }
+
+    // ─── Count helpers ───────────────────────────────────────────────────────
+
+    private Map<String, Long> countEmbedded(String dbPath) {
+        Map<String, Long> counts = new LinkedHashMap<>();
+        try (Database db = new DatabaseFactory(dbPath).open()) {
+            for (String t : VERTEX_TYPES)
+                counts.put(t, scalarEmbedded(db, "SELECT count(*) AS cnt FROM " + t));
+            for (String t : EDGE_TYPES)
+                counts.put(t, scalarEmbedded(db, "SELECT count(*) AS cnt FROM " + t));
+        }
+        return counts;
+    }
+
+    private Map<String, Long> countRemote(String dbName) throws Exception {
+        Map<String, Long> counts = new LinkedHashMap<>();
+        for (String t : VERTEX_TYPES)
+            counts.put(t, scalarRemote(dbName, "SELECT count(*) AS cnt FROM " + t));
+        for (String t : EDGE_TYPES)
+            counts.put(t, scalarRemote(dbName, "SELECT count(*) AS cnt FROM " + t));
+        return counts;
+    }
+
+    private static long scalarEmbedded(Database db, String sql) {
+        try {
+            var rs = db.query("sql", sql);
+            if (rs.hasNext()) {
+                Object v = rs.next().toMap().get("cnt");
+                return v instanceof Number n ? n.longValue() : 0L;
+            }
+        } catch (Exception ignored) {}
+        return 0L;
+    }
+
+    private static long scalarRemote(String dbName, String query) throws Exception {
+        String body = "{\"language\":\"sql\",\"command\":\"" +
+                query.replace("\"", "\\\"") + "\"}";
+        String resp = httpPost("/api/v1/command/" + dbName, body);
+        int idx = resp.indexOf("\"cnt\":");
+        if (idx < 0) return 0L;
+        int start = idx + 6, end = start;
+        while (end < resp.length() &&
+               (Character.isDigit(resp.charAt(end)) || resp.charAt(end) == '-')) end++;
+        try { return Long.parseLong(resp.substring(start, end)); }
+        catch (NumberFormatException e) { return 0L; }
+    }
+
+    // ─── Assertion / Print helpers ───────────────────────────────────────────
+
+    private static void assertCountsMatch(String labelA, Map<String, Long> a,
+                                          String labelB, Map<String, Long> b) {
+        List<String> mismatches = new ArrayList<>();
+        for (String t : VERTEX_TYPES) check(t, a, b, labelA, labelB, mismatches);
+        for (String t : EDGE_TYPES)   check(t, a, b, labelA, labelB, mismatches);
+        if (!mismatches.isEmpty())
+            fail("Mismatches " + labelA + " vs " + labelB + ":\n  " +
+                    String.join("\n  ", mismatches));
+    }
+
+    private static void check(String type, Map<String, Long> a, Map<String, Long> b,
+                               String la, String lb, List<String> out) {
+        long va = a.getOrDefault(type, 0L);
+        long vb = b.getOrDefault(type, 0L);
+        if (va != vb) out.add(type + "  " + la + "=" + va + "  " + lb + "=" + vb);
+    }
+
+    private static void printTable(String title,
+                                   String colA, Map<String, Long> a,
+                                   String colB, Map<String, Long> b) {
+        System.out.println("\n=== " + title + " ===");
+        System.out.printf("%-30s %9s %9s%n", "Type", colA, colB);
+        System.out.println("-".repeat(50));
+        for (String t : VERTEX_TYPES) printRow(t, a, b);
+        System.out.println("-".repeat(50));
+        for (String t : EDGE_TYPES)   printRow(t, a, b);
+        System.out.println();
+    }
+
+    private static void printRow(String type, Map<String, Long> a, Map<String, Long> b) {
+        long va = a.getOrDefault(type, 0L);
+        long vb = b.getOrDefault(type, 0L);
+        System.out.printf("%-30s %9d %9d%s%n", type, va, vb, va == vb ? "" : " ❌");
+    }
+
+    private static void assertHasStatements(SemanticResult r, Path f) {
+        assertNotNull(r.getStructure(), "Structure is null for " + f);
+        assertFalse(r.getStructure().getStatements().isEmpty(),
+                "No statements parsed in " + f.getFileName());
+    }
+
+    // ─── HTTP helpers ────────────────────────────────────────────────────────
+
+    private static final HttpClient HTTP = HttpClient.newHttpClient();
+
+    private static String httpPost(String path, String body) throws Exception {
+        String auth = "Basic " + Base64.getEncoder()
+                .encodeToString((USER + ":" + PASS).getBytes(StandardCharsets.UTF_8));
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create("http://" + HOST + ":" + PORT + path))
+                .header("Authorization", auth)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body.isEmpty() ? "{}" : body))
+                .build();
+        return HTTP.send(req, HttpResponse.BodyHandlers.ofString()).body();
+    }
+
+    private static void recreateRemoteDb(String dbName) throws Exception {
+        try { httpPost("/api/v1/drop/" + dbName, ""); } catch (Exception ignored) {}
+        httpPost("/api/v1/create/" + dbName, "");
+    }
+
+    // ─── Parse helpers ───────────────────────────────────────────────────────
+
+    private static SemanticResult parseFixture(Path file) throws IOException {
+        String sql = Files.readString(file);
+        UniversalSemanticEngine engine = new UniversalSemanticEngine();
+        PlSqlSemanticListener listener = new PlSqlSemanticListener(engine);
+        PlSqlLexer lexer = new PlSqlLexer(CharStreams.fromString(sql));
+        PlSqlParser parser = new PlSqlParser(new CommonTokenStream(lexer));
+        new ParseTreeWalker().walk(listener, parser.sql_script());
+        engine.resolvePendingColumns();
+        return engine.getResult("it-" + System.nanoTime(),
+                file.getFileName().toString(), "plsql", 0L);
+    }
+
+    /**
+     * Пытается найти файл по абсолютному пути из реального корпуса,
+     * при отсутствии — падает обратно на маленький classpath-фикстур.
+     */
+    private static Path resolveFixture(String absolutePath, String classpathFallback) {
+        Path p = Path.of(absolutePath);
+        if (Files.exists(p)) return p;
+        System.out.println("WARN: реальный файл не найден (" + absolutePath +
+                "), используем classpath: " + classpathFallback);
+        return classpathFixtureRequired(classpathFallback);
+    }
+
+    private static Path classpathFixtureRequired(String name) {
+        Path p = Path.of("src/test/resources/plsql", name);
+        if (Files.exists(p)) return p;
+        try {
+            var url = EmbeddedVsBatchIT.class.getClassLoader().getResource("plsql/" + name);
+            if (url != null) return Path.of(url.toURI());
+        } catch (Exception ignored) {}
+        throw new IllegalStateException("Fixture not found: " + name);
+    }
+
+    private static Path classpathFixture(String name) {
+        try { return classpathFixtureRequired(name); } catch (Exception e) { return null; }
+    }
+
+    private static SemanticResult reSid(SemanticResult r, String newSid) {
+        return new SemanticResult(
+                newSid, r.getFilePath(), r.getDialect(), r.getProcessingTimeMs(),
+                r.getStructure(), r.getLineage(), r.getAtoms(),
+                r.getResolutionLog(), r.getCalledRoutines(), r.getSchemaRegistrationLog()
+        );
+    }
+
+    private static void wipe(Path p) throws IOException {
+        if (!Files.exists(p)) return;
+        try (var w = Files.walk(p)) {
+            w.sorted(Comparator.reverseOrder())
+             .forEach(x -> { try { Files.deleteIfExists(x); } catch (IOException ignored) {} });
+        }
+    }
+}
