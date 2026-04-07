@@ -159,14 +159,30 @@ class SchemaInitializerTest {
     }
 
     @Test
-    @DisplayName("Schema version is 24")
-    void schemaVersionIsTwentyFour() {
+    @DisplayName("Schema version is 25")
+    void schemaVersionIsTwentyFive() {
         SchemaInitializer.ensureSchema(db);
 
         ResultSet rs = db.query("sql", "SELECT schema_version FROM DaliMeta LIMIT 1");
         assertTrue(rs.hasNext(), "DaliMeta should have a record");
         int version = ((Number) rs.next().toMap().get("schema_version")).intValue();
-        assertEquals(24, version, "Schema version should be 24");
+        assertEquals(25, version, "Schema version should be 25");
+    }
+
+    @Test
+    @DisplayName("v25: DaliSnippetScript(script) has NO FULL_TEXT index")
+    void snippetScriptHasNoFullTextIndexOnScript() {
+        SchemaInitializer.ensureSchema(db);
+
+        // The FULL_TEXT index on script was removed in v25 because the field stores whole-file
+        // text (up to hundreds of KB) which exceeds ArcadeDB's 255 KB per-page limit.
+        boolean hasBadIndex = db.getSchema().getIndexes().stream()
+                .anyMatch(idx -> "DaliSnippetScript".equals(idx.getTypeName())
+                        && idx.getPropertyNames() != null
+                        && idx.getPropertyNames().length > 0
+                        && "script".equals(idx.getPropertyNames()[0]));
+        assertFalse(hasBadIndex,
+                "DaliSnippetScript must NOT have a FULL_TEXT index on script (page-size overflow)");
     }
 
     @Test

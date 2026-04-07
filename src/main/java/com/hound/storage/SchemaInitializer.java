@@ -48,7 +48,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    static final int SCHEMA_VERSION = 24;
+    static final int SCHEMA_VERSION = 25;
 
     // FT_METADATA lives in RemoteSchemaCommands — reuse from there.
     private static final String FT_METADATA = RemoteSchemaCommands.FT_METADATA;
@@ -66,6 +66,13 @@ public final class SchemaInitializer {
                     if (v >= SCHEMA_VERSION) {
                         logger.debug("ArcadeDB schema v{} up to date", v);
                         return;
+                    }
+                    // v24 → v25: FULL_TEXT on DaliSnippetScript(script) caused
+                    // "Key size too big to fit in a single page" (whole-file field, up to 332 KB).
+                    // Drop the broken index before re-initialising so IF NOT EXISTS won't skip it.
+                    if (v < 25) {
+                        logger.info("v24→v25 migration: dropping broken FULL_TEXT index on DaliSnippetScript(script)");
+                        tryDropIndex(db, "DaliSnippetScript[script]");
                     }
                     logger.info("ArcadeDB schema upgrade v{} → v{}", v, SCHEMA_VERSION);
                 }
@@ -245,7 +252,9 @@ public final class SchemaInitializer {
         ft(db, schema, "DaliVariable",     "var_name");
         ft(db, schema, "DaliOutputColumn", "name");
         ft(db, schema, "DaliSnippet",         "snippet");        // per-statement SQL text search
-        ft(db, schema, "DaliSnippetScript",   "script");         // full file text search
+        // NOTE: DaliSnippetScript.script is intentionally NOT indexed — it stores the full raw
+        // file text (up to hundreds of KB) which exceeds ArcadeDB's 255 KB page limit for
+        // FULL_TEXT indexes, causing index corruption and multi-GB on-disk bloat (v25 fix).
 
         // ── Meta version ──
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");

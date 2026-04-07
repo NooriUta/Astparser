@@ -237,7 +237,9 @@ final class RemoteSchemaCommands {
                 "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT" + FT_METADATA,
                 "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) FULL_TEXT" + FT_METADATA,
                 "CREATE INDEX IF NOT EXISTS ON DaliSnippet (snippet) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSnippetScript (script) FULL_TEXT" + FT_METADATA,
+                // DaliSnippetScript.script is intentionally NOT indexed — whole-file field
+                // (up to hundreds of KB) exceeds ArcadeDB's 255 KB page limit for FULL_TEXT
+                // indexes, causing index corruption and multi-GB on-disk bloat (v25 fix).
         };
     }
 
