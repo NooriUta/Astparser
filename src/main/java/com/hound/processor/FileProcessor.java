@@ -16,6 +16,10 @@ import org.antlr.v4.runtime.tree.ParseTreeWalker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.Charset;
+import java.nio.charset.MalformedInputException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.io.IOException;
 
@@ -44,8 +48,8 @@ public class FileProcessor implements Runnable {
         try {
             logger.info("Processing file: {}", fileName);
 
-            // 1. Читаем файл
-            String sqlContent = java.nio.file.Files.readString(filePath);
+            // 1. Читаем файл (с fallback по кодировкам: UTF-8 → Windows-1251 → ISO-8859-1)
+            String sqlContent = readFileWithFallback(filePath);
 
             // 2. ANTLR парсинг
             PlSqlLexer lexer = new PlSqlLexer(CharStreams.fromString(sqlContent));
@@ -84,6 +88,27 @@ public class FileProcessor implements Runnable {
         } catch (Exception e) {
             logger.error("Error processing file: {}", fileName, e);
         }
+    }
+
+    /**
+     * Читает файл с попыткой нескольких кодировок.
+     * UTF-8 → Windows-1251 (Кириллица/Oracle TOAD) → ISO-8859-1 (lossless fallback).
+     */
+    private static String readFileWithFallback(Path file) throws IOException {
+        try {
+            return Files.readString(file, StandardCharsets.UTF_8);
+        } catch (MalformedInputException e) {
+            logger.debug("UTF-8 decode failed for {}, trying Windows-1251", file.getFileName());
+        }
+        try {
+            String content = Files.readString(file, Charset.forName("Windows-1251"));
+            logger.warn("File read as Windows-1251 (non-UTF-8): {}", file.getFileName());
+            return content;
+        } catch (MalformedInputException e) {
+            logger.debug("Windows-1251 decode failed for {}, falling back to ISO-8859-1", file.getFileName());
+        }
+        logger.warn("File read as ISO-8859-1 (fallback, may have garbled chars): {}", file.getFileName());
+        return Files.readString(file, StandardCharsets.ISO_8859_1);
     }
 
     private static String formatTime(long ms) {
