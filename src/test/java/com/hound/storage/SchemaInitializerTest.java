@@ -7,6 +7,7 @@ import com.arcadedb.query.sql.executor.ResultSet;
 import org.junit.jupiter.api.*;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.nio.file.*;
 import java.util.Comparator;
 
@@ -176,11 +177,11 @@ class SchemaInitializerTest {
 
         // The FULL_TEXT index on script was removed in v25 because the field stores whole-file
         // text (up to hundreds of KB) which exceeds ArcadeDB's 255 KB per-page limit.
-        boolean hasBadIndex = db.getSchema().getIndexes().stream()
+        boolean hasBadIndex = Arrays.stream(db.getSchema().getIndexes())
                 .anyMatch(idx -> "DaliSnippetScript".equals(idx.getTypeName())
                         && idx.getPropertyNames() != null
-                        && idx.getPropertyNames().length > 0
-                        && "script".equals(idx.getPropertyNames()[0]));
+                        && !idx.getPropertyNames().isEmpty()
+                        && "script".equals(idx.getPropertyNames().get(0)));
         assertFalse(hasBadIndex,
                 "DaliSnippetScript must NOT have a FULL_TEXT index on script (page-size overflow)");
     }
