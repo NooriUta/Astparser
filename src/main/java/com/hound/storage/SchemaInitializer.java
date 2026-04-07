@@ -48,7 +48,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    static final int SCHEMA_VERSION = 22;
+    static final int SCHEMA_VERSION = 23;
 
     private static final String FT_ANALYZER =
             "org.apache.lucene.analysis.core.KeywordAnalyzer";
@@ -150,6 +150,8 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliRoutine",     "routine_geoid");
         declareStr(schema, "DaliRoutine",     "routine_name");
         declareStr(schema, "DaliRoutine",     "routine_type");
+        declareStr(schema, "DaliRoutine",     "return_type");   // v23: FUNCTION return type
+        declareProp(schema, "DaliRoutine",    "line_start", com.arcadedb.schema.Type.INTEGER); // v23
         declareStr(schema, "DaliRoutine",     "session_id");
         declareStr(schema, "DaliPackage",     "package_name");
         // Session
@@ -355,6 +357,8 @@ public final class SchemaInitializer {
                 "CREATE PROPERTY DaliRoutine.routine_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.routine_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.routine_type IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliRoutine.return_type IF NOT EXISTS STRING",   // v23
+                "CREATE PROPERTY DaliRoutine.line_start IF NOT EXISTS INTEGER",   // v23
                 "CREATE PROPERTY DaliRoutine.session_id IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliPackage.package_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliSession.session_id IF NOT EXISTS STRING",

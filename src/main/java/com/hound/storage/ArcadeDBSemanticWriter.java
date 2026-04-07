@@ -583,6 +583,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .set("routine_geoid", e.getKey())
                         .set("routine_name", r.getName())
                         .set("routine_type", r.getRoutineType())
+                        .set("return_type", r.getReturnType())
+                        .set("line_start", r.getLineStart() > 0 ? r.getLineStart() : null)
                         .set("package_geoid", r.getPackageGeoid())
                         .set("schema_geoid", r.getSchemaGeoid())
                         .save();
@@ -1181,8 +1183,10 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         for (var e : str.getRoutines().entrySet()) {
             RoutineInfo r = e.getValue();
-            rcmd("INSERT INTO DaliRoutine SET session_id=?, routine_geoid=?, routine_name=?, routine_type=?, package_geoid=?, schema_geoid=?",
-                    sid, e.getKey(), r.getName(), r.getRoutineType(), r.getPackageGeoid(), r.getSchemaGeoid());
+            rcmd("INSERT INTO DaliRoutine SET session_id=?, routine_geoid=?, routine_name=?, routine_type=?, return_type=?, line_start=?, package_geoid=?, schema_geoid=?",
+                    sid, e.getKey(), r.getName(), r.getRoutineType(), r.getReturnType(),
+                    r.getLineStart() > 0 ? r.getLineStart() : null,
+                    r.getPackageGeoid(), r.getSchemaGeoid());
         }
 
         for (var e : str.getRoutines().entrySet()) {

@@ -159,13 +159,25 @@ class SchemaInitializerTest {
     }
 
     @Test
-    @DisplayName("Schema version is 22")
-    void schemaVersionIsTwentyTwo() {
+    @DisplayName("Schema version is 23")
+    void schemaVersionIsTwentyThree() {
         SchemaInitializer.ensureSchema(db);
 
         ResultSet rs = db.query("sql", "SELECT schema_version FROM DaliMeta LIMIT 1");
         assertTrue(rs.hasNext(), "DaliMeta should have a record");
         int version = ((Number) rs.next().toMap().get("schema_version")).intValue();
-        assertEquals(22, version, "Schema version should be 22");
+        assertEquals(23, version, "Schema version should be 23");
+    }
+
+    @Test
+    @DisplayName("ADR-013: DaliRoutine has return_type and line_start properties")
+    void daliRoutineHasReturnTypeAndLineStart() {
+        SchemaInitializer.ensureSchema(db);
+
+        var routineType = db.getSchema().getType("DaliRoutine");
+        assertTrue(routineType.existsProperty("return_type"),
+                "DaliRoutine must have return_type property");
+        assertTrue(routineType.existsProperty("line_start"),
+                "DaliRoutine must have line_start property");
     }
 }
