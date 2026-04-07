@@ -273,6 +273,8 @@ test {
     maxHeapSize = '2g'
     // AtomQualityProbeTest reads from external corpus dirs — manual probe, not CI
     exclude '**/AtomQualityProbeTest.class'
+    // Forward -Dintegration=true to test JVM for @EnabledIfSystemProperty
+    systemProperty 'integration', System.getProperty('integration', 'false')
 }
 
 // ==================== FAT JAR ====================
@@ -283,7 +285,14 @@ task fatJar(type: Jar) {
     }
     archiveClassifier = 'all'
     from sourceSets.main.output
-    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+    from {
+        configurations.runtimeClasspath.collect { f ->
+            f.isDirectory() ? f : (f.name.endsWith('.jar') ? zipTree(f) : [])
+        }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/*.EC',
+            'META-INF/DEPENDENCIES', 'META-INF/LICENSE*', 'META-INF/NOTICE*',
+            'module-info.class'
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
@@ -293,5 +302,63 @@ run {
     jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
     if (project.hasProperty('appArgs')) {
         args appArgs.split('\\s+')
+    }
+}
+
+// ==================== REMOTE BATCH ====================
+// Запуск Hound в режиме REMOTE_BATCH (один HTTP POST на файл в ArcadeDB).
+//
+// Параметры (все опциональны, есть дефолты):
+//   -Pinput=<path>      — директория с SQL/PCK/PKB файлами  (default: C:/AIDA/Dali4/HOUND/test_plsql)
+//   -Pdb=<name>         — имя базы данных в ArcadeDB        (default: hound)
+//   -Phost=<host>       — хост ArcadeDB                     (default: localhost)
+//   -Pport=<port>       — порт ArcadeDB                     (default: 2480)
+//   -Puser=<user>       — пользователь ArcadeDB             (default: root)
+//   -Ppassword=<pass>   — пароль ArcadeDB                   (default: playwithdata)
+//   -Pclean=true|false  — очистить БД перед запуском        (default: true)
+//
+// Пример:
+//   ./gradlew runBatch -Pinput=C:/sql -Pdb=mydb -Phost=arcadedb.local -Pport=2480
+//   ./gradlew runBatch                         # запуск с дефолтами
+//
+task runBatch(type: JavaExec) {
+    description = 'Запуск Hound в режиме REMOTE_BATCH: один HTTP POST на файл в ArcadeDB'
+    group = 'hound'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.hound.HoundApplication'
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
+
+    doFirst {
+        def inputDir  = project.findProperty('input')    ?: 'C:/AIDA/Dali4/HOUND/test_plsql'
+        def dbName    = project.findProperty('db')       ?: 'hound'
+        def dbHost    = project.findProperty('host')     ?: 'localhost'
+        def dbPort    = project.findProperty('port')     ?: '2480'
+        def dbUser    = project.findProperty('user')     ?: 'root'
+        def dbPass    = project.findProperty('password') ?: 'playwithdata'
+        def doClean   = project.findProperty('clean')    ?: 'true'
+
+        def argList = [
+            '--input',       inputDir,
+            '--db-type',     'arcadedb',
+            '--db-batch',
+            '--db-host',     dbHost,
+            '--db-port',     dbPort,
+            '--db-name',     dbName,
+            '--db-user',     dbUser,
+            '--db-password', dbPass,
+        ]
+        if (doClean == 'true') argList << '--clean'
+        args argList
+
+        println ""
+        println "════════════════════════════════════════"
+        println " Hound REMOTE_BATCH"
+        println "════════════════════════════════════════"
+        println " input:    ${inputDir}"
+        println " arcadedb: http://${dbHost}:${dbPort}"
+        println " database: ${dbName}"
+        println " clean:    ${doClean}"
+        println "════════════════════════════════════════"
+        println ""
     }
 }

@@ -858,6 +858,115 @@ class RemoteWriter {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // REMOTE_BATCH write path
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Namespace-aware REMOTE_BATCH write: canonical phase via individual rcmd() calls,
+     * session-specific objects via a single HTTP POST batch.
+     */
+    void writeBatch(HttpBatchClient client, String sid, SemanticResult result,
+                    PipelineTimer timer, CanonicalPool pool, String dbName) {
+        Structure str = result.getStructure();
+        if (str == null) return;
+
+        timer.start("write.batch");
+
+        final JsonlBatchBuilder builder;
+
+        if (pool != null) {
+            // ── Namespace/pool mode ──────────────────────────────────────────────────
+            // Phase 1: Insert canonical objects via individual rcmd() calls, with pool dedup.
+            Set<String> newSchemaGeoids  = new LinkedHashSet<>();
+            Set<String> newTableGeoids   = new LinkedHashSet<>();
+            Set<String> newColumnGeoids  = new LinkedHashSet<>();
+
+            for (var e : str.getSchemas().entrySet()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> sc = (Map<String, Object>) e.getValue();
+                String cg = pool.canonicalSchema(e.getKey());
+                if (!pool.hasSchemaRid(cg)) {
+                    rcmd("INSERT INTO DaliSchema SET db_name=?, db_geoid=?, schema_geoid=?, schema_name=?",
+                            dbName, dbName, e.getKey(), sc.get("name"));
+                    pool.putSchemaRid(cg, cg);
+                    newSchemaGeoids.add(e.getKey());
+                }
+            }
+
+            for (var e : str.getTables().entrySet()) {
+                TableInfo t = e.getValue();
+                String cg = pool.canonical(e.getKey());
+                if (!pool.hasTableRid(cg)) {
+                    rcmd("INSERT INTO DaliTable SET db_name=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?",
+                            dbName, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(),
+                            toJson(new ArrayList<>(t.aliases())), t.columnCount());
+                    pool.putTableRid(cg, cg);
+                    newTableGeoids.add(e.getKey());
+                }
+            }
+
+            for (var e : str.getColumns().entrySet()) {
+                ColumnInfo c = e.getValue();
+                String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
+                if (!pool.hasColumnRid(cg)) {
+                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?",
+                            dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
+                            c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder(),
+                            toJson(new ArrayList<>(c.getUsedInStatements())));
+                    pool.putColumnRid(cg, cg);
+                    newColumnGeoids.add(e.getKey());
+                }
+            }
+
+            // Phase 2: Build PARTIAL RidCache for schemas/tables/columns (actual DB RIDs)
+            RidCache rid = buildRidCache(sid, pool, dbName);
+
+            // Phase 3: Create canonical hierarchical edges via rcmd (new objects only)
+            if (pool.getDatabaseRid() != null) {
+                for (String schGeoid : newSchemaGeoids) {
+                    String schRid = rid.schemas.get(schGeoid.toUpperCase());
+                    if (schRid != null) edgeByRid("CONTAINS_SCHEMA", pool.getDatabaseRid(), schRid, sid);
+                }
+            }
+            for (String tblGeoid : newTableGeoids) {
+                TableInfo t = str.getTables().get(tblGeoid);
+                if (t == null || t.schemaGeoid() == null) continue;
+                String schRid = rid.schemas.get(t.schemaGeoid().toUpperCase());
+                String tblRid = rid.tables.get(tblGeoid);
+                if (schRid != null && tblRid != null)
+                    edgeByRid("CONTAINS_TABLE", schRid, tblRid, sid);
+            }
+            for (String colGeoid : newColumnGeoids) {
+                ColumnInfo c = str.getColumns().get(colGeoid);
+                if (c == null) continue;
+                String fromRid = rid.tables.get(c.getTableGeoid());
+                String toRid   = rid.columns.get(colGeoid);
+                if (fromRid != null && toRid != null)
+                    edgeByRid("HAS_COLUMN", fromRid, toRid, sid);
+            }
+
+            // Phase 4: Build batch for session-specific objects
+            builder = JsonlBatchBuilder.buildFromResult(sid, result,
+                    rid.tables, rid.columns, rid.schemas);
+
+        } else {
+            // ── Ad-hoc mode: all objects in one batch ──────────────────────────────
+            builder = JsonlBatchBuilder.buildFromResult(sid, result);
+        }
+
+        String payload = builder.build();
+        logger.debug("Batch payload: {} vertices, {} edges, {} bytes",
+                builder.vertexCount(), builder.edgeCount(), payload.length());
+        client.send(payload, sid);
+
+        timer.stop("write.batch");
+        logger.info("ArcadeDB REMOTE_BATCH: sid={} db={} V:{} E:{} raw:{}b [{}]",
+                sid, dbName != null ? dbName : "ad-hoc",
+                builder.vertexCount(), builder.edgeCount(),
+                payload.length(), formatTime(timer.ms("write.batch")));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // writePerfStats — remote half
     // ═══════════════════════════════════════════════════════════════
 

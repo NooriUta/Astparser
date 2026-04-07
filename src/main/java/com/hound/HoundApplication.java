@@ -154,11 +154,13 @@ public class HoundApplication {
 
         // Remote mode
         if ("arcadedb".equalsIgnoreCase(config.dbType)) {
-            logger.info("ArcadeDB : REMOTE {}:{}/{} user={}",
+            logger.info("ArcadeDB : REMOTE{} {}:{}/{} user={}",
+                    config.useBatch ? "_BATCH" : "",
                     config.dbHost, config.dbPort, config.dbName, config.dbUser);
             return new ArcadeDBSemanticWriter(
                     config.dbHost, config.dbPort, config.dbName,
-                    config.dbUser, config.dbPassword);
+                    config.dbUser, config.dbPassword,
+                    config.useBatch);
         }
 
         // Нет записи
@@ -524,6 +526,8 @@ public class HoundApplication {
         options.addOption(null, "app-name", true, "Application name (DaliApplication vertex, groups databases)");
         options.addOption(null, "clean", false, "Delete all Dali records before processing");
         options.addOption(null, "diag", false, "Run diagnostics after processing");
+        options.addOption(null, "db-batch", false,
+            "Use HTTP Batch endpoint for ArcadeDB remote (один POST вместо N запросов)");
         options.addOption(null, "threads", true, "Number of parallel parse threads (default: CPU cores)");
         options.addOption(null, "help", false, "Show help");
 
@@ -561,8 +565,9 @@ public class HoundApplication {
         if (cmd.hasOption("app-name")) config.appName = cmd.getOptionValue("app-name");
 
         // Flags
-        config.clean = cmd.hasOption("clean");
-        config.diag  = cmd.hasOption("diag");
+        config.clean    = cmd.hasOption("clean");
+        config.diag     = cmd.hasOption("diag");
+        config.useBatch = cmd.hasOption("db-batch");
         if (cmd.hasOption("threads")) {
             config.threads = Math.max(1, Integer.parseInt(cmd.getOptionValue("threads")));
         }
@@ -585,6 +590,8 @@ public class HoundApplication {
         System.out.println("    --db-name hound");
         System.out.println("    --db-user root");
         System.out.println("    --db-password playwithdata");
+        System.out.println("    --db-batch                 Batch mode: 1 HTTP POST вместо N запросов/файл");
+        System.out.println("                               Требует ArcadeDB 23.x+");
         System.out.println();
         System.out.println("Namespace / hierarchy:");
         System.out.println("  --app-name <name>            Application name (DaliApplication, groups databases)");
@@ -736,6 +743,7 @@ public class HoundApplication {
         // Flags
         boolean clean    = false;
         boolean diag     = false;
+        boolean useBatch = false;
         int     threads  = Runtime.getRuntime().availableProcessors();
     }
 }
