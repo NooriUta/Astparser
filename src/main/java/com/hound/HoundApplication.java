@@ -23,6 +23,9 @@ import com.hound.metrics.PipelineTimer;
 import com.hound.processor.ThreadPoolManager;
 
 import java.io.IOException;
+import java.nio.charset.Charset;
+import java.nio.charset.MalformedInputException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -361,7 +364,7 @@ public class HoundApplication {
     private AnalysisResult analyzeFile(Path file, RunConfig config, AtomicLong sessionSeq,
                                         String defaultSchema)
             throws IOException {
-        String sql = Files.readString(file);
+        String sql = readFileWithFallback(file);
         if (sql.isBlank()) {
             logger.warn("Пустой файл: {}", file);
             return new AnalysisResult(file, null, new PipelineTimer());
@@ -385,7 +388,7 @@ public class HoundApplication {
                 file.toString(),
                 config.language,
                 parseWalkResolveMs
-        );
+        ).withRawScript(sql);
 
         return new AnalysisResult(file, result, timer);
     }
@@ -396,7 +399,7 @@ public class HoundApplication {
 
     private PipelineTimer processFile(Path file, RunConfig config, ArcadeDBSemanticWriter writer)
             throws IOException {
-        String sql = Files.readString(file);
+        String sql = readFileWithFallback(file);
         if (sql.isBlank()) {
             logger.warn("Пустой файл: {}", file);
             return new PipelineTimer();
@@ -420,7 +423,7 @@ public class HoundApplication {
                 file.toString(),
                 config.language,
                 parseWalkResolveMs
-        );
+        ).withRawScript(sql);
 
         if (writer != null) {
             // Ad-hoc mode: single file, no database namespace (pool=null, dbName=null)
@@ -662,6 +665,31 @@ public class HoundApplication {
     // ═══════════════════════════════════════════════════════════════
     // Helpers
     // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Reads a file trying UTF-8 first, then Windows-1251 (Cyrillic Oracle files),
+     * then ISO-8859-1 as a lossless last resort.
+     * Logs a warning when falling back so encoding issues are visible in logs.
+     */
+    private static String readFileWithFallback(Path file) throws IOException {
+        // 1st attempt — UTF-8 (standard)
+        try {
+            return Files.readString(file, StandardCharsets.UTF_8);
+        } catch (MalformedInputException e) {
+            logger.debug("UTF-8 decode failed for {}, trying Windows-1251", file.getFileName());
+        }
+        // 2nd attempt — Windows-1251 (Cyrillic PL/SQL files saved by TOAD/SQL Developer)
+        try {
+            String content = Files.readString(file, Charset.forName("Windows-1251"));
+            logger.warn("File read as Windows-1251 (non-UTF-8): {}", file.getFileName());
+            return content;
+        } catch (MalformedInputException e) {
+            logger.debug("Windows-1251 decode failed for {}, falling back to ISO-8859-1", file.getFileName());
+        }
+        // 3rd attempt — ISO-8859-1 (lossless: every byte is a valid character)
+        logger.warn("File read as ISO-8859-1 (fallback, may have garbled chars): {}", file.getFileName());
+        return Files.readString(file, StandardCharsets.ISO_8859_1);
+    }
 
     private static String formatTime(long ms) {
         if (ms < 1000) return ms + "ms";

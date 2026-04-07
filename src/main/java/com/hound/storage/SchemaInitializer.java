@@ -48,12 +48,10 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    static final int SCHEMA_VERSION = 21;
+    static final int SCHEMA_VERSION = 25;
 
-    private static final String FT_ANALYZER =
-            "org.apache.lucene.analysis.core.KeywordAnalyzer";
-    private static final String FT_METADATA =
-            " METADATA {\"analyzer\": \"" + FT_ANALYZER + "\"}";
+    // FT_METADATA lives in RemoteSchemaCommands — reuse from there.
+    private static final String FT_METADATA = RemoteSchemaCommands.FT_METADATA;
 
     private SchemaInitializer() {}
 
@@ -68,6 +66,13 @@ public final class SchemaInitializer {
                     if (v >= SCHEMA_VERSION) {
                         logger.debug("ArcadeDB schema v{} up to date", v);
                         return;
+                    }
+                    // v24 → v25: FULL_TEXT on DaliSnippetScript(script) caused
+                    // "Key size too big to fit in a single page" (whole-file field, up to 332 KB).
+                    // Drop the broken index before re-initialising so IF NOT EXISTS won't skip it.
+                    if (v < 25) {
+                        logger.info("v24→v25 migration: dropping broken FULL_TEXT index on DaliSnippetScript(script)");
+                        tryDropIndex(db, "DaliSnippetScript[script]");
                     }
                     logger.info("ArcadeDB schema upgrade v{} → v{}", v, SCHEMA_VERSION);
                 }
@@ -119,6 +124,8 @@ public final class SchemaInitializer {
 
         // ── Document types ──
         if (!schema.existsType("DaliSnippet"))        schema.createDocumentType("DaliSnippet");
+        // v22: DaliSnippetScript — full raw SQL text of the parsed file, one record per session.
+        if (!schema.existsType("DaliSnippetScript"))  schema.createDocumentType("DaliSnippetScript");
         if (!schema.existsType("DaliPerfStats"))      schema.createDocumentType("DaliPerfStats");
         if (!schema.existsType("DaliResolutionLog"))  schema.createDocumentType("DaliResolutionLog");
         if (!schema.existsType("DaliSchemaLog"))      schema.createDocumentType("DaliSchemaLog");
@@ -138,16 +145,21 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliTable",       "table_name");
         declareStr(schema, "DaliTable",       "table_type");
         declareStr(schema, "DaliTable",       "session_id");
+        declareStr(schema, "DaliTable",       "data_source");   // v24: "master"|"reconstructed"
         declareStr(schema, "DaliColumn",      "db_name");
         declareStr(schema, "DaliColumn",      "column_geoid");
         declareStr(schema, "DaliColumn",      "column_name");
         declareStr(schema, "DaliColumn",      "expression");
         declareStr(schema, "DaliColumn",      "alias");
         declareStr(schema, "DaliColumn",      "session_id");
+        declareStr(schema, "DaliColumn",      "data_source");   // v24: "master"|"reconstructed"
         // Routine
         declareStr(schema, "DaliRoutine",     "routine_geoid");
         declareStr(schema, "DaliRoutine",     "routine_name");
         declareStr(schema, "DaliRoutine",     "routine_type");
+        declareStr(schema, "DaliRoutine",     "return_type");   // v23: FUNCTION return type
+        declareStr(schema, "DaliRoutine",     "data_source");   // v24: "master"|"reconstructed"
+        declareProp(schema, "DaliRoutine",    "line_start", com.arcadedb.schema.Type.INTEGER); // v23
         declareStr(schema, "DaliRoutine",     "session_id");
         declareStr(schema, "DaliPackage",     "package_name");
         // Session
@@ -193,10 +205,19 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliAffectedColumn", "source_type");
         declareStr(schema, "DaliAffectedColumn", "resolution_status");
         declareStr(schema, "DaliAffectedColumn", "type_affect");
-        // DaliSnippet
-        declareStr(schema, "DaliSnippet",     "stmt_geoid");
-        declareStr(schema, "DaliSnippet",     "session_id");
-        declareStr(schema, "DaliSnippet",     "snippet");
+        // DaliSnippet — per-statement SQL text with line range (v22: +line_start, +line_end)
+        declareStr(schema, "DaliSnippet",          "stmt_geoid");
+        declareStr(schema, "DaliSnippet",          "session_id");
+        declareStr(schema, "DaliSnippet",          "snippet");
+        declareProp(schema, "DaliSnippet",         "line_start", com.arcadedb.schema.Type.INTEGER);
+        declareProp(schema, "DaliSnippet",         "line_end",   com.arcadedb.schema.Type.INTEGER);
+        // DaliSnippetScript — full raw file text, one record per session (v22)
+        declareStr(schema, "DaliSnippetScript",    "session_id");
+        declareStr(schema, "DaliSnippetScript",    "file_path");
+        declareStr(schema, "DaliSnippetScript",    "script");
+        declareProp(schema, "DaliSnippetScript",   "script_hash",  com.arcadedb.schema.Type.STRING);
+        declareProp(schema, "DaliSnippetScript",   "line_count",   com.arcadedb.schema.Type.INTEGER);
+        declareProp(schema, "DaliSnippetScript",   "char_count",   com.arcadedb.schema.Type.INTEGER);
 
         // ── UNIQUE_HASH indexes (canonical deduplication) ──
         idx(db, "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE_HASH NULL_STRATEGY SKIP");
@@ -230,7 +251,10 @@ public final class SchemaInitializer {
         ft(db, schema, "DaliParameter",    "param_name");
         ft(db, schema, "DaliVariable",     "var_name");
         ft(db, schema, "DaliOutputColumn", "name");
-        ft(db, schema, "DaliSnippet",      "snippet");   // full SQL text search
+        ft(db, schema, "DaliSnippet",         "snippet");        // per-statement SQL text search
+        // NOTE: DaliSnippetScript.script is intentionally NOT indexed — it stores the full raw
+        // file text (up to hundreds of KB) which exceeds ArcadeDB's 255 KB page limit for
+        // FULL_TEXT indexes, causing index corruption and multi-GB on-disk bloat (v25 fix).
 
         // ── Meta version ──
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");
@@ -247,170 +271,9 @@ public final class SchemaInitializer {
 
     // ── Remote schema commands (called once per remote DB connection) ──
 
+    /** Delegates to {@link RemoteSchemaCommands#all()} — types → properties → indexes. */
     public static String[] remoteSchemaCommands() {
-        return new String[]{
-                // Vertex types
-                "CREATE VERTEX TYPE DaliApplication IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliDatabase IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliSchema IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliTable IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliColumn IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliRoutine IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliPackage IF NOT EXISTS EXTENDS DaliRoutine",
-                "CREATE VERTEX TYPE DaliSession IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliStatement IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliAtom IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliOutputColumn IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliJoin IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliParameter IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliVariable IF NOT EXISTS",
-                "CREATE VERTEX TYPE DaliAffectedColumn IF NOT EXISTS",
-
-                // Edge types
-                "CREATE EDGE TYPE BELONGS_TO_APP IF NOT EXISTS",
-                "CREATE EDGE TYPE CONTAINS_SCHEMA IF NOT EXISTS",
-                "CREATE EDGE TYPE CONTAINS_TABLE IF NOT EXISTS",
-                "CREATE EDGE TYPE HAS_COLUMN IF NOT EXISTS",
-                "CREATE EDGE TYPE CONTAINS_ROUTINE IF NOT EXISTS",
-                "CREATE EDGE TYPE BELONGS_TO_SESSION IF NOT EXISTS",
-                "CREATE EDGE TYPE CONTAINS_STMT IF NOT EXISTS",
-                "CREATE EDGE TYPE HAS_PARAMETER IF NOT EXISTS",
-                "CREATE EDGE TYPE HAS_VARIABLE IF NOT EXISTS",
-                "CREATE EDGE TYPE CHILD_OF IF NOT EXISTS",
-                "CREATE EDGE TYPE HAS_OUTPUT_COL IF NOT EXISTS",
-                "CREATE EDGE TYPE HAS_ATOM IF NOT EXISTS",
-                "CREATE EDGE TYPE HAS_JOIN IF NOT EXISTS",
-                "CREATE EDGE TYPE READS_FROM IF NOT EXISTS",
-                "CREATE EDGE TYPE WRITES_TO IF NOT EXISTS",
-                "CREATE EDGE TYPE USES_SUBQUERY IF NOT EXISTS",
-                "CREATE EDGE TYPE NESTED_IN IF NOT EXISTS",
-                "CREATE EDGE TYPE ROUTINE_USES_TABLE IF NOT EXISTS",
-                "CREATE EDGE TYPE CALLS IF NOT EXISTS",
-                "CREATE EDGE TYPE ATOM_REF_TABLE IF NOT EXISTS",
-                "CREATE EDGE TYPE ATOM_REF_COLUMN IF NOT EXISTS",
-                "CREATE EDGE TYPE ATOM_REF_STMT IF NOT EXISTS",
-                "CREATE EDGE TYPE ATOM_REF_OUTPUT_COL IF NOT EXISTS",
-                "CREATE EDGE TYPE ATOM_PRODUCES IF NOT EXISTS",
-                "CREATE EDGE TYPE DATA_FLOW IF NOT EXISTS",
-                "CREATE EDGE TYPE FILTER_FLOW IF NOT EXISTS",
-                "CREATE EDGE TYPE JOIN_FLOW IF NOT EXISTS",
-                "CREATE EDGE TYPE UNION_FLOW IF NOT EXISTS",
-                "CREATE EDGE TYPE HAS_AFFECTED_COL IF NOT EXISTS",
-                "CREATE EDGE TYPE AFFECTED_COL_REF_TABLE IF NOT EXISTS",
-                "CREATE EDGE TYPE JOIN_SOURCE_TABLE IF NOT EXISTS",
-                "CREATE EDGE TYPE JOIN_TARGET_TABLE IF NOT EXISTS",
-
-                // Document types
-                "CREATE DOCUMENT TYPE DaliSnippet IF NOT EXISTS",
-                "CREATE DOCUMENT TYPE DaliPerfStats IF NOT EXISTS",
-                "CREATE DOCUMENT TYPE DaliResolutionLog IF NOT EXISTS",
-                "CREATE DOCUMENT TYPE DaliSchemaLog IF NOT EXISTS",
-                "CREATE DOCUMENT TYPE DaliMeta IF NOT EXISTS",
-
-                // Properties
-                "CREATE PROPERTY DaliApplication.app_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliApplication.app_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliDatabase.db_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliDatabase.db_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliDatabase.created_at IF NOT EXISTS LONG",
-                "CREATE PROPERTY DaliSchema.db_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSchema.db_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSchema.schema_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSchema.schema_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliTable.db_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliTable.table_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliTable.table_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliTable.table_type IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliTable.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliColumn.db_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliColumn.column_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliColumn.column_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliColumn.expression IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliColumn.alias IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliColumn.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliRoutine.routine_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliRoutine.routine_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliRoutine.routine_type IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliRoutine.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliPackage.package_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSession.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSession.db_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSession.file_path IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSession.dialect IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliStatement.stmt_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliStatement.type IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliStatement.short_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliStatement.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAtom.atom_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAtom.atom_text IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAtom.atom_context IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAtom.parent_context IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAtom.status IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAtom.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliOutputColumn.name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliOutputColumn.expression IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliOutputColumn.alias IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliOutputColumn.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliJoin.join_type IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliJoin.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliParameter.param_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliParameter.param_type IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliParameter.param_mode IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliParameter.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliVariable.var_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliVariable.var_type IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliVariable.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.statement_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.column_ref IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.column_name IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.table_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.dataset_alias IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.source_type IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.resolution_status IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.type_affect IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliAffectedColumn.order_affect IF NOT EXISTS INTEGER",
-                "CREATE PROPERTY DaliSnippet.stmt_geoid IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSnippet.session_id IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliSnippet.snippet IF NOT EXISTS STRING",
-                "CREATE PROPERTY DaliPerfStats.db_name IF NOT EXISTS STRING",
-
-                // UNIQUE_HASH indexes (canonical deduplication)
-                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliSchema (db_name, schema_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (db_name, table_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (db_name, column_geoid) UNIQUE_HASH NULL_STRATEGY SKIP",
-
-                // NOTUNIQUE LSM_TREE session_id indexes
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliAtom (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliJoin (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliParameter (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliVariable (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliAffectedColumn (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (short_name) NOTUNIQUE NULL_STRATEGY SKIP",
-
-                // FULLTEXT indexes (KeywordAnalyzer)
-                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSchema (schema_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (table_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (column_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (routine_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSession (file_path) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (stmt_geoid) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliAtom (atom_text) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSnippet (snippet) FULL_TEXT" + FT_METADATA,
-        };
+        return RemoteSchemaCommands.all();
     }
 
     // ── Helpers ──
@@ -433,10 +296,15 @@ public final class SchemaInitializer {
     }
 
     private static void declareStr(Schema schema, String typeName, String propName) {
+        declareProp(schema, typeName, propName, com.arcadedb.schema.Type.STRING);
+    }
+
+    private static void declareProp(Schema schema, String typeName, String propName,
+                                    com.arcadedb.schema.Type type) {
         if (!schema.existsType(typeName)) return;
         var t = schema.getType(typeName);
         if (!t.existsProperty(propName))
-            t.createProperty(propName, com.arcadedb.schema.Type.STRING);
+            t.createProperty(propName, type);
     }
 
     private static void idx(Database db, String sql) {

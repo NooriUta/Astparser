@@ -19,23 +19,31 @@ public class RoutineInfo {
     private final String packageGeoid;
     private final String schemaGeoid;
     private final String parentRoutineGeoid; // null for top-level, geoid for nested
+    private final int lineStart;             // source line of PROCEDURE/FUNCTION declaration
     private String returnType;
     private final List<ParameterInfo> typedParameters = new ArrayList<>();
     private final List<VariableInfo> typedVariables = new ArrayList<>();
 
     public RoutineInfo(String geoid, String name, String routineType,
                        String packageGeoid, String schemaGeoid) {
-        this(geoid, name, routineType, packageGeoid, schemaGeoid, null);
+        this(geoid, name, routineType, packageGeoid, schemaGeoid, null, 0);
     }
 
     public RoutineInfo(String geoid, String name, String routineType,
                        String packageGeoid, String schemaGeoid, String parentRoutineGeoid) {
+        this(geoid, name, routineType, packageGeoid, schemaGeoid, parentRoutineGeoid, 0);
+    }
+
+    public RoutineInfo(String geoid, String name, String routineType,
+                       String packageGeoid, String schemaGeoid,
+                       String parentRoutineGeoid, int lineStart) {
         this.geoid = geoid;
         this.name = name;
         this.routineType = routineType != null ? routineType : "PROCEDURE";
         this.packageGeoid = packageGeoid;
         this.schemaGeoid = schemaGeoid;
         this.parentRoutineGeoid = parentRoutineGeoid;
+        this.lineStart = lineStart;
     }
 
     public String getGeoid() { return geoid; }
@@ -44,6 +52,7 @@ public class RoutineInfo {
     public String getPackageGeoid() { return packageGeoid; }
     public String getSchemaGeoid() { return schemaGeoid; }
     public String getParentRoutineGeoid() { return parentRoutineGeoid; }
+    public int getLineStart() { return lineStart; }
     public String getReturnType() { return returnType; }
     public void setReturnType(String rt) { this.returnType = rt; }
 

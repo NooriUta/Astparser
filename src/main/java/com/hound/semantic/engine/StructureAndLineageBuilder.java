@@ -202,7 +202,8 @@ public class StructureAndLineageBuilder {
         }
         routines.computeIfAbsent(geoid, k -> {
             logger.debug("New routine registered: {} {} [{}]", routineType, upperName, geoid);
-            return new RoutineInfo(geoid, upperName, routineType, packageGeoid, schemaGeoid, parentRoutineGeoid);
+            return new RoutineInfo(geoid, upperName, routineType, packageGeoid, schemaGeoid,
+                                   parentRoutineGeoid, lineStart);
         });
         return geoid;
     }
