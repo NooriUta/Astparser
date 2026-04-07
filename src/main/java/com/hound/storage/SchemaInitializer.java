@@ -48,7 +48,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    static final int SCHEMA_VERSION = 23;
+    static final int SCHEMA_VERSION = 24;
 
     // FT_METADATA lives in RemoteSchemaCommands — reuse from there.
     private static final String FT_METADATA = RemoteSchemaCommands.FT_METADATA;
@@ -138,17 +138,20 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliTable",       "table_name");
         declareStr(schema, "DaliTable",       "table_type");
         declareStr(schema, "DaliTable",       "session_id");
+        declareStr(schema, "DaliTable",       "data_source");   // v24: "master"|"reconstructed"
         declareStr(schema, "DaliColumn",      "db_name");
         declareStr(schema, "DaliColumn",      "column_geoid");
         declareStr(schema, "DaliColumn",      "column_name");
         declareStr(schema, "DaliColumn",      "expression");
         declareStr(schema, "DaliColumn",      "alias");
         declareStr(schema, "DaliColumn",      "session_id");
+        declareStr(schema, "DaliColumn",      "data_source");   // v24: "master"|"reconstructed"
         // Routine
         declareStr(schema, "DaliRoutine",     "routine_geoid");
         declareStr(schema, "DaliRoutine",     "routine_name");
         declareStr(schema, "DaliRoutine",     "routine_type");
         declareStr(schema, "DaliRoutine",     "return_type");   // v23: FUNCTION return type
+        declareStr(schema, "DaliRoutine",     "data_source");   // v24: "master"|"reconstructed"
         declareProp(schema, "DaliRoutine",    "line_start", com.arcadedb.schema.Type.INTEGER); // v23
         declareStr(schema, "DaliRoutine",     "session_id");
         declareStr(schema, "DaliPackage",     "package_name");

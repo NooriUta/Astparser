@@ -198,6 +198,7 @@ class EmbeddedWriter {
             for (var e : str.getTables().entrySet()) {
                 TableInfo t = e.getValue();
                 MutableVertex v;
+                boolean tblMaster = isMasterTable(e.getKey(), str);
                 if (pool != null) {
                     String cg = pool.canonical(e.getKey());
                     v = pool.getTableVtx(cg);
@@ -207,6 +208,9 @@ class EmbeddedWriter {
                                 Map.of("d", dbName, "t", e.getKey()));
                         if (rs.hasNext()) {
                             v = (MutableVertex) rs.next().toElement();
+                            // reconstructed → master upgrade when DDL arrives later
+                            if (tblMaster && !MASTER.equals(v.get("data_source")))
+                                v.set("data_source", MASTER).save();
                         } else {
                             v = db.newVertex("DaliTable")
                                     .set("db_name",      dbName)
@@ -216,6 +220,7 @@ class EmbeddedWriter {
                                     .set("table_type",   t.tableType())
                                     .set("aliases",      new ArrayList<>(t.aliases()))
                                     .set("column_count", t.columnCount())
+                                    .set("data_source",  tblMaster ? MASTER : RECONSTRUCTED)
                                     .save();
                             if (t.schemaGeoid() != null) {
                                 MutableVertex sv2 = schV.get(t.schemaGeoid().toUpperCase());
@@ -234,6 +239,7 @@ class EmbeddedWriter {
                             .set("table_type",   t.tableType())
                             .set("aliases",      new ArrayList<>(t.aliases()))
                             .set("column_count", t.columnCount())
+                            .set("data_source",  tblMaster ? MASTER : RECONSTRUCTED)
                             .save();
                     sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                     if (t.schemaGeoid() != null) {
@@ -249,6 +255,7 @@ class EmbeddedWriter {
             for (var e : str.getColumns().entrySet()) {
                 ColumnInfo c = e.getValue();
                 MutableVertex v;
+                boolean colMaster = isMasterTable(c.getTableGeoid(), str);
                 if (pool != null) {
                     String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
                     v = pool.getColumnVtx(cg);
@@ -258,6 +265,8 @@ class EmbeddedWriter {
                                 Map.of("d", dbName, "c", e.getKey()));
                         if (rs.hasNext()) {
                             v = (MutableVertex) rs.next().toElement();
+                            if (colMaster && !MASTER.equals(v.get("data_source")))
+                                v.set("data_source", MASTER).save();
                         } else {
                             v = db.newVertex("DaliColumn")
                                     .set("db_name",        dbName)
@@ -269,6 +278,7 @@ class EmbeddedWriter {
                                     .set("is_output",      c.isOutput())
                                     .set("col_order",      c.getOrder())
                                     .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
+                                    .set("data_source",    colMaster ? MASTER : RECONSTRUCTED)
                                     .save();
                             MutableVertex tv = tblV.get(c.getTableGeoid());
                             if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
@@ -287,6 +297,7 @@ class EmbeddedWriter {
                             .set("is_output",    c.isOutput())
                             .set("col_order",    c.getOrder())
                             .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
+                            .set("data_source",  colMaster ? MASTER : RECONSTRUCTED)
                             .save();
                     MutableVertex tv = tblV.get(c.getTableGeoid());
                     if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
@@ -308,6 +319,7 @@ class EmbeddedWriter {
                         .set("line_start",   r.getLineStart() > 0 ? r.getLineStart() : null)
                         .set("package_geoid", r.getPackageGeoid())
                         .set("schema_geoid", r.getSchemaGeoid())
+                        .set("data_source",  MASTER)
                         .save();
                 rtV.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
@@ -710,6 +722,26 @@ class EmbeddedWriter {
                             calleeV = rtEntry.getValue();
                             break;
                         }
+                    }
+                    // External call: callee not defined in this session →
+                    // find-or-create a reconstructed stub so the CALLS edge has a target.
+                    if (calleeV == null) {
+                        String stubGeoid = "EXT:" + calleeName.toUpperCase();
+                        var rsStub = db.query("sql",
+                                "SELECT FROM DaliRoutine WHERE routine_geoid = :g AND session_id = :s LIMIT 1",
+                                Map.of("g", stubGeoid, "s", sid));
+                        if (rsStub.hasNext()) {
+                            calleeV = (MutableVertex) rsStub.next().toElement();
+                        } else {
+                            calleeV = db.newVertex("DaliRoutine")
+                                    .set("session_id",    sid)
+                                    .set("routine_geoid", stubGeoid)
+                                    .set("routine_name",  calleeName.toUpperCase())
+                                    .set("routine_type",  "UNKNOWN")
+                                    .set("data_source",   RECONSTRUCTED)
+                                    .save();
+                        }
+                        rtV.put(stubGeoid, calleeV);
                     }
                     if (calleeV != null) {
                         callerV.newEdge("CALLS", calleeV, true)

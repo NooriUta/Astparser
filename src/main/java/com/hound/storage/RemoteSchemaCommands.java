@@ -115,6 +115,7 @@ final class RemoteSchemaCommands {
                 "CREATE PROPERTY DaliTable.table_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliTable.table_type IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliTable.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliTable.data_source IF NOT EXISTS STRING",  // v24
                 // DaliColumn
                 "CREATE PROPERTY DaliColumn.db_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.column_geoid IF NOT EXISTS STRING",
@@ -122,13 +123,15 @@ final class RemoteSchemaCommands {
                 "CREATE PROPERTY DaliColumn.expression IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.alias IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.session_id IF NOT EXISTS STRING",
-                // DaliRoutine (v23: +return_type, +line_start)
+                "CREATE PROPERTY DaliColumn.data_source IF NOT EXISTS STRING",  // v24
+                // DaliRoutine (v23: +return_type, +line_start; v24: +data_source)
                 "CREATE PROPERTY DaliRoutine.routine_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.routine_name IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.routine_type IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.return_type IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.line_start IF NOT EXISTS INTEGER",
                 "CREATE PROPERTY DaliRoutine.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliRoutine.data_source IF NOT EXISTS STRING",  // v24
                 // DaliPackage
                 "CREATE PROPERTY DaliPackage.package_name IF NOT EXISTS STRING",
                 // DaliSession

@@ -4,6 +4,7 @@ package com.hound.storage;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hound.semantic.model.StatementInfo;
+import com.hound.semantic.model.Structure;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -16,10 +17,27 @@ import java.util.Map;
  */
 final class WriteHelpers {
 
-    static final int         SNIPPET_MAX = Integer.MAX_VALUE;
-    static final ObjectMapper MAPPER     = new ObjectMapper();
+    static final int         SNIPPET_MAX   = Integer.MAX_VALUE;
+    static final ObjectMapper MAPPER       = new ObjectMapper();
+
+    /** data_source values for DaliTable, DaliColumn, DaliRoutine */
+    static final String MASTER       = "master";
+    static final String RECONSTRUCTED = "reconstructed";
 
     private WriteHelpers() {}
+
+    // ── data_source helpers ─────────────────────────────────────────────────
+
+    /**
+     * Returns true if this table/view is *defined* in the current session
+     * (i.e. targeted by a DDL statement — CREATE TABLE/VIEW/etc.).
+     * False = table is only *referenced* (reconstructed from DML/PL-SQL).
+     */
+    static boolean isMasterTable(String tableGeoid, Structure str) {
+        if (str == null || tableGeoid == null) return false;
+        return str.getStatements().values().stream()
+                .anyMatch(s -> isDdl(s.getType()) && s.getTargetTables().containsKey(tableGeoid));
+    }
 
     // ── JSON / hash / string ────────────────────────────────────────────────
 

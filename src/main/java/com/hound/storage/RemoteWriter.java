@@ -317,49 +317,62 @@ class RemoteWriter {
         // ── DaliTable ──
         for (var e : str.getTables().entrySet()) {
             TableInfo t = e.getValue();
+            boolean tblMaster = isMasterTable(e.getKey(), str);
             if (pool != null) {
                 String cg = pool.canonical(e.getKey());
                 if (!pool.hasTableRid(cg)) {
-                    rcmd("INSERT INTO DaliTable SET db_name=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?",
+                    rcmd("INSERT INTO DaliTable SET db_name=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?, data_source=?",
                             dbName, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(),
-                            toJson(new ArrayList<>(t.aliases())), t.columnCount());
+                            toJson(new ArrayList<>(t.aliases())), t.columnCount(),
+                            tblMaster ? MASTER : RECONSTRUCTED);
                     pool.putTableRid(cg, cg);
                     newTableGeoids.add(e.getKey());
+                } else if (tblMaster) {
+                    // upgrade reconstructed → master if DDL now confirms this table
+                    rcmd("UPDATE DaliTable SET data_source=? WHERE db_name=? AND table_geoid=? AND (data_source IS NULL OR data_source <> ?)",
+                            MASTER, dbName, e.getKey(), MASTER);
                 }
             } else {
-                rcmd("INSERT INTO DaliTable SET session_id=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?",
+                rcmd("INSERT INTO DaliTable SET session_id=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?, data_source=?",
                         sid, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(),
-                        toJson(new ArrayList<>(t.aliases())), t.columnCount());
+                        toJson(new ArrayList<>(t.aliases())), t.columnCount(),
+                        tblMaster ? MASTER : RECONSTRUCTED);
             }
         }
 
         // ── DaliColumn ──
         for (var e : str.getColumns().entrySet()) {
             ColumnInfo c = e.getValue();
+            boolean colMaster = isMasterTable(c.getTableGeoid(), str);
             if (pool != null) {
                 String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
                 if (!pool.hasColumnRid(cg)) {
-                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?",
+                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?, data_source=?",
                             dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
                             c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder(),
-                            toJson(new ArrayList<>(c.getUsedInStatements())));
+                            toJson(new ArrayList<>(c.getUsedInStatements())),
+                            colMaster ? MASTER : RECONSTRUCTED);
                     pool.putColumnRid(cg, cg);
                     newColumnGeoids.add(e.getKey());
+                } else if (colMaster) {
+                    rcmd("UPDATE DaliColumn SET data_source=? WHERE db_name=? AND column_geoid=? AND (data_source IS NULL OR data_source <> ?)",
+                            MASTER, dbName, e.getKey(), MASTER);
                 }
             } else {
-                rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?",
+                rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?, data_source=?",
                         sid, e.getKey(), c.getTableGeoid(), c.getColumnName(), c.getExpression(), c.getAlias(),
-                        c.isOutput(), c.getOrder(), toJson(new ArrayList<>(c.getUsedInStatements())));
+                        c.isOutput(), c.getOrder(), toJson(new ArrayList<>(c.getUsedInStatements())),
+                        colMaster ? MASTER : RECONSTRUCTED);
             }
         }
 
         // ── DaliRoutine ──
         for (var e : str.getRoutines().entrySet()) {
             RoutineInfo r = e.getValue();
-            rcmd("INSERT INTO DaliRoutine SET session_id=?, routine_geoid=?, routine_name=?, routine_type=?, return_type=?, line_start=?, package_geoid=?, schema_geoid=?",
+            rcmd("INSERT INTO DaliRoutine SET session_id=?, routine_geoid=?, routine_name=?, routine_type=?, return_type=?, line_start=?, package_geoid=?, schema_geoid=?, data_source=?",
                     sid, e.getKey(), r.getName(), r.getRoutineType(), r.getReturnType(),
                     r.getLineStart() > 0 ? r.getLineStart() : null,
-                    r.getPackageGeoid(), r.getSchemaGeoid());
+                    r.getPackageGeoid(), r.getSchemaGeoid(), MASTER);
         }
         for (var e : str.getRoutines().entrySet()) {
             RoutineInfo r = e.getValue();
@@ -815,6 +828,22 @@ class RemoteWriter {
                         calleeRid = rtEntry.getValue();
                         break;
                     }
+                }
+                // External call: callee not defined in this session →
+                // insert a reconstructed stub so the CALLS edge has a target.
+                if (calleeRid == null) {
+                    String stubGeoid = "EXT:" + calleeName.toUpperCase();
+                    rcmd("INSERT INTO DaliRoutine SET session_id=?, routine_geoid=?, routine_name=?, routine_type=?, data_source=?",
+                            sid, stubGeoid, calleeName.toUpperCase(), "UNKNOWN", RECONSTRUCTED);
+                    try {
+                        var rsStub = db.query("sql",
+                                "SELECT @rid AS rid FROM DaliRoutine WHERE routine_geoid = :g AND session_id = :s LIMIT 1",
+                                Map.of("g", stubGeoid, "s", sid));
+                        if (rsStub.hasNext()) calleeRid = (String) rsStub.next().toMap().get("rid");
+                    } catch (Exception ex) {
+                        logger.debug("CALLS stub lookup failed: {}", ex.getMessage());
+                    }
+                    if (calleeRid != null) rid.routines.put(stubGeoid, calleeRid);
                 }
                 if (calleeRid != null) {
                     try {
