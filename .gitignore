@@ -28,7 +28,8 @@ bin/
 
 ### Mac OS ###
 .DS_Store
-/.idea/
+/.idea/*
+!/.idea/runConfigurations/
 /.gradle/
 /build/
 /src/main/resources/grammars/
