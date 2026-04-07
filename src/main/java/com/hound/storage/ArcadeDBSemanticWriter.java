@@ -1995,10 +1995,24 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         } catch (Exception e) {
             logger.warn("edgeByRid {} FAILED: {}", edgeType, e.getMessage());
         }
+
+        String payload = builder.build();
+
+        logger.debug("Batch payload: {} vertices, {} edges, {} bytes",
+                builder.vertexCount(), builder.edgeCount(), payload.length());
+
+        batchClient.send(payload, sid);
+
+        timer.stop("write.batch");
+
+        logger.info("ArcadeDB REMOTE_BATCH: sid={} db={} V:{} E:{} raw:{}b [{}]",
+                sid, dbName != null ? dbName : "ad-hoc",
+                builder.vertexCount(), builder.edgeCount(),
+                payload.length(), formatTime(timer.ms("write.batch")));
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Helpers (без изменений)
+    // REMOTE mode — с RID-кэшем
     // ═══════════════════════════════════════════════════════════════
 
     private static final int  RCMD_MAX_RETRIES  = 3;

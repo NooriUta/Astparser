@@ -369,7 +369,7 @@ task runBatch(type: JavaExec) {
         def dbPort    = project.findProperty('port')     ?: '2480'
         def dbUser    = project.findProperty('user')     ?: 'root'
         def dbPass    = project.findProperty('password') ?: 'playwithdata'
-        def doClean   = project.hasProperty('clean') ? project.property('clean').toString() : 'true'
+        def doClean   = project.findProperty('clean')    ?: 'true'
 
         def argList = [
             '--input',       inputDir,
