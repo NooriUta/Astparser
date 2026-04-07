@@ -115,7 +115,6 @@ class EmbeddedWriter {
                                 .save();
                     }
                     dbV.put(e.getKey(), v);
-                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 }
             }
 
@@ -179,7 +178,6 @@ class EmbeddedWriter {
                         .set("routine_type", "PACKAGE")
                         .save();
                 pkgV.put(e.getKey(), v);
-                sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 String sg = (String) pkg.get("schema_geoid");
                 if (sg != null && !sg.isEmpty()) {
                     MutableVertex sv2 = schV.get(sg.toUpperCase());
@@ -343,7 +341,6 @@ class EmbeddedWriter {
                             .set("param_mode",   p.mode())
                             .save();
                     rv.newEdge("HAS_PARAMETER", pV, true);
-                    sessionV.newEdge("BELONGS_TO_SESSION", pV, true);
                 }
                 for (RoutineInfo.VariableInfo vInfo : r.getTypedVariables()) {
                     MutableVertex vV = db.newVertex("DaliVariable")
@@ -353,7 +350,6 @@ class EmbeddedWriter {
                             .set("var_type",     vInfo.type())
                             .save();
                     rv.newEdge("HAS_VARIABLE", vV, true);
-                    sessionV.newEdge("BELONGS_TO_SESSION", vV, true);
                 }
             }
 
@@ -487,7 +483,6 @@ class EmbeddedWriter {
                             .set("table_ref",       col.get("table_ref"))
                             .save();
                     sv.newEdge("HAS_OUTPUT_COL", ocV, true);
-                    sessionV.newEdge("BELONGS_TO_SESSION", ocV, true);
                     Object order = col.get("order");
                     if (order != null) ocByKey.put(e.getKey() + ":" + order, ocV);
                     String ocName = (String) col.get("name");
@@ -509,7 +504,6 @@ class EmbeddedWriter {
                             .set("line_start",         j.lineStart())
                             .save();
                     sv.newEdge("HAS_JOIN", jV, true);
-                    sessionV.newEdge("BELONGS_TO_SESSION", jV, true);
                     if (j.sourceTableGeoid() != null) {
                         MutableVertex srcTbl = tblV.get(j.sourceTableGeoid());
                         if (srcTbl != null) jV.newEdge("JOIN_SOURCE_TABLE", srcTbl, true);
@@ -543,7 +537,6 @@ class EmbeddedWriter {
                             .set("order_affect",      orderAffect)
                             .save();
                     sv.newEdge("HAS_AFFECTED_COL", acV, true).set("session_id", sid).save();
-                    sessionV.newEdge("BELONGS_TO_SESSION", acV, true);
                     String acColRef = (String) ac.get("column_ref");
                     if (acColRef != null) affColByRef.put(e.getKey() + ":" + acColRef, acV);
                     String acTblGeoid = (String) ac.get("table_geoid");
@@ -592,7 +585,6 @@ class EmbeddedWriter {
                             .set("nested_atoms_count",    a.get("nested_atoms_count"))
                             .save();
                     sv.newEdge("HAS_ATOM", aV, true);
-                    sessionV.newEdge("BELONGS_TO_SESSION", aV, true);
 
                     String atomTableGeoid = (String) a.get("table_geoid");
                     if (atomTableGeoid != null) {

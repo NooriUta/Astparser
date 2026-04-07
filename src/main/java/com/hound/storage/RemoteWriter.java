@@ -601,25 +601,11 @@ class RemoteWriter {
         if (rid.sessionRid != null) {
             for (String entityRid : rid.schemas.values())
                 edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
-            for (String entityRid : rid.packages.values())
-                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
             for (String entityRid : rid.columns.values())
                 edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
             for (String entityRid : rid.statements.values())
                 edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
-            for (String entityRid : rid.atoms.values())
-                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
-            for (String entityRid : rid.outputCols.values())
-                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
-            for (String entityRid : rid.affCols.values())
-                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
         }
-        edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
-                "DaliJoin", "session_id", sid, sid);
-        edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
-                "DaliParameter", "session_id", sid, sid);
-        edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
-                "DaliVariable", "session_id", sid, sid);
 
         // ── HAS_PARAMETER / HAS_VARIABLE ──
         for (var e : str.getRoutines().entrySet()) {
