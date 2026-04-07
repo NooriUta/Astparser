@@ -313,7 +313,7 @@ task runBatchLocal(type: JavaExec) {
     mainClass = 'com.hound.HoundApplication'
     jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
     args(
-        '--input',       'C:/AIDA/Dali4/HOUND/test_plsql',
+        '--input',       'C:/Dali_tests/test_plsql',
         '--db-type',     'arcadedb',
         '--db-batch',
         '--db-host',     'localhost',
@@ -328,7 +328,7 @@ task runBatchLocal(type: JavaExec) {
         println "════════════════════════════════════════"
         println " Hound REMOTE_BATCH (local)"
         println "════════════════════════════════════════"
-        println " input:    C:/AIDA/Dali4/HOUND/test_plsql"
+        println " input:    C:/Dali_tests/test_plsql"
         println " arcadedb: http://localhost:2480"
         println " database: hound"
         println " clean:    true"
@@ -370,7 +370,7 @@ task runBatch(type: JavaExec) {
     jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
 
     doFirst {
-        def inputDir  = project.findProperty('input')    ?: 'C:/AIDA/Dali4/HOUND/test_plsql'
+        def inputDir  = project.findProperty('input')    ?: 'C:/Dali_tests/test_plsql'
         def dbName    = project.findProperty('db')       ?: 'hound'
         def dbHost    = project.findProperty('host')     ?: 'localhost'
         def dbPort    = project.findProperty('port')     ?: '2480'
