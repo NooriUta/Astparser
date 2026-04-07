@@ -605,16 +605,11 @@ class RemoteWriter {
         }
 
         // ── BELONGS_TO_SESSION ──
-        for (String tg : str.getTables().keySet())
-            edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
-                    "DaliTable", "table_geoid", tg, sid);
         for (String rg : str.getRoutines().keySet())
             edgeRemote("BELONGS_TO_SESSION", "DaliSession", "session_id", sid,
                     "DaliRoutine", "routine_geoid", rg, sid);
         if (rid.sessionRid != null) {
             for (String entityRid : rid.schemas.values())
-                edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
-            for (String entityRid : rid.columns.values())
                 edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);
             for (String entityRid : rid.statements.values())
                 edgeByRid("BELONGS_TO_SESSION", rid.sessionRid, entityRid, sid);

@@ -229,7 +229,6 @@ class EmbeddedWriter {
                         }
                         pool.putTableVtx(cg, v);
                     }
-                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 } else {
                     v = db.newVertex("DaliTable")
                             .set("session_id",   sid)
@@ -241,7 +240,6 @@ class EmbeddedWriter {
                             .set("column_count", t.columnCount())
                             .set("data_source",  tblMaster ? MASTER : RECONSTRUCTED)
                             .save();
-                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                     if (t.schemaGeoid() != null) {
                         MutableVertex sv2 = schV.get(t.schemaGeoid().toUpperCase());
                         if (sv2 != null) sv2.newEdge("CONTAINS_TABLE", v, true);
@@ -285,7 +283,6 @@ class EmbeddedWriter {
                         }
                         pool.putColumnVtx(cg, v);
                     }
-                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 } else {
                     v = db.newVertex("DaliColumn")
                             .set("session_id",   sid)
@@ -301,7 +298,6 @@ class EmbeddedWriter {
                             .save();
                     MutableVertex tv = tblV.get(c.getTableGeoid());
                     if (tv != null) tv.newEdge("HAS_COLUMN", v, true);
-                    sessionV.newEdge("BELONGS_TO_SESSION", v, true);
                 }
                 colV.put(e.getKey(), v);
             }
