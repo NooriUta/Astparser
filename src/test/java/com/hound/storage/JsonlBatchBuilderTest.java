@@ -90,7 +90,7 @@ class JsonlBatchBuilderTest {
         assertTrue(classes.contains("DaliTable"), "Missing DaliTable");
         assertTrue(classes.contains("DaliColumn"), "Missing DaliColumn");
         assertTrue(classes.contains("DaliStatement"), "Missing DaliStatement");
-        assertTrue(classes.contains("DaliSnippet"), "Missing DaliSnippet");
+        // DaliSnippet is skipped in REMOTE_BATCH mode (batch endpoint rejects @type "document")
     }
 
     @Test
@@ -122,9 +122,10 @@ class JsonlBatchBuilderTest {
     void testVerticesBeforeEdges() {
         JsonlBatchBuilder b = new JsonlBatchBuilder();
 
+        // Vertices must be added before any edge that references them (eager resolution)
         b.appendVertex("DaliTable", "T1", Map.of("name", "orders"));
-        b.appendEdge("HAS_COLUMN", "T1", "C1", Map.of("session_id", "s1"));
         b.appendVertex("DaliColumn", "C1", Map.of("name", "id"));
+        b.appendEdge("HAS_COLUMN", "T1", "C1", Map.of("session_id", "s1"));
 
         String payload = b.build();
         String[] lines = payload.split("\n");
@@ -176,16 +177,12 @@ class JsonlBatchBuilderTest {
     }
 
     @Test
-    void testDocumentType_noDuplicateId() throws Exception {
+    void testDocumentType_skippedInBatchMode() {
         JsonlBatchBuilder b = new JsonlBatchBuilder();
         b.appendDocument("DaliSnippet", Map.of("snippet", "SELECT 1", "session_id", "s1"));
 
-        String line = b.build().trim();
-        JsonNode node = MAPPER.readTree(line);
-
-        assertEquals("document", node.get("@type").asText());
-        assertEquals("DaliSnippet", node.get("@class").asText());
-        assertFalse(node.has("@id"), "Documents should not have @id");
+        // ArcadeDB /api/v1/batch only accepts vertex and edge — documents are skipped
+        assertTrue(b.build().trim().isEmpty(), "Documents should be skipped in REMOTE_BATCH mode");
     }
 
     @Test
