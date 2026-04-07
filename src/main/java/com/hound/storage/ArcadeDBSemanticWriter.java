@@ -3,30 +3,29 @@ package com.hound.storage;
 
 import com.arcadedb.database.Database;
 import com.arcadedb.database.DatabaseFactory;
-import com.arcadedb.graph.MutableVertex;
 import com.arcadedb.remote.RemoteDatabase;
 import com.hound.metrics.PipelineTimer;
 import com.hound.semantic.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.*;
+import java.util.Map;
 
 /**
- * Записывает SemanticResult в ArcadeDB.
+ * Thin facade over {@link EmbeddedWriter} and {@link RemoteWriter}.
+ *
+ * <p>Lifecycle, public API routing, and shared count computation live here.
+ * All heavy write logic is delegated to the mode-specific writer.
+ *
+ * <ul>
+ *   <li>{@link EmbeddedWriter} — ArcadeDB embedded-mode write path</li>
+ *   <li>{@link RemoteWriter}   — ArcadeDB remote-mode write path</li>
+ *   <li>{@link WriteHelpers}   — pure static helpers shared by both writers</li>
+ * </ul>
  */
 public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(ArcadeDBSemanticWriter.class);
-    // DaliSnippet full-text cap: prevents pathological cases (e.g. 500KB anonymous blocks).
-    // DaliStatement vertex no longer carries snippet inline — full text lives in DaliSnippet document.
-    private static final int SNIPPET_MAX = 4000;
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private Database embeddedDb;
     private RemoteDatabase remoteDb;
@@ -44,15 +43,20 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         DatabaseFactory factory = new DatabaseFactory(dbPath);
         this.embeddedDb = factory.exists() ? factory.open() : factory.create();
         SchemaInitializer.ensureSchema(embeddedDb);
+        this.embedded = new EmbeddedWriter(embeddedDb);
+        this.remote   = null;
         logger.info("ArcadeDB EMBEDDED: {}", dbPath);
     }
 
-    public ArcadeDBSemanticWriter(String host, int port, String dbName, String user, String password) {
+    public ArcadeDBSemanticWriter(String host, int port, String dbName,
+                                  String user, String password) {
         this.mode = Mode.REMOTE;
-        this.remoteDb = new RemoteDatabase(host, port, dbName, user, password);
+        RemoteDatabase rdb = new RemoteDatabase(host, port, dbName, user, password);
         for (String cmd : SchemaInitializer.remoteSchemaCommands()) {
-            try { remoteDb.command("sql", cmd); } catch (Exception ignored) {}
+            try { rdb.command("sql", cmd); } catch (Exception ignored) {}
         }
+        this.embedded = null;
+        this.remote   = new RemoteWriter(rdb);
         logger.info("ArcadeDB REMOTE: {}:{}/{}", host, port, dbName);
     }
 
@@ -77,7 +81,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     /**
      * Ad-hoc mode (backward-compatible): no database namespace.
-     * Tables/columns are per-session, no canonical deduplication.
+     * Tables/columns are per-session; no canonical deduplication.
      */
     public String saveResult(SemanticResult result, PipelineTimer timer) {
         return saveResult(result, timer, null, null);
@@ -86,8 +90,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     /**
      * Namespace-aware save.
      *
-     * @param pool    CanonicalPool for the database batch (null = ad-hoc mode)
-     * @param dbName  Database name derived from folder name (null = ad-hoc mode)
+     * @param pool   CanonicalPool for the database batch (null = ad-hoc mode)
+     * @param dbName Database name derived from folder name (null = ad-hoc mode)
      */
     public String saveResult(SemanticResult result, PipelineTimer timer,
                              CanonicalPool pool, String dbName) {
@@ -99,7 +103,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         } else if (mode == Mode.REMOTE_BATCH) {
             saveRemoteBatch(sid, result, timer, pool, dbName);
         } else {
-            saveRemote(sid, result, timer, pool, dbName);
+            remote.write(sid, result, timer, pool, dbName);
         }
 
         long ms = System.currentTimeMillis() - t0;
@@ -122,7 +126,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         logger.info("ArcadeDB ({}) [db={}]: T:{} C:{} S:{} R:{} A:{} J:{} OC:{} L:{} [{}]",
                 mode, dbName != null ? dbName : "ad-hoc",
                 cntTables, cntColumns, cntStatements, cntRoutines,
-                cntAtoms, cntJoins, oc, cntLineage, formatTime(ms));
+                cntAtoms, cntJoins, oc, cntLineage, WriteHelpers.formatTime(ms));
 
         writePerfStats(sid, result, timer, dbName,
                 cntTables, cntColumns, cntStatements, cntRoutines,
@@ -130,141 +134,30 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         return sid;
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Canonical pool
+    // ═══════════════════════════════════════════════════════════════
+
     /**
-     * Creates the canonical DaliDatabase vertex for the given namespace and returns
-     * an empty CanonicalPool backed by it.
-     *
-     * <p>Called once per database batch before Phase 2 write loop.
-     * The CanonicalPool is then passed to each {@link #saveResult} call in the batch.
-     *
-     * @param dbName   Database name (folder name), must not be null
-     * @return  A fresh {@link CanonicalPool} for this database
+     * Creates the canonical DaliDatabase vertex and returns an empty CanonicalPool.
+     * Called once per database batch before the Phase-2 write loop.
      */
     public CanonicalPool ensureCanonicalPool(String dbName) {
         return ensureCanonicalPool(dbName, null, null);
     }
 
     /**
-     * Creates canonical DaliDatabase (and optionally DaliApplication) vertices and
-     * wires the BELONGS_TO_APP edge between them.
+     * Creates canonical DaliDatabase (and optionally DaliApplication) vertices
+     * and wires the BELONGS_TO_APP edge between them.
      *
      * @param dbName   Database name (folder name), must not be null
      * @param appName  Application name for DaliApplication vertex; null = no application layer
      * @param appGeoid Canonical application geoid; null = use appName as geoid
-     * @return  A fresh {@link CanonicalPool} for this database
      */
     public CanonicalPool ensureCanonicalPool(String dbName, String appName, String appGeoid) {
-        CanonicalPool pool = new CanonicalPool(dbName);
-        String resolvedAppGeoid = (appGeoid != null) ? appGeoid : appName;
-        try {
-            if (mode == Mode.EMBEDDED) {
-                embeddedDb.transaction(() -> {
-                    // ── DaliApplication (optional) — find-or-create ──
-                    MutableVertex appVtx = null;
-                    if (appName != null) {
-                        var appRs = embeddedDb.query("sql",
-                                "SELECT FROM DaliApplication WHERE app_geoid = :g LIMIT 1",
-                                Map.of("g", resolvedAppGeoid));
-                        if (appRs.hasNext()) {
-                            appVtx = (MutableVertex) appRs.next().toElement();
-                        } else {
-                            appVtx = embeddedDb.newVertex("DaliApplication")
-                                    .set("app_name",   appName)
-                                    .set("app_geoid",  resolvedAppGeoid)
-                                    .set("created_at", System.currentTimeMillis())
-                                    .save();
-                        }
-                        pool.setApplicationVtx(appVtx);
-                    }
-                    // ── DaliDatabase — find-or-create ──
-                    var dbRs = embeddedDb.query("sql",
-                            "SELECT FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
-                            Map.of("g", dbName));
-                    MutableVertex dbVtx;
-                    if (dbRs.hasNext()) {
-                        dbVtx = (MutableVertex) dbRs.next().toElement();
-                    } else {
-                        dbVtx = embeddedDb.newVertex("DaliDatabase")
-                                .set("db_name",    dbName)
-                                .set("db_geoid",   dbName)
-                                .set("created_at", System.currentTimeMillis())
-                                .save();
-                        // Wire BELONGS_TO_APP only when DaliDatabase is newly created
-                        if (appVtx != null) {
-                            dbVtx.newEdge("BELONGS_TO_APP", appVtx, true);
-                        }
-                    }
-                    pool.setDatabaseVtx(dbVtx);
-                });
-            } else {
-                // ── DaliApplication (optional, remote) — find-or-create ──
-                if (appName != null) {
-                    try {
-                        var rs = remoteDb.query("sql",
-                                "SELECT @rid AS rid FROM DaliApplication WHERE app_geoid = :g LIMIT 1",
-                                Map.of("g", resolvedAppGeoid));
-                        if (rs.hasNext()) {
-                            String rid = (String) rs.next().toMap().get("rid");
-                            if (rid != null) pool.setApplicationRid(rid);
-                        }
-                    } catch (Exception ex) {
-                        logger.debug("DaliApplication lookup failed for '{}': {}", appName, ex.getMessage());
-                    }
-                    if (pool.getApplicationRid() == null) {
-                        rcmd("INSERT INTO DaliApplication SET app_name=?, app_geoid=?, created_at=?",
-                                appName, resolvedAppGeoid, System.currentTimeMillis());
-                        try {
-                            var rs = remoteDb.query("sql",
-                                    "SELECT @rid AS rid FROM DaliApplication WHERE app_geoid = :g LIMIT 1",
-                                    Map.of("g", resolvedAppGeoid));
-                            if (rs.hasNext()) {
-                                String rid = (String) rs.next().toMap().get("rid");
-                                if (rid != null) pool.setApplicationRid(rid);
-                            }
-                        } catch (Exception ex) {
-                            logger.debug("DaliApplication RID fetch failed for '{}': {}", appName, ex.getMessage());
-                        }
-                    }
-                }
-                // ── DaliDatabase (remote) — find-or-create ──
-                boolean dbIsNew = false;
-                try {
-                    var rs = remoteDb.query("sql",
-                            "SELECT @rid AS rid FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
-                            Map.of("g", dbName));
-                    if (rs.hasNext()) {
-                        String rid = (String) rs.next().toMap().get("rid");
-                        if (rid != null) pool.setDatabaseRid(rid);
-                    }
-                } catch (Exception ex) {
-                    logger.debug("DaliDatabase lookup failed for '{}': {}", dbName, ex.getMessage());
-                }
-                if (pool.getDatabaseRid() == null) {
-                    rcmd("INSERT INTO DaliDatabase SET db_name=?, db_geoid=?, created_at=?",
-                            dbName, dbName, System.currentTimeMillis());
-                    dbIsNew = true;
-                    try {
-                        var rs = remoteDb.query("sql",
-                                "SELECT @rid AS rid FROM DaliDatabase WHERE db_geoid = :g LIMIT 1",
-                                Map.of("g", dbName));
-                        if (rs.hasNext()) {
-                            String rid = (String) rs.next().toMap().get("rid");
-                            if (rid != null) pool.setDatabaseRid(rid);
-                        }
-                    } catch (Exception ex) {
-                        logger.debug("DaliDatabase RID fetch failed for '{}': {}", dbName, ex.getMessage());
-                    }
-                }
-                // ── BELONGS_TO_APP: DaliDatabase → DaliApplication (only for new DB) ──
-                if (dbIsNew && pool.getDatabaseRid() != null && pool.getApplicationRid() != null) {
-                    edgeByRid("BELONGS_TO_APP", pool.getDatabaseRid(), pool.getApplicationRid(), dbName);
-                }
-            }
-        } catch (Exception e) {
-            logger.warn("ensureCanonicalPool failed for '{}': {}", dbName, e.getMessage());
-        }
-        logger.info("CanonicalPool created: db='{}' app='{}'", dbName, appName != null ? appName : "—");
-        return pool;
+        return mode == Mode.EMBEDDED
+                ? embedded.ensurePool(dbName, appName, appGeoid)
+                : remote.ensurePool(dbName, appName, appGeoid);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -286,13 +179,12 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             if (atoms == null) continue;
             for (var at : atoms.entrySet()) {
                 String status = (String) at.getValue().get("status");
-                if ("Обработано".equals(status))      atomResolvedTmp++;
-                else if ("constant".equals(status))   atomConstTmp++;
+                if ("Обработано".equals(status))         atomResolvedTmp++;
+                else if ("constant".equals(status))      atomConstTmp++;
                 else if ("function_call".equals(status)) atomFuncTmp++;
-                else                                  atomFailedTmp++;
+                else                                     atomFailedTmp++;
             }
         }
-        // Capture as effectively-final for lambda capture
         final int atomResolved = atomResolvedTmp;
         final int atomConst    = atomConstTmp;
         final int atomFunc     = atomFuncTmp;
@@ -1998,7 +1890,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Helpers (без изменений)
+    // cleanAll — wipe all Dali records from the database
     // ═══════════════════════════════════════════════════════════════
 
     private static final int  RCMD_MAX_RETRIES  = 3;
@@ -2243,13 +2135,13 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     public void cleanAll() {
         String[] edgeTypes = {
-                // atom resolution (v19: +ATOM_REF_STMT, +ATOM_REF_OUTPUT_COL)
+                // atom resolution
                 "ATOM_REF_TABLE","ATOM_REF_COLUMN","ATOM_REF_STMT","ATOM_REF_OUTPUT_COL","ATOM_PRODUCES",
                 // data flow
                 "DATA_FLOW","FILTER_FLOW","JOIN_FLOW","UNION_FLOW",
-                // join sources (v18)
+                // join sources
                 "JOIN_SOURCE_TABLE","JOIN_TARGET_TABLE",
-                // affected columns (v18/v20)
+                // affected columns
                 "HAS_AFFECTED_COL","AFFECTED_COL_REF_TABLE",
                 // statement structure
                 "HAS_ATOM","HAS_OUTPUT_COL","HAS_JOIN","READS_FROM","WRITES_TO",
@@ -2257,71 +2149,33 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 // routine structure
                 "HAS_PARAMETER","HAS_VARIABLE","CHILD_OF","CONTAINS_ROUTINE",
                 "ROUTINE_USES_TABLE","CALLS",
-                // schema/session structure (v8: +CONTAINS_SCHEMA, +BELONGS_TO_APP)
+                // schema/session structure
                 "HAS_COLUMN","CONTAINS_TABLE","CONTAINS_SCHEMA","BELONGS_TO_APP","BELONGS_TO_SESSION"
         };
         String[] vtxTypes = {
-                // fine-grained first (leaves before roots)
+                // leaves before roots
                 "DaliAffectedColumn","DaliAtom","DaliOutputColumn","DaliJoin",
                 "DaliParameter","DaliVariable","DaliStatement",
                 "DaliColumn","DaliPackage","DaliRoutine","DaliTable",
                 "DaliSchema","DaliSession","DaliDatabase",
-                "DaliApplication"   // v8: root of namespace hierarchy
+                "DaliApplication"
         };
         String[] docTypes = {
-                "DaliSnippet","DaliResolutionLog","DaliSchemaLog"
+                "DaliSnippet","DaliSnippetScript","DaliResolutionLog","DaliSchemaLog"
                 // DaliPerfStats intentionally excluded — preserved across cleanAll() for stats review
         };
 
         if (mode == Mode.EMBEDDED) {
-            for (String t : edgeTypes) deleteType(t);
-            for (String t : vtxTypes)  deleteType(t);
-            for (String t : docTypes)  deleteType(t);
+            embedded.cleanAll(edgeTypes, vtxTypes, docTypes);
         } else {
-            // Remote: batched DELETE LIMIT 500 to avoid transaction lock timeout on large tables.
-            // Edges first so vertex deletion doesn't touch edge buckets.
-            for (String t : edgeTypes) deleteTypeRemote(t);
-            for (String t : vtxTypes)  deleteTypeRemote(t);
-            for (String t : docTypes)  deleteTypeRemote(t);
+            remote.cleanAll(edgeTypes, vtxTypes, docTypes);
         }
         logger.info("ArcadeDB CLEAN: all Dali records deleted ({})", mode);
     }
 
-    private int deleteType(String typeName) {
-        try {
-            if (embeddedDb.getSchema().existsType(typeName)) {
-                embeddedDb.transaction(() -> embeddedDb.command("sql", "DELETE FROM " + typeName));
-                return 1;
-            }
-        } catch (Exception ignored) {}
-        return 0;
-    }
-
-    /**
-     * Remote-mode batched DELETE: runs DELETE FROM T LIMIT 500 in a loop until the type is empty.
-     * Avoids ArcadeDB transaction lock timeouts caused by deleting large vertex types
-     * (each vertex deletion updates edge buckets of related vertices in one transaction).
-     */
-    private void deleteTypeRemote(String typeName) {
-        final int BATCH = 500;
-        try {
-            for (int i = 0; i < 1_000_000; i++) {
-                var rs = remoteDb.query("sql",
-                        "SELECT count(*) as cnt FROM " + typeName + " LIMIT 1");
-                long cnt = rs.hasNext()
-                        ? ((Number) rs.next().toMap().getOrDefault("cnt", 0L)).longValue() : 0;
-                if (cnt == 0) break;
-                try {
-                    remoteDb.command("sql", "DELETE FROM " + typeName + " LIMIT " + BATCH);
-                } catch (Exception e) {
-                    logger.warn("Batch delete failed for {} (batch {}): {}", typeName, i, e.getMessage());
-                    break;
-                }
-            }
-        } catch (Exception e) {
-            logger.warn("deleteTypeRemote failed for {}: {}", typeName, e.getMessage());
-        }
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ═══════════════════════════════════════════════════════════════
 
     @Override
     public void close() {

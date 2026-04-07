@@ -13,6 +13,8 @@ public class SemanticResult {
     private final String filePath;
     private final String dialect;
     private final long processingTimeMs;
+    /** Full original SQL text of the parsed file — written to DaliSnippetScript. */
+    private String rawScript;
 
     private final Structure structure;
     private final List<LineageEdge> lineage;
@@ -45,6 +47,11 @@ public class SemanticResult {
     public String getFilePath() { return filePath; }
     public String getDialect() { return dialect; }
     public long getProcessingTimeMs() { return processingTimeMs; }
+    public String getRawScript() { return rawScript; }
+    public SemanticResult withRawScript(String rawScript) {
+        this.rawScript = rawScript;
+        return this;
+    }
     public Structure getStructure() { return structure; }
     public List<LineageEdge> getLineage() { return lineage; }
     public Map<String, Object> getAtoms() { return atoms; }
