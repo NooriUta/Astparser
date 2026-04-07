@@ -296,6 +296,40 @@ task fatJar(type: Jar) {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
+// ==================== REMOTE BATCH (фиксированные параметры) ====================
+// Запуск одной командой без параметров: ./gradlew runBatchLocal
+//
+task runBatchLocal(type: JavaExec) {
+    description = 'Запуск Hound REMOTE_BATCH с фиксированными параметрами (test_plsql → hound @ localhost:2480)'
+    group = 'hound'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.hound.HoundApplication'
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
+    args(
+        '--input',       'C:/AIDA/Dali4/HOUND/test_plsql',
+        '--db-type',     'arcadedb',
+        '--db-batch',
+        '--db-host',     'localhost',
+        '--db-port',     '2480',
+        '--db-name',     'hound',
+        '--db-user',     'root',
+        '--db-password', 'playwithdata',
+        '--clean'
+    )
+    doFirst {
+        println ""
+        println "════════════════════════════════════════"
+        println " Hound REMOTE_BATCH (local)"
+        println "════════════════════════════════════════"
+        println " input:    C:/AIDA/Dali4/HOUND/test_plsql"
+        println " arcadedb: http://localhost:2480"
+        println " database: hound"
+        println " clean:    true"
+        println "════════════════════════════════════════"
+        println ""
+    }
+}
+
 // ==================== RUN ====================
 
 run {
@@ -335,7 +369,7 @@ task runBatch(type: JavaExec) {
         def dbPort    = project.findProperty('port')     ?: '2480'
         def dbUser    = project.findProperty('user')     ?: 'root'
         def dbPass    = project.findProperty('password') ?: 'playwithdata'
-        def doClean   = project.findProperty('clean')    ?: 'true'
+        def doClean   = project.hasProperty('clean') ? project.property('clean').toString() : 'true'
 
         def argList = [
             '--input',       inputDir,
