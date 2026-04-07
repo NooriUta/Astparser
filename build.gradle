@@ -273,6 +273,8 @@ test {
     maxHeapSize = '2g'
     // AtomQualityProbeTest reads from external corpus dirs — manual probe, not CI
     exclude '**/AtomQualityProbeTest.class'
+    // Forward -Dintegration=true to test JVM for @EnabledIfSystemProperty
+    systemProperty 'integration', System.getProperty('integration', 'false')
 }
 
 // ==================== FAT JAR ====================

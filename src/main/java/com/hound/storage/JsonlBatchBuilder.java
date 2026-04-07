@@ -25,25 +25,43 @@ public class JsonlBatchBuilder {
     private final StringBuilder edges    = new StringBuilder(32 * 1024);
     private int vertexCount;
     private int edgeCount;
+    /**
+     * Tracks all vertex @id values added to this batch.
+     * appendEdge() guards against referencing vertices not in this batch,
+     * which would cause ArcadeDB batch endpoint to reject with "Unknown temporary ID".
+     */
+    private final Set<String> vertexIds = new HashSet<>();
 
     // ═══════════════════════════════════════════════════════════════
     // Public API
     // ═══════════════════════════════════════════════════════════════
 
-    /** Adds a vertex line. extId is the geoid — used as {@code @id}. */
+    /**
+     * Adds a vertex line. Skips silently if extId was already added (deduplication).
+     * saveRemote() uses UPSERT; batch mode must deduplicate manually to avoid duplicate vertices.
+     */
     public void appendVertex(String type, String extId, Map<String, Object> props) {
+        if (extId != null && !vertexIds.add(extId)) return; // already added
         vertices.append(toJsonLine("vertex", type, extId, null, null, props)).append('\n');
         vertexCount++;
     }
 
-    /** Adds a document line (e.g. DaliSnippet). No {@code @id}, no edges. */
+    /**
+     * Document types (DaliSnippet, DaliResolutionLog, DaliSchemaLog) are skipped in batch mode:
+     * ArcadeDB /api/v1/batch only accepts "vertex" and "edge" @type values.
+     * These types have no edges and are diagnostic-only, so graph integrity is unaffected.
+     */
     public void appendDocument(String type, Map<String, Object> props) {
-        vertices.append(toJsonLine("document", type, null, null, null, props)).append('\n');
-        vertexCount++;
+        // no-op: batch endpoint rejects @type "document"
     }
 
-    /** Adds an edge line. fromExtId / toExtId = geoid of source/target vertices. */
+    /**
+     * Adds an edge line. Skipped if either endpoint is null or not in this batch's vertex set —
+     * ArcadeDB batch endpoint rejects edges referencing unknown temporary IDs.
+     */
     public void appendEdge(String edgeType, String fromExtId, String toExtId, Map<String, Object> props) {
+        if (fromExtId == null || toExtId == null) return;
+        if (!vertexIds.contains(fromExtId) || !vertexIds.contains(toExtId)) return;
         edges.append(toJsonLine("edge", edgeType, null, fromExtId, toExtId, props)).append('\n');
         edgeCount++;
     }
@@ -276,6 +294,8 @@ public class JsonlBatchBuilder {
 
         // 10. DaliAtom
         // Build atomId map for edge creation later
+        // Mirror saveRemote(): insert ALL atom vertices (even for containers without a statement vertex).
+        // HAS_ATOM edges are guarded by appendEdge() vertexIds check (stmtGeoid must be in batch).
         Map<String, String> atomIdMap = new LinkedHashMap<>(); // "stmtGeoid:atomText" → atomId
         for (var container : result.getAtoms().entrySet()) {
             @SuppressWarnings("unchecked")

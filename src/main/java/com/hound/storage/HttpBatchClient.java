@@ -29,7 +29,7 @@ public class HttpBatchClient {
     private final boolean gzip;
 
     public HttpBatchClient(String host, int port, String dbName, String user, String password) {
-        this(host, port, dbName, user, password, true);
+        this(host, port, dbName, user, password, false);
     }
 
     public HttpBatchClient(String host, int port, String dbName, String user, String password, boolean gzip) {
@@ -53,18 +53,16 @@ public class HttpBatchClient {
      */
     public void send(String payload, String sid) {
         byte[] body = gzip ? compress(payload) : payload.getBytes(StandardCharsets.UTF_8);
-        String encoding = gzip ? "gzip" : "identity";
 
         Exception lastEx = null;
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
-                HttpRequest req = HttpRequest.newBuilder()
+                HttpRequest.Builder rb = HttpRequest.newBuilder()
                         .uri(URI.create(baseUrl))
                         .header("Authorization", authHeader)
-                        .header("Content-Type", "application/x-ndjson")
-                        .header("Content-Encoding", encoding)
-                        .POST(HttpRequest.BodyPublishers.ofByteArray(body))
-                        .build();
+                        .header("Content-Type", "application/x-ndjson");
+                if (gzip) rb.header("Content-Encoding", "gzip");
+                HttpRequest req = rb.POST(HttpRequest.BodyPublishers.ofByteArray(body)).build();
 
                 HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
 
