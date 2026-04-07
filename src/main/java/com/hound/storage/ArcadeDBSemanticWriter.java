@@ -97,7 +97,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         if (mode == Mode.EMBEDDED) {
             saveEmbedded(sid, result, timer, pool, dbName);
         } else if (mode == Mode.REMOTE_BATCH) {
-            saveRemoteBatch(sid, result, timer);
+            saveRemoteBatch(sid, result, timer, pool, dbName);
         } else {
             saveRemote(sid, result, timer, pool, dbName);
         }
@@ -1037,13 +1037,103 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
     // REMOTE_BATCH mode — single HTTP POST per file
     // ═══════════════════════════════════════════════════════════════
 
-    private void saveRemoteBatch(String sid, SemanticResult result, PipelineTimer timer) {
+    private void saveRemoteBatch(String sid, SemanticResult result, PipelineTimer timer,
+                                 CanonicalPool pool, String dbName) {
         Structure str = result.getStructure();
         if (str == null) return;
 
         timer.start("write.batch");
 
-        JsonlBatchBuilder builder = JsonlBatchBuilder.buildFromResult(sid, result);
+        final JsonlBatchBuilder builder;
+
+        if (pool != null) {
+            // ── Namespace/pool mode ──────────────────────────────────────────────────
+            // Phase 1: Insert canonical objects via individual REMOTE rcmd() calls
+            // (mirrors saveRemote lines 1099-1175), with pool dedup.
+            Set<String> newSchemaGeoids  = new LinkedHashSet<>();
+            Set<String> newTableGeoids   = new LinkedHashSet<>();
+            Set<String> newColumnGeoids  = new LinkedHashSet<>();
+
+            for (var e : str.getSchemas().entrySet()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> sc = (Map<String, Object>) e.getValue();
+                String cg = pool.canonicalSchema(e.getKey());
+                if (!pool.hasSchemaRid(cg)) {
+                    rcmd("INSERT INTO DaliSchema SET db_name=?, db_geoid=?, schema_geoid=?, schema_name=?",
+                            dbName, dbName, e.getKey(), sc.get("name"));
+                    pool.putSchemaRid(cg, cg); // placeholder — real RID fetched below
+                    newSchemaGeoids.add(e.getKey());
+                }
+            }
+
+            for (var e : str.getTables().entrySet()) {
+                TableInfo t = e.getValue();
+                String cg = pool.canonical(e.getKey());
+                if (!pool.hasTableRid(cg)) {
+                    rcmd("INSERT INTO DaliTable SET db_name=?, table_geoid=?, table_name=?, schema_geoid=?, table_type=?, aliases=?, column_count=?",
+                            dbName, e.getKey(), t.tableName(), t.schemaGeoid(), t.tableType(),
+                            toJson(new ArrayList<>(t.aliases())), t.columnCount());
+                    pool.putTableRid(cg, cg); // placeholder
+                    newTableGeoids.add(e.getKey());
+                }
+            }
+
+            for (var e : str.getColumns().entrySet()) {
+                ColumnInfo c = e.getValue();
+                String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
+                if (!pool.hasColumnRid(cg)) {
+                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?",
+                            dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
+                            c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder(),
+                            toJson(new ArrayList<>(c.getUsedInStatements())));
+                    pool.putColumnRid(cg, cg); // placeholder
+                    newColumnGeoids.add(e.getKey());
+                }
+            }
+
+            // Phase 2: Build PARTIAL RidCache for schemas/tables/columns (actual DB RIDs)
+            RidCache rid = buildRidCache(sid, pool, dbName);
+
+            // Phase 3: Create canonical hierarchical edges via REMOTE (new objects only)
+            // CONTAINS_SCHEMA: DaliDatabase → DaliSchema
+            if (pool.getDatabaseRid() != null) {
+                for (String schGeoid : newSchemaGeoids) {
+                    String schRid = rid.schemas.get(schGeoid.toUpperCase());
+                    if (schRid != null)
+                        edgeByRid("CONTAINS_SCHEMA", pool.getDatabaseRid(), schRid, sid);
+                }
+            }
+            // CONTAINS_TABLE: DaliSchema → DaliTable
+            for (String tblGeoid : newTableGeoids) {
+                TableInfo t = str.getTables().get(tblGeoid);
+                if (t == null || t.schemaGeoid() == null) continue;
+                String schRid = rid.schemas.get(t.schemaGeoid().toUpperCase());
+                String tblRid = rid.tables.get(tblGeoid);
+                if (schRid != null && tblRid != null)
+                    edgeByRid("CONTAINS_TABLE", schRid, tblRid, sid);
+            }
+            // HAS_COLUMN: DaliTable → DaliColumn
+            for (String colGeoid : newColumnGeoids) {
+                ColumnInfo c = str.getColumns().get(colGeoid);
+                if (c == null) continue;
+                String fromRid = rid.tables.get(c.getTableGeoid());
+                String toRid   = rid.columns.get(colGeoid);
+                if (fromRid != null && toRid != null)
+                    edgeByRid("HAS_COLUMN", fromRid, toRid, sid);
+            }
+            // Note: CONTAINS_ROUTINE (schema → package) is handled by the batch builder.
+            // The package RID does not exist yet (batch inserts it), so the schema endpoint
+            // is resolved via canonicalRids inside appendEdge() in the batch builder.
+
+            // Phase 4: Build batch for session-specific objects using the new overload
+            builder = JsonlBatchBuilder.buildFromResult(sid, result,
+                    rid.tables, rid.columns, rid.schemas);
+
+        } else {
+            // ── Ad-hoc mode (pool == null): keep existing behavior ──────────────────
+            builder = JsonlBatchBuilder.buildFromResult(sid, result);
+        }
+
         String payload = builder.build();
 
         logger.debug("Batch payload: {} vertices, {} edges, {} bytes",
@@ -1053,8 +1143,9 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
         timer.stop("write.batch");
 
-        logger.info("ArcadeDB REMOTE_BATCH: sid={} V:{} E:{} raw:{}b [{}]",
-                sid, builder.vertexCount(), builder.edgeCount(),
+        logger.info("ArcadeDB REMOTE_BATCH: sid={} db={} V:{} E:{} raw:{}b [{}]",
+                sid, dbName != null ? dbName : "ad-hoc",
+                builder.vertexCount(), builder.edgeCount(),
                 payload.length(), formatTime(timer.ms("write.batch")));
     }
 
@@ -1066,6 +1157,9 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                             CanonicalPool pool, String dbName) {
         Structure str = result.getStructure();
         if (str == null) return;
+
+        // Per-session counter: null-RID skips by edge type → logged as single WARN at end.
+        Map<String, Long> nullRidSkips = new java.util.LinkedHashMap<>();
 
         timer.start("write.vtx");
 
@@ -1490,6 +1584,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 String atomRid = rid.atoms.get(atomId);
                 if (atomRid != null)
                     edgeByRid("HAS_ATOM", stmtRid, atomRid, sid);
+                else
+                    nullRidSkips.merge("HAS_ATOM", 1L, Long::sum);
 
                 String tableGeoid = (String) a.get("table_geoid");
                 if (tableGeoid != null && atomRid != null) {
@@ -1526,6 +1622,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     String ocRid = rid.ocByOrder.get(stmtGeoid + ":" + outSeq);
                     if (ocRid != null)
                         edgeByRid("ATOM_PRODUCES", atomRid, ocRid, sid);
+                    else
+                        nullRidSkips.merge("ATOM_PRODUCES", 1L, Long::sum);
                 }
 
                 // H1.5 — DATA_FLOW: DaliColumn → DaliOutputColumn (resolved atoms only)
@@ -1540,6 +1638,8 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                                     "statement_geoid", stmtGeoid,
                                     "atom_id",         atomId,
                                     "flow_type",       resolveFlowType(a, str.getStatements().get(stmtGeoid)));
+                        } else {
+                            nullRidSkips.merge("DATA_FLOW", 1L, Long::sum);
                         }
                     }
                 }
@@ -1572,17 +1672,20 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         if (colRid != null)
                             edgeByRid("FILTER_FLOW", colRid, stmtRid, sid,
                                     "filter_type", parentCtx);
+                        else
+                            nullRidSkips.merge("FILTER_FLOW", 1L, Long::sum);
                     }
                 }
             }
         }
 
+        // HAS_JOIN: one edgeRemote call per statement (links to ALL its DaliJoin vertices).
+        // Bug fix: original inner loop called edgeRemote once per JoinInfo, creating N×M cartesian
+        // product (N statements × M joins each → N*M² instead of N*M).
         for (var e : str.getStatements().entrySet()) {
-            for (JoinInfo j : e.getValue().getJoins()) {
-                if (j.targetTableGeoid() != null) {
-                    edgeRemote("HAS_JOIN", "DaliStatement", "stmt_geoid", e.getKey(),
-                            "DaliJoin", "statement_geoid", e.getKey(), sid, "statement_geoid", e.getKey());
-                }
+            if (!e.getValue().getJoins().isEmpty()) {
+                edgeRemote("HAS_JOIN", "DaliStatement", "stmt_geoid", e.getKey(),
+                        "DaliJoin", "statement_geoid", e.getKey(), sid, "statement_geoid", e.getKey());
             }
         }
 
@@ -1694,6 +1797,10 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         }
 
         timer.stop("write.edge");
+
+        if (!nullRidSkips.isEmpty())
+            logger.warn("[REMOTE null-RID] sid={} file={} — edges skipped due to missing RID: {}",
+                    sid, result.getFilePath(), nullRidSkips);
     }
 
     // ====================== RID CACHE ======================
@@ -1849,7 +1956,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                     "CREATE EDGE " + edgeType + " FROM " + fromRid + " TO " + toRid + " SET session_id = :sid",
                     Map.of("sid", sid));
         } catch (Exception e) {
-            logger.debug("edgeByRid {} failed {} → {}: {}", edgeType, fromRid, toRid, e.getMessage());
+            logger.warn("edgeByRid {} FAILED {} → {}: {}", edgeType, fromRid, toRid, e.getMessage());
         }
     }
 
@@ -1886,7 +1993,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
             }
             remoteDb.command("sql", sql.toString(), params);
         } catch (Exception e) {
-            logger.debug("edgeByRid {} failed: {}", edgeType, e.getMessage());
+            logger.warn("edgeByRid {} FAILED: {}", edgeType, e.getMessage());
         }
     }
 
@@ -1980,10 +2087,14 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
 
             sql.append(") SET session_id = :sid");
 
-            remoteDb.command("sql", sql.toString(), params);
+            var rs = remoteDb.command("sql", sql.toString(), params);
+            if (!rs.hasNext())
+                logger.warn("edgeRemote {} NO-OP (0 edges created): FROM {}[{}={}] TO {}[{}={}] sid={}",
+                        edgeType, fromType, fromField, fromVal,
+                        toType, toField, toVal, sid);
 
         } catch (Exception e) {
-            logger.debug("Edge {} failed: FROM {}[{}={}] TO {}[{}={}] — {}",
+            logger.warn("edgeRemote {} FAILED: FROM {}[{}={}] TO {}[{}={}] — {}",
                     edgeType, fromType, fromField, fromVal,
                     toType, toField, toVal, e.getMessage());
         }

@@ -59,7 +59,12 @@ DB_REMOTE="${DB}_remote"
 DB_BATCH="${DB}_batch"
 
 for db in "$DB_REMOTE" "$DB_BATCH"; do
-    curl -s -u "$USER:$PASS" -X POST "http://$HOST:$PORT/api/v1/create/$db" > /dev/null 2>&1 || true
+    curl -s -u "$USER:$PASS" -X POST "http://$HOST:$PORT/api/v1/server" \
+        -H "Content-Type: application/json" \
+        -d "{\"command\":\"drop database $db\"}" > /dev/null 2>&1 || true
+    curl -s -u "$USER:$PASS" -X POST "http://$HOST:$PORT/api/v1/server" \
+        -H "Content-Type: application/json" \
+        -d "{\"command\":\"create database $db\"}" > /dev/null 2>&1 || true
 done
 
 echo "Базы данных готовы: $DB_REMOTE | $DB_BATCH"
@@ -110,7 +115,7 @@ run_mode() {
             -X POST "http://$HOST:$PORT/api/v1/command/$db_name" \
             -H "Content-Type: application/json" \
             -d "{\"language\":\"sql\",\"command\":\"SELECT count(*) AS cnt FROM $type\"}" \
-            2>/dev/null | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['result'][0]['cnt'])" 2>/dev/null || echo "?")
+            2>/dev/null | grep -o '"cnt":[0-9]*' | grep -o '[0-9]*' || echo "?")
         printf "  %-22s %s\n" "$type" "$cnt"
     done
     echo ""
@@ -135,7 +140,7 @@ printf " REMOTE:       %6s ms\n" "$t_remote"
 printf " REMOTE_BATCH: %6s ms\n" "$t_batch"
 
 if [[ "$t_remote" -gt 0 && "$t_batch" -gt 0 ]]; then
-    speedup=$(python3 -c "print(f'{$t_remote / $t_batch:.2f}x')" 2>/dev/null || echo "?")
+    speedup=$(awk "BEGIN {printf \"%.2fx\", $t_remote / $t_batch}")
     echo " Ускорение:    $speedup"
 fi
 

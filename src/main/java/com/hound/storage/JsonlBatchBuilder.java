@@ -32,6 +32,14 @@ public class JsonlBatchBuilder {
      */
     private final Set<String> vertexIds = new HashSet<>();
 
+    /**
+     * Canonical object RIDs: geoid → actual DB RID (e.g. "#15:3").
+     * Used in namespace/pool mode when canonical vertices (DaliSchema, DaliTable, DaliColumn)
+     * are pre-inserted via REMOTE rcmd() and not included in the batch payload.
+     * appendEdge() uses these RIDs directly in @from/@to when an endpoint is not in vertexIds.
+     */
+    private Map<String, String> canonicalRids = new HashMap<>();
+
     // ═══════════════════════════════════════════════════════════════
     // Public API
     // ═══════════════════════════════════════════════════════════════
@@ -56,14 +64,33 @@ public class JsonlBatchBuilder {
     }
 
     /**
-     * Adds an edge line. Skipped if either endpoint is null or not in this batch's vertex set —
+     * Adds an edge line. Skipped if either endpoint is null or not resolvable —
      * ArcadeDB batch endpoint rejects edges referencing unknown temporary IDs.
+     *
+     * <p>Resolution order for each endpoint:
+     * <ol>
+     *   <li>If the geoid is in {@code vertexIds}: use it as a batch-local temporary ID.
+     *   <li>If the geoid is in {@code canonicalRids}: use the actual DB RID (e.g. {@code #15:3}).
+     *   <li>Otherwise: skip the edge.
+     * </ol>
      */
     public void appendEdge(String edgeType, String fromExtId, String toExtId, Map<String, Object> props) {
         if (fromExtId == null || toExtId == null) return;
-        if (!vertexIds.contains(fromExtId) || !vertexIds.contains(toExtId)) return;
-        edges.append(toJsonLine("edge", edgeType, null, fromExtId, toExtId, props)).append('\n');
+        String resolvedFrom = resolveEndpoint(fromExtId);
+        String resolvedTo   = resolveEndpoint(toExtId);
+        if (resolvedFrom == null || resolvedTo == null) return;
+        edges.append(toJsonLine("edge", edgeType, null, resolvedFrom, resolvedTo, props)).append('\n');
         edgeCount++;
+    }
+
+    /**
+     * Resolves an edge endpoint to either a batch-local temp ID or an actual DB RID.
+     * Returns null if the endpoint cannot be resolved.
+     */
+    private String resolveEndpoint(String geoid) {
+        if (vertexIds.contains(geoid)) return geoid;
+        String rid = canonicalRids.get(geoid);
+        return rid; // null if not found in either map
     }
 
     /** Builds final payload: all vertices then all edges (NDJSON). */
@@ -565,6 +592,10 @@ public class JsonlBatchBuilder {
             Map<String, Map<String, Object>> atoms =
                     (Map<String, Map<String, Object>>) cont.get("atoms");
             if (atoms == null || stmtGeoid == null) continue;
+            // Guard: source_geoid must be a DaliStatement, not a DaliRoutine.
+            // Routine-level atom containers have routine_geoid as source_geoid; creating
+            // HAS_ATOM/FILTER_FLOW from a DaliRoutine vertex is semantically incorrect.
+            if (!str.getStatements().containsKey(stmtGeoid)) continue;
 
             for (var at : atoms.entrySet()) {
                 Map<String, Object> a = at.getValue();
@@ -690,10 +721,585 @@ public class JsonlBatchBuilder {
             }
         }
 
-        // Lineage edges
-        for (LineageEdge le : result.getLineage()) {
-            b.appendEdge(le.relationType(), le.sourceGeoid(), le.targetGeoid(),
-                    mapOf("session_id", sid, "statement_geoid", le.statementGeoid()));
+        // NOTE: Lineage edges intentionally omitted.
+        // result.getLineage() uses READS_FROM/WRITES_TO in the *opposite* direction to structural
+        // edges (lineage: table→stmt; structural: stmt→table) with different field sets.
+        // saveRemote() also does not write lineage edges, so omitting here keeps REMOTE vs BATCH parity.
+
+        return b;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Factory: namespace/pool mode — canonical objects pre-inserted
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Namespace/pool mode variant of {@link #buildFromResult(String, SemanticResult)}.
+     *
+     * <p>Used in REMOTE_BATCH namespace mode when canonical objects (DaliSchema, DaliTable,
+     * DaliColumn, DaliDatabase) have already been inserted into the DB via individual REMOTE
+     * {@code rcmd()} calls. This method:
+     * <ul>
+     *   <li>Merges {@code tableRids + colRids + schemaRids} into {@link #canonicalRids} so that
+     *       edges referencing canonical vertices resolve to actual DB RIDs.
+     *   <li>Skips DaliDatabase, DaliSchema, DaliTable, DaliColumn vertex sections
+     *       (already in DB — re-inserting would hit UNIQUE index → DuplicatedKeyException).
+     *   <li>Skips CONTAINS_TABLE and HAS_COLUMN edge sections
+     *       (created by REMOTE in ArcadeDBSemanticWriter.saveRemoteBatch).
+     *   <li>All other sections (DaliRoutine, DaliStatement, atoms, edges, etc.) work identically
+     *       to the single-argument overload, with canonical endpoints resolved via canonicalRids.
+     * </ul>
+     *
+     * @param sid        Session ID
+     * @param result     Semantic result
+     * @param tableRids  geoid → actual DB RID for DaliTable (from RidCache)
+     * @param colRids    geoid → actual DB RID for DaliColumn (from RidCache)
+     * @param schemaRids geoid → actual DB RID for DaliSchema (from RidCache)
+     */
+    public static JsonlBatchBuilder buildFromResult(
+            String sid, SemanticResult result,
+            Map<String, String> tableRids,
+            Map<String, String> colRids,
+            Map<String, String> schemaRids) {
+
+        JsonlBatchBuilder b = new JsonlBatchBuilder();
+        // Populate canonical RID map — edges to canonical vertices will use actual RIDs
+        if (tableRids  != null) b.canonicalRids.putAll(tableRids);
+        if (colRids    != null) b.canonicalRids.putAll(colRids);
+        if (schemaRids != null) b.canonicalRids.putAll(schemaRids);
+
+        Structure str = result.getStructure();
+        if (str == null) return b;
+
+        Map<String, Object> sidProps = Map.of("session_id", sid);
+
+        // ─────────────────────────────────────────────────────
+        // Phase 1: Vertices (canonical types SKIPPED — already in DB)
+        // ─────────────────────────────────────────────────────
+
+        // 1. DaliSession
+        b.appendVertex("DaliSession", sid, mapOf(
+                "session_id", sid,
+                "file_path", nvl(result.getFilePath()),
+                "dialect", nvl(result.getDialect()),
+                "processing_time_ms", result.getProcessingTimeMs(),
+                "created_at", System.currentTimeMillis()
+        ));
+
+        // 2. DaliDatabase — SKIPPED (canonical, already in DB)
+        // 3. DaliSchema   — SKIPPED (canonical, already in DB)
+        // 4a. DaliTable   — SKIPPED (canonical, already in DB)
+        // 4b. DaliColumn  — SKIPPED (canonical, already in DB)
+
+        // 4. DaliPackage (session-specific)
+        for (var e : str.getPackages().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> pkg = (Map<String, Object>) e.getValue();
+            b.appendVertex("DaliPackage", e.getKey(), mapOf(
+                    "session_id", sid,
+                    "package_geoid", e.getKey(),
+                    "package_name", pkg.get("package_name"),
+                    "schema_geoid", pkg.get("schema_geoid"),
+                    "routine_geoid", e.getKey(),
+                    "routine_name", pkg.get("package_name"),
+                    "routine_type", "PACKAGE"
+            ));
+        }
+
+        // 5. DaliRoutine (session-specific)
+        Set<String> packageGeoids = str.getPackages().keySet();
+        for (var e : str.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            if (packageGeoids.contains(e.getKey())) continue;
+            b.appendVertex("DaliRoutine", e.getKey(), mapOf(
+                    "session_id", sid,
+                    "routine_geoid", e.getKey(),
+                    "routine_name", r.getName(),
+                    "routine_type", r.getRoutineType(),
+                    "package_geoid", r.getPackageGeoid(),
+                    "schema_geoid", r.getSchemaGeoid()
+            ));
+        }
+
+        // 5b. DaliParameter, DaliVariable
+        for (var e : str.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            int pIdx = 0;
+            for (RoutineInfo.ParameterInfo p : r.getTypedParameters()) {
+                b.appendVertex("DaliParameter", e.getKey() + ":PARAM:" + pIdx, mapOf(
+                        "session_id", sid,
+                        "routine_geoid", e.getKey(),
+                        "param_name", p.name(),
+                        "param_type", p.type(),
+                        "param_mode", p.mode()
+                ));
+                pIdx++;
+            }
+            int vIdx = 0;
+            for (RoutineInfo.VariableInfo v : r.getTypedVariables()) {
+                b.appendVertex("DaliVariable", e.getKey() + ":VAR:" + vIdx, mapOf(
+                        "session_id", sid,
+                        "routine_geoid", e.getKey(),
+                        "var_name", v.name(),
+                        "var_type", v.type()
+                ));
+                vIdx++;
+            }
+        }
+
+        // 6. DaliStatement
+        for (var e : str.getStatements().entrySet()) {
+            StatementInfo s = e.getValue();
+            b.appendVertex("DaliStatement", e.getKey(), mapOf(
+                    "session_id", sid,
+                    "stmt_geoid", e.getKey(),
+                    "type", s.getType(),
+                    "subtype", s.getSubtype(),
+                    "line_start", s.getLineStart(),
+                    "line_end", s.getLineEnd(),
+                    "parent_statement", s.getParentStatementGeoid(),
+                    "parent_statement_type", parentType(s.getParentStatementGeoid(), str),
+                    "routine_geoid", s.getRoutineGeoid(),
+                    "short_name", s.getShortName(),
+                    "is_union", s.isUnion(),
+                    "is_dml", isDml(s.getType()),
+                    "is_ddl", isDdl(s.getType()),
+                    "has_aggregation", s.isHasAggregation(),
+                    "has_window", s.isHasWindow(),
+                    "has_cte", hasCte(s, str.getStatements()),
+                    "join_count", s.getJoins().size(),
+                    "col_count_output", s.getColumnsOutput().size(),
+                    "col_count_input", countInputColumns(s),
+                    "depth", computeDepth(s.getParentStatementGeoid(), str.getStatements()),
+                    "quality", computeStatementQuality(s)
+            ));
+        }
+
+        // 7. DaliOutputColumn
+        for (var e : str.getStatements().entrySet()) {
+            for (var oc : e.getValue().getColumnsOutput().entrySet()) {
+                Map<String, Object> col = oc.getValue();
+                String ocExtId = e.getKey() + ":OC:" + oc.getKey();
+                b.appendVertex("DaliOutputColumn", ocExtId, mapOf(
+                        "session_id", sid,
+                        "statement_geoid", e.getKey(),
+                        "col_key", oc.getKey(),
+                        "name", col.get("name"),
+                        "expression", col.get("expression"),
+                        "alias", col.get("alias"),
+                        "col_order", col.get("order"),
+                        "source_type", col.get("source_type"),
+                        "table_ref", col.get("table_ref")
+                ));
+            }
+        }
+
+        // 7b. DaliAffectedColumn
+        for (var e : str.getStatements().entrySet()) {
+            int acIdx = 0;
+            for (Map<String, Object> ac : e.getValue().getAffectedColumns()) {
+                String typeAffect = null;
+                Integer orderAffect = null;
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> poliage = (List<Map<String, Object>>) ac.get("poliage_update");
+                if (poliage != null && !poliage.isEmpty()) {
+                    typeAffect  = (String)  poliage.get(0).get("type_affect");
+                    Object oa   = poliage.get(0).get("order_affect");
+                    orderAffect = oa instanceof Number n ? n.intValue() : null;
+                }
+                String acExtId = e.getKey() + ":AC:" + acIdx;
+                b.appendVertex("DaliAffectedColumn", acExtId, mapOf(
+                        "session_id", sid,
+                        "statement_geoid", e.getKey(),
+                        "column_ref", ac.get("column_ref"),
+                        "column_name", ac.get("column_name"),
+                        "table_geoid", ac.get("table_geoid"),
+                        "dataset_alias", ac.get("dataset_alias"),
+                        "source_type", ac.get("source_type"),
+                        "resolution_status", ac.get("resolution_status"),
+                        "type_affect", typeAffect,
+                        "order_affect", orderAffect
+                ));
+                acIdx++;
+            }
+        }
+
+        // 8. DaliAtom
+        Map<String, String> atomIdMap = new LinkedHashMap<>();
+        for (var container : result.getAtoms().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cont = (Map<String, Object>) container.getValue();
+            String stmtGeoid = (String) cont.get("source_geoid");
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, Object>> atoms =
+                    (Map<String, Map<String, Object>>) cont.get("atoms");
+            if (atoms == null || stmtGeoid == null) continue;
+
+            for (var at : atoms.entrySet()) {
+                Map<String, Object> a = at.getValue();
+                String atomId = md5(stmtGeoid + ":" + at.getKey());
+                atomIdMap.put(stmtGeoid + ":" + at.getKey(), atomId);
+                b.appendVertex("DaliAtom", atomId, mapOf(
+                        "session_id", sid,
+                        "statement_geoid", stmtGeoid,
+                        "atom_id", atomId,
+                        "atom_text", at.getKey(),
+                        "atom_context", a.get("atom_context"),
+                        "parent_context", a.get("parent_context"),
+                        "position", a.get("position"),
+                        "sposition", a.get("sposition"),
+                        "is_complex", a.get("is_complex"),
+                        "is_column_reference", a.get("is_column_reference"),
+                        "is_function_call", a.get("is_function_call"),
+                        "is_constant", a.get("is_constant"),
+                        "is_routine_param", a.get("is_routine_param"),
+                        "is_routine_var", a.get("is_routine_var"),
+                        "table_name", a.get("table_name"),
+                        "column_name", a.get("column_name"),
+                        "table_geoid", a.get("table_geoid"),
+                        "status", a.get("status"),
+                        "output_column_sequence", a.get("output_column_sequence"),
+                        "nested_atoms_count", a.get("nested_atoms_count")
+                ));
+            }
+        }
+
+        // 9. DaliJoin
+        for (var e : str.getStatements().entrySet()) {
+            int joinIdx = 0;
+            for (JoinInfo j : e.getValue().getJoins()) {
+                String joinExtId = e.getKey() + ":JOIN:" + j.lineStart() + ":" + joinIdx;
+                b.appendVertex("DaliJoin", joinExtId, mapOf(
+                        "session_id", sid,
+                        "statement_geoid", e.getKey(),
+                        "join_type", j.joinType(),
+                        "source_table_geoid", j.sourceTableGeoid(),
+                        "source_alias", j.sourceTableAlias(),
+                        "source_type", j.sourceType(),
+                        "target_table_geoid", j.targetTableGeoid(),
+                        "target_alias", j.targetTableAlias(),
+                        "target_type", j.targetType(),
+                        "conditions", j.conditions(),
+                        "line_start", j.lineStart()
+                ));
+                joinIdx++;
+            }
+        }
+
+        // Documents (no-op in batch mode)
+        for (var e : str.getStatements().entrySet()) {
+            String raw = truncate(e.getValue().getSnippet(), SNIPPET_MAX);
+            if (raw == null) continue;
+            b.appendDocument("DaliSnippet", mapOf(
+                    "session_id", sid,
+                    "stmt_geoid", e.getKey(),
+                    "snippet", raw,
+                    "snippet_hash", md5(raw)
+            ));
+        }
+        for (Map<String, Object> logEntry : result.getResolutionLog()) {
+            b.appendDocument("DaliResolutionLog", mapOf(
+                    "session_id", sid,
+                    "file_path", result.getFilePath(),
+                    "statement_geoid", logEntry.get("statement_geoid"),
+                    "raw_input", logEntry.get("raw_input"),
+                    "result_kind", logEntry.get("result_kind"),
+                    "is_function_call", logEntry.get("is_function_call"),
+                    "atom_context", logEntry.get("atom_context"),
+                    "parent_context", logEntry.get("parent_context"),
+                    "note", logEntry.get("note"),
+                    "strategy", logEntry.get("strategy"),
+                    "table_name", logEntry.get("table_name"),
+                    "column_name", logEntry.get("column_name"),
+                    "position", logEntry.get("position")
+            ));
+        }
+        for (Map<String, Object> schEntry : result.getSchemaRegistrationLog()) {
+            b.appendDocument("DaliSchemaLog", mapOf(
+                    "session_id", sid,
+                    "schema_name", schEntry.get("schema_name"),
+                    "reason", schEntry.get("reason"),
+                    "backtrace", schEntry.get("backtrace")
+            ));
+        }
+
+        // ─────────────────────────────────────────────────────
+        // Phase 2: Edges
+        // ─────────────────────────────────────────────────────
+        // CONTAINS_TABLE and HAS_COLUMN are SKIPPED here — created by REMOTE in saveRemoteBatch.
+
+        // CONTAINS_ROUTINE (schema → package) — schema endpoint resolved via canonicalRids
+        for (var e : str.getPackages().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> pkg = (Map<String, Object>) e.getValue();
+            String sg = (String) pkg.get("schema_geoid");
+            if (sg != null && !sg.isEmpty())
+                b.appendEdge("CONTAINS_ROUTINE", sg, e.getKey(), sidProps);
+        }
+
+        // CONTAINS_ROUTINE (package/schema → routine)
+        for (var e : str.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            if (packageGeoids.contains(e.getKey())) continue;
+            String fromGeoid = null;
+            if (r.getPackageGeoid() != null)      fromGeoid = r.getPackageGeoid();
+            else if (r.getSchemaGeoid() != null)  fromGeoid = r.getSchemaGeoid();
+            if (fromGeoid != null)
+                b.appendEdge("CONTAINS_ROUTINE", fromGeoid, e.getKey(), sidProps);
+        }
+
+        // NESTED_IN (parent routine → child routine)
+        for (var e : str.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            if (r.getParentRoutineGeoid() != null)
+                b.appendEdge("NESTED_IN", r.getParentRoutineGeoid(), e.getKey(), sidProps);
+        }
+
+        // CONTAINS_STMT (routine → statement)
+        for (var e : str.getStatements().entrySet()) {
+            if (e.getValue().getRoutineGeoid() != null)
+                b.appendEdge("CONTAINS_STMT", e.getValue().getRoutineGeoid(), e.getKey(), sidProps);
+        }
+
+        // CHILD_OF (statement → parent statement)
+        for (var e : str.getStatements().entrySet()) {
+            if (e.getValue().getParentStatementGeoid() != null)
+                b.appendEdge("CHILD_OF", e.getKey(), e.getValue().getParentStatementGeoid(), sidProps);
+        }
+
+        // HAS_OUTPUT_COL
+        for (var e : str.getStatements().entrySet()) {
+            for (var oc : e.getValue().getColumnsOutput().entrySet()) {
+                String ocExtId = e.getKey() + ":OC:" + oc.getKey();
+                b.appendEdge("HAS_OUTPUT_COL", e.getKey(), ocExtId,
+                        mapOf("session_id", sid, "statement_geoid", e.getKey()));
+            }
+        }
+
+        // HAS_AFFECTED_COL + AFFECTED_COL_REF_TABLE
+        for (var e : str.getStatements().entrySet()) {
+            int acIdx = 0;
+            for (Map<String, Object> ac : e.getValue().getAffectedColumns()) {
+                String acExtId = e.getKey() + ":AC:" + acIdx;
+                b.appendEdge("HAS_AFFECTED_COL", e.getKey(), acExtId, sidProps);
+                String tg = (String) ac.get("table_geoid");
+                if (tg != null)
+                    b.appendEdge("AFFECTED_COL_REF_TABLE", acExtId, tg, sidProps);
+                acIdx++;
+            }
+        }
+
+        // HAS_JOIN + JOIN_SOURCE_TABLE + JOIN_TARGET_TABLE
+        for (var e : str.getStatements().entrySet()) {
+            int joinIdx = 0;
+            for (JoinInfo j : e.getValue().getJoins()) {
+                String joinExtId = e.getKey() + ":JOIN:" + j.lineStart() + ":" + joinIdx;
+                b.appendEdge("HAS_JOIN", e.getKey(), joinExtId, sidProps);
+                if (j.sourceTableGeoid() != null)
+                    b.appendEdge("JOIN_SOURCE_TABLE", joinExtId, j.sourceTableGeoid(), sidProps);
+                if (j.targetTableGeoid() != null)
+                    b.appendEdge("JOIN_TARGET_TABLE", joinExtId, j.targetTableGeoid(), sidProps);
+                joinIdx++;
+            }
+        }
+
+        // HAS_PARAMETER, HAS_VARIABLE
+        for (var e : str.getRoutines().entrySet()) {
+            RoutineInfo r = e.getValue();
+            int pIdx = 0;
+            for (RoutineInfo.ParameterInfo ignored : r.getTypedParameters()) {
+                b.appendEdge("HAS_PARAMETER", e.getKey(), e.getKey() + ":PARAM:" + pIdx, sidProps);
+                pIdx++;
+            }
+            int vIdx = 0;
+            for (RoutineInfo.VariableInfo ignored : r.getTypedVariables()) {
+                b.appendEdge("HAS_VARIABLE", e.getKey(), e.getKey() + ":VAR:" + vIdx, sidProps);
+                vIdx++;
+            }
+        }
+
+        // BELONGS_TO_SESSION — canonical tables/routines (tables resolve via canonicalRids)
+        for (String tg : str.getTables().keySet())
+            b.appendEdge("BELONGS_TO_SESSION", sid, tg, sidProps);
+        for (String rg : str.getRoutines().keySet())
+            b.appendEdge("BELONGS_TO_SESSION", sid, rg, sidProps);
+
+        // READS_FROM, WRITES_TO
+        for (var e : str.getStatements().entrySet()) {
+            for (String tg : e.getValue().getSourceTables().keySet())
+                b.appendEdge("READS_FROM", e.getKey(), tg, sidProps);
+            for (String tg : e.getValue().getTargetTables().keySet())
+                b.appendEdge("WRITES_TO", e.getKey(), tg, sidProps);
+        }
+
+        // USES_SUBQUERY
+        for (var e : str.getStatements().entrySet()) {
+            for (String sqGeoid : e.getValue().getSourceSubqueries().keySet())
+                b.appendEdge("USES_SUBQUERY", e.getKey(), sqGeoid, sidProps);
+        }
+
+        // Atom edges: HAS_ATOM, ATOM_REF_TABLE, ATOM_REF_COLUMN, ATOM_REF_STMT,
+        //             ATOM_REF_OUTPUT_COL, ATOM_PRODUCES, DATA_FLOW, FILTER_FLOW
+        Set<String> tableGeoids = str.getTables().keySet();
+        Map<String, String> ocByStmtAndName = new HashMap<>();
+        for (var e : str.getStatements().entrySet()) {
+            for (var oc : e.getValue().getColumnsOutput().entrySet()) {
+                ocByStmtAndName.put(e.getKey() + ":" + oc.getKey().toUpperCase(),
+                        e.getKey() + ":OC:" + oc.getKey());
+            }
+        }
+        Map<String, String> ocByOrder = new HashMap<>();
+        for (var e : str.getStatements().entrySet()) {
+            for (var oc : e.getValue().getColumnsOutput().entrySet()) {
+                Object order = oc.getValue().get("order");
+                if (order != null) ocByOrder.put(e.getKey() + ":" + order, e.getKey() + ":OC:" + oc.getKey());
+            }
+        }
+        Map<String, String> affColByRef = new HashMap<>();
+        for (var e : str.getStatements().entrySet()) {
+            int acIdx = 0;
+            for (Map<String, Object> ac : e.getValue().getAffectedColumns()) {
+                String colRef = (String) ac.get("column_ref");
+                if (colRef != null)
+                    affColByRef.put(e.getKey() + ":" + colRef, e.getKey() + ":AC:" + acIdx);
+                acIdx++;
+            }
+        }
+
+        for (var container : result.getAtoms().entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cont = (Map<String, Object>) container.getValue();
+            String stmtGeoid = (String) cont.get("source_geoid");
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, Object>> atoms =
+                    (Map<String, Map<String, Object>>) cont.get("atoms");
+            if (atoms == null || stmtGeoid == null) continue;
+            // Guard: source_geoid must be a DaliStatement, not a DaliRoutine.
+            if (!str.getStatements().containsKey(stmtGeoid)) continue;
+
+            for (var at : atoms.entrySet()) {
+                Map<String, Object> a = at.getValue();
+                String atomId = atomIdMap.get(stmtGeoid + ":" + at.getKey());
+                if (atomId == null) continue;
+
+                b.appendEdge("HAS_ATOM", stmtGeoid, atomId, sidProps);
+
+                String atomTableGeoid = (String) a.get("table_geoid");
+                if (atomTableGeoid != null) {
+                    if (tableGeoids.contains(atomTableGeoid)
+                            || b.canonicalRids.containsKey(atomTableGeoid)) {
+                        // Physical table source (batch-local or canonical)
+                        b.appendEdge("ATOM_REF_TABLE", atomId, atomTableGeoid, sidProps);
+                        String colName = (String) a.get("column_name");
+                        if (colName != null) {
+                            String colGeoid = atomTableGeoid + "." + colName.toUpperCase();
+                            if (str.getColumns().containsKey(colGeoid)
+                                    || b.canonicalRids.containsKey(colGeoid))
+                                b.appendEdge("ATOM_REF_COLUMN", atomId, colGeoid, sidProps);
+                        }
+                    } else {
+                        // Subquery/CTE source
+                        if (str.getStatements().containsKey(atomTableGeoid)) {
+                            b.appendEdge("ATOM_REF_STMT", atomId, atomTableGeoid, sidProps);
+                            String colName = (String) a.get("column_name");
+                            if (colName != null) {
+                                String ocExtId = ocByStmtAndName.get(
+                                        atomTableGeoid + ":" + colName.toUpperCase());
+                                if (ocExtId != null)
+                                    b.appendEdge("ATOM_REF_OUTPUT_COL", atomId, ocExtId, sidProps);
+                            }
+                        }
+                    }
+                }
+
+                Object outSeq = a.get("output_column_sequence");
+                if (outSeq != null) {
+                    String ocExtId = ocByOrder.get(stmtGeoid + ":" + outSeq);
+                    if (ocExtId != null)
+                        b.appendEdge("ATOM_PRODUCES", atomId, ocExtId, sidProps);
+                }
+
+                if ("Обработано".equals(a.get("status")) && outSeq != null) {
+                    String colName = (String) a.get("column_name");
+                    if (atomTableGeoid != null && colName != null) {
+                        String srcColGeoid = atomTableGeoid + "." + colName.toUpperCase();
+                        String ocExtId = ocByOrder.get(stmtGeoid + ":" + outSeq);
+                        if ((str.getColumns().containsKey(srcColGeoid)
+                                || b.canonicalRids.containsKey(srcColGeoid))
+                                && ocExtId != null) {
+                            b.appendEdge("DATA_FLOW", srcColGeoid, ocExtId, mapOf(
+                                    "session_id", sid,
+                                    "statement_geoid", stmtGeoid,
+                                    "atom_id", atomId,
+                                    "flow_type", resolveFlowType(a, str.getStatements().get(stmtGeoid))
+                            ));
+                        }
+                    }
+                }
+
+                String dmlTargetRef = (String) a.get("dml_target_ref");
+                if ("Обработано".equals(a.get("status")) && dmlTargetRef != null
+                        && atomTableGeoid != null) {
+                    String colName = (String) a.get("column_name");
+                    if (colName != null) {
+                        String srcColGeoid = atomTableGeoid + "." + colName.toUpperCase();
+                        String acExtId = affColByRef.get(stmtGeoid + ":" + dmlTargetRef);
+                        if ((str.getColumns().containsKey(srcColGeoid)
+                                || b.canonicalRids.containsKey(srcColGeoid))
+                                && acExtId != null) {
+                            b.appendEdge("DATA_FLOW", srcColGeoid, acExtId, mapOf(
+                                    "session_id", sid,
+                                    "statement_geoid", stmtGeoid,
+                                    "atom_id", atomId,
+                                    "flow_type", resolveDmlFlowType(str.getStatements().get(stmtGeoid))
+                            ));
+                        }
+                    }
+                }
+
+                String parentCtx = (String) a.get("parent_context");
+                if (("WHERE".equals(parentCtx) || "HAVING".equals(parentCtx) || "JOIN".equals(parentCtx))
+                        && "Обработано".equals(a.get("status"))
+                        && atomTableGeoid != null) {
+                    String colName = (String) a.get("column_name");
+                    if (colName != null) {
+                        String colGeoid = atomTableGeoid + "." + colName.toUpperCase();
+                        if (str.getColumns().containsKey(colGeoid)
+                                || b.canonicalRids.containsKey(colGeoid))
+                            b.appendEdge("FILTER_FLOW", colGeoid, stmtGeoid, mapOf(
+                                    "filter_type", parentCtx,
+                                    "session_id", sid,
+                                    "statement_geoid", stmtGeoid,
+                                    "via_atom", at.getKey()
+                            ));
+                    }
+                }
+            }
+        }
+
+        // CALLS: routine → routine
+        for (var callerEntry : result.getCalledRoutines().entrySet()) {
+            String callerGeoid = callerEntry.getKey();
+            for (Map<String, String> call : callerEntry.getValue()) {
+                String calleeName = call.get("name");
+                if (calleeName == null) continue;
+                String calleeGeoid = null;
+                for (String rg : str.getRoutines().keySet()) {
+                    String upper = rg.toUpperCase();
+                    if (upper.endsWith(":" + calleeName.toUpperCase())
+                            || upper.equals(calleeName.toUpperCase())) {
+                        calleeGeoid = rg;
+                        break;
+                    }
+                }
+                if (calleeGeoid != null)
+                    b.appendEdge("CALLS", callerGeoid, calleeGeoid, mapOf(
+                            "session_id", sid,
+                            "caller_geoid", callerGeoid,
+                            "callee_name", calleeName,
+                            "line_start", call.get("line")
+                    ));
+            }
         }
 
         return b;

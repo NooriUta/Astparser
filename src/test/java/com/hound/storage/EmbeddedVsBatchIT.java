@@ -102,21 +102,21 @@ class EmbeddedVsBatchIT {
 
     // EDGE_TYPES: exact-match types that are structurally stable.
     // Excluded (known divergences between REMOTE and REMOTE_BATCH):
-    //   HAS_JOIN    — saveRemote() creates cartesian-product duplicates (known bug in edgeRemote)
     //   HAS_ATOM    — pre-existing REMOTE vs EMBEDDED divergence
     //   READS_FROM  — REMOTE drops edges on silent rcmd() failures; BATCH is atomic
     //   WRITES_TO   — same
     //   HAS_COLUMN  — same
     //   FILTER_FLOW — same
     // These are tracked in EDGE_TYPES_TOLERANCE and checked with ±200% tolerance.
+    // HAS_JOIN moved to exact-match after fixing the cartesian-product bug in saveRemote().
     private static final String[] EDGE_TYPES = {
         "CONTAINS_TABLE", "CONTAINS_STMT", "BELONGS_TO_SESSION",
-        "HAS_OUTPUT_COL", "CONTAINS_ROUTINE", "HAS_PARAMETER", "HAS_VARIABLE"
+        "HAS_OUTPUT_COL", "CONTAINS_ROUTINE", "HAS_PARAMETER", "HAS_VARIABLE", "HAS_JOIN"
     };
 
     /** Edge types compared with ±200% tolerance (BATCH between 1/3 and 3× REMOTE). */
     private static final String[] EDGE_TYPES_TOLERANCE = {
-        "READS_FROM", "WRITES_TO", "HAS_COLUMN", "HAS_ATOM", "HAS_JOIN", "FILTER_FLOW"
+        "READS_FROM", "WRITES_TO", "HAS_COLUMN", "HAS_ATOM", "FILTER_FLOW"
     };
 
     // ─── Lifecycle ───────────────────────────────────────────────────────────
@@ -144,11 +144,20 @@ class EmbeddedVsBatchIT {
 
         assertHasStatements(base, fixture);
 
+        long t0 = System.currentTimeMillis();
         Map<String, Long> remoteCounts = writeRemote(reSid(base, base.getSessionId() + "-r"));
+        long remoteMs = System.currentTimeMillis() - t0;
+
+        t0 = System.currentTimeMillis();
         Map<String, Long> batchCounts  = writeBatch (reSid(base, base.getSessionId() + "-b"));
+        long batchMs = System.currentTimeMillis() - t0;
 
         printTable("REMOTE vs REMOTE_BATCH | " + fixture.getFileName(),
                 "REMOTE", remoteCounts, "BATCH", batchCounts);
+        printTimings("DWH2",
+                new String[]{"REMOTE", "REMOTE_BATCH"},
+                new long[]  {remoteMs, batchMs});
+        printGraphConnectivity(DB_BATCH);
         assertCountsMatch("REMOTE", remoteCounts, "REMOTE_BATCH", batchCounts);
     }
 
@@ -161,15 +170,23 @@ class EmbeddedVsBatchIT {
 
         assertHasStatements(base, fixture);
 
+        long t0 = System.currentTimeMillis();
         Map<String, Long> remoteCounts = writeRemote(reSid(base, base.getSessionId() + "-r"));
+        long remoteMs = System.currentTimeMillis() - t0;
+
+        t0 = System.currentTimeMillis();
         Map<String, Long> batchCounts  = writeBatch (reSid(base, base.getSessionId() + "-b"));
+        long batchMs = System.currentTimeMillis() - t0;
 
         printTable("REMOTE vs REMOTE_BATCH | " + fixture.getFileName(),
                 "REMOTE", remoteCounts, "BATCH", batchCounts);
+        printTimings("ODS",
+                new String[]{"REMOTE", "REMOTE_BATCH"},
+                new long[]  {remoteMs, batchMs});
         assertCountsMatch("REMOTE", remoteCounts, "REMOTE_BATCH", batchCounts);
     }
 
-    // ─── Test 3: EMBEDDED vs REMOTE_BATCH — эталонное сравнение ─────────────
+    // ─── Test 3: EMBEDDED vs REMOTE vs REMOTE_BATCH — 3-way timing ──────────
 
     @Test
     void embeddedAndBatchProduceSameCounts() throws Exception {
@@ -178,11 +195,24 @@ class EmbeddedVsBatchIT {
 
         assertHasStatements(base, fixture);
 
+        long t0 = System.currentTimeMillis();
         Map<String, Long> embeddedCounts = writeEmbedded(base);
-        Map<String, Long> batchCounts    = writeBatch(reSid(base, base.getSessionId() + "-b"));
+        long embMs = System.currentTimeMillis() - t0;
+
+        t0 = System.currentTimeMillis();
+        Map<String, Long> remoteCounts = writeRemote(reSid(base, base.getSessionId() + "-r"));
+        long remoteMs = System.currentTimeMillis() - t0;
+
+        t0 = System.currentTimeMillis();
+        Map<String, Long> batchCounts   = writeBatch(reSid(base, base.getSessionId() + "-b"));
+        long batchMs = System.currentTimeMillis() - t0;
 
         printTable("EMBEDDED vs REMOTE_BATCH | " + fixture.getFileName(),
                 "EMBEDDED", embeddedCounts, "BATCH", batchCounts);
+        printTimings("3-way DWH2",
+                new String[]{"EMBEDDED", "REMOTE", "REMOTE_BATCH"},
+                new long[]  {embMs,      remoteMs, batchMs});
+        printGraphConnectivity(DB_BATCH);
         assertCountsMatch("EMBEDDED", embeddedCounts, "REMOTE_BATCH", batchCounts);
     }
 
@@ -413,6 +443,38 @@ class EmbeddedVsBatchIT {
         assertNotNull(r.getStructure(), "Structure is null for " + f);
         assertFalse(r.getStructure().getStatements().isEmpty(),
                 "No statements parsed in " + f.getFileName());
+    }
+
+    private static void printTimings(String label, String[] modes, long[] ms) {
+        System.out.println("\n=== Timing: " + label + " ===");
+        for (int i = 0; i < modes.length; i++)
+            System.out.printf("  %-20s %5d ms%n", modes[i] + ":", ms[i]);
+        if (modes.length > 1 && ms[0] > 0)
+            for (int i = 1; i < modes.length; i++)
+                System.out.printf("  %s / %s = %.2fx%n", modes[i], modes[0], (double) ms[i] / ms[0]);
+    }
+
+    /**
+     * Проверяет связность графа через SQL-обход (out/in edge-функции ArcadeDB).
+     * Только вывод — не проваливает тест.
+     */
+    private static void printGraphConnectivity(String dbName) throws Exception {
+        System.out.println("\n--- Graph connectivity [" + dbName + "] ---");
+        long stmtsTotal    = scalarRemote(dbName, "SELECT count(*) AS cnt FROM DaliStatement");
+        long stmtsLinked   = scalarRemote(dbName,
+            "SELECT count(*) AS cnt FROM DaliStatement WHERE in('CONTAINS_STMT').size() > 0");
+        long tablesTotal   = scalarRemote(dbName, "SELECT count(*) AS cnt FROM DaliTable");
+        long tablesWithCol = scalarRemote(dbName,
+            "SELECT count(*) AS cnt FROM DaliTable WHERE out('HAS_COLUMN').size() > 0");
+        long schemasWithTables = scalarRemote(dbName,
+            "SELECT count(*) AS cnt FROM DaliSchema WHERE out('CONTAINS_TABLE').size() > 0");
+        long colsWithTable = scalarRemote(dbName,
+            "SELECT count(*) AS cnt FROM DaliColumn WHERE in('HAS_COLUMN').size() > 0");
+
+        System.out.printf("  DaliStatement  linked/total : %d / %d%n", stmtsLinked, stmtsTotal);
+        System.out.printf("  DaliTable      with columns : %d / %d%n", tablesWithCol, tablesTotal);
+        System.out.printf("  DaliSchema     with tables  : %d%n", schemasWithTables);
+        System.out.printf("  DaliColumn     in HAS_COLUMN: %d / %d%n", colsWithTable, tablesTotal > 0 ? scalarRemote(dbName, "SELECT count(*) AS cnt FROM DaliColumn") : 0);
     }
 
     // ─── HTTP helpers ────────────────────────────────────────────────────────
