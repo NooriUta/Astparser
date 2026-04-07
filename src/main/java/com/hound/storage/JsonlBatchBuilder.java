@@ -22,11 +22,13 @@ import java.util.*;
 public class JsonlBatchBuilder {
 
     private final StringBuilder vertices = new StringBuilder(64 * 1024);
+    private final StringBuilder edges    = new StringBuilder(32 * 1024);
     private int vertexCount;
     private int edgeCount;
     /**
      * Tracks all vertex @id values added to this batch.
-     * Used at build() time to resolve edge endpoints.
+     * appendEdge() guards against referencing vertices not in this batch,
+     * which would cause ArcadeDB batch endpoint to reject with "Unknown temporary ID".
      */
     private final Set<String> vertexIds = new HashSet<>();
 
@@ -34,14 +36,9 @@ public class JsonlBatchBuilder {
      * Canonical object RIDs: geoid → actual DB RID (e.g. "#15:3").
      * Used in namespace/pool mode when canonical vertices (DaliSchema, DaliTable, DaliColumn)
      * are pre-inserted via REMOTE rcmd() and not included in the batch payload.
+     * appendEdge() uses these RIDs directly in @from/@to when an endpoint is not in vertexIds.
      */
     private Map<String, String> canonicalRids = new HashMap<>();
-
-    /**
-     * Pending edges buffered until build() — resolution is deferred so that vertices
-     * registered after appendEdge() are still found (builder pattern: order-independent).
-     */
-    private final List<Object[]> pendingEdges = new ArrayList<>();
 
     // ═══════════════════════════════════════════════════════════════
     // Public API
@@ -49,6 +46,7 @@ public class JsonlBatchBuilder {
 
     /**
      * Adds a vertex line. Skips silently if extId was already added (deduplication).
+     * saveRemote() uses UPSERT; batch mode must deduplicate manually to avoid duplicate vertices.
      */
     public void appendVertex(String type, String extId, Map<String, Object> props) {
         if (extId != null && !vertexIds.add(extId)) return; // already added
@@ -57,21 +55,32 @@ public class JsonlBatchBuilder {
     }
 
     /**
-     * Adds a document line (DaliSnippet, DaliResolutionLog, DaliSchemaLog).
-     * Documents have no @id and appear before edges in the payload.
+     * Document types (DaliSnippet, DaliResolutionLog, DaliSchemaLog) are skipped in batch mode:
+     * ArcadeDB /api/v1/batch only accepts "vertex" and "edge" @type values.
+     * These types have no edges and are diagnostic-only, so graph integrity is unaffected.
      */
     public void appendDocument(String type, Map<String, Object> props) {
-        vertices.append(toJsonLine("document", type, null, null, null, props)).append('\n');
+        // no-op: batch endpoint rejects @type "document"
     }
 
     /**
-     * Buffers an edge for deferred resolution at build() time.
-     * Resolution is deferred so vertices registered after this call are still found.
-     * Skipped at build() if either endpoint cannot be resolved.
+     * Adds an edge line. Skipped if either endpoint is null or not resolvable —
+     * ArcadeDB batch endpoint rejects edges referencing unknown temporary IDs.
+     *
+     * <p>Resolution order for each endpoint:
+     * <ol>
+     *   <li>If the geoid is in {@code vertexIds}: use it as a batch-local temporary ID.
+     *   <li>If the geoid is in {@code canonicalRids}: use the actual DB RID (e.g. {@code #15:3}).
+     *   <li>Otherwise: skip the edge.
+     * </ol>
      */
     public void appendEdge(String edgeType, String fromExtId, String toExtId, Map<String, Object> props) {
         if (fromExtId == null || toExtId == null) return;
-        pendingEdges.add(new Object[]{edgeType, fromExtId, toExtId, props});
+        String resolvedFrom = resolveEndpoint(fromExtId);
+        String resolvedTo   = resolveEndpoint(toExtId);
+        if (resolvedFrom == null || resolvedTo == null) return;
+        edges.append(toJsonLine("edge", edgeType, null, resolvedFrom, resolvedTo, props)).append('\n');
+        edgeCount++;
     }
 
     /**
@@ -80,22 +89,16 @@ public class JsonlBatchBuilder {
      */
     private String resolveEndpoint(String geoid) {
         if (vertexIds.contains(geoid)) return geoid;
-        return canonicalRids.get(geoid);
+        String rid = canonicalRids.get(geoid);
+        return rid; // null if not found in either map
     }
 
-    /** Builds final payload: all vertices/documents then all resolvable edges (NDJSON). */
-    @SuppressWarnings("unchecked")
+    /** Builds final payload: all vertices then all edges (NDJSON). */
     public String build() {
-        StringBuilder edgesSb = new StringBuilder(pendingEdges.size() * 128);
-        for (Object[] e : pendingEdges) {
-            String resolvedFrom = resolveEndpoint((String) e[1]);
-            String resolvedTo   = resolveEndpoint((String) e[2]);
-            if (resolvedFrom == null || resolvedTo == null) continue;
-            edgesSb.append(toJsonLine("edge", (String) e[0], null,
-                    resolvedFrom, resolvedTo, (Map<String, Object>) e[3])).append('\n');
-            edgeCount++;
-        }
-        return vertices.toString() + edgesSb;
+        StringBuilder sb = new StringBuilder(vertices.length() + edges.length());
+        sb.append(vertices);
+        sb.append(edges);
+        return sb.toString();
     }
 
     public int vertexCount() { return vertexCount; }
