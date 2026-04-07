@@ -48,7 +48,7 @@ import org.slf4j.LoggerFactory;
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    static final int SCHEMA_VERSION = 21;
+    static final int SCHEMA_VERSION = 22;
 
     private static final String FT_ANALYZER =
             "org.apache.lucene.analysis.core.KeywordAnalyzer";
@@ -119,6 +119,8 @@ public final class SchemaInitializer {
 
         // ── Document types ──
         if (!schema.existsType("DaliSnippet"))        schema.createDocumentType("DaliSnippet");
+        // v22: DaliSnippetScript — full raw SQL text of the parsed file, one record per session.
+        if (!schema.existsType("DaliSnippetScript"))  schema.createDocumentType("DaliSnippetScript");
         if (!schema.existsType("DaliPerfStats"))      schema.createDocumentType("DaliPerfStats");
         if (!schema.existsType("DaliResolutionLog"))  schema.createDocumentType("DaliResolutionLog");
         if (!schema.existsType("DaliSchemaLog"))      schema.createDocumentType("DaliSchemaLog");
@@ -193,10 +195,19 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliAffectedColumn", "source_type");
         declareStr(schema, "DaliAffectedColumn", "resolution_status");
         declareStr(schema, "DaliAffectedColumn", "type_affect");
-        // DaliSnippet
-        declareStr(schema, "DaliSnippet",     "stmt_geoid");
-        declareStr(schema, "DaliSnippet",     "session_id");
-        declareStr(schema, "DaliSnippet",     "snippet");
+        // DaliSnippet — per-statement SQL text with line range (v22: +line_start, +line_end)
+        declareStr(schema, "DaliSnippet",          "stmt_geoid");
+        declareStr(schema, "DaliSnippet",          "session_id");
+        declareStr(schema, "DaliSnippet",          "snippet");
+        declareProp(schema, "DaliSnippet",         "line_start", com.arcadedb.schema.Type.INTEGER);
+        declareProp(schema, "DaliSnippet",         "line_end",   com.arcadedb.schema.Type.INTEGER);
+        // DaliSnippetScript — full raw file text, one record per session (v22)
+        declareStr(schema, "DaliSnippetScript",    "session_id");
+        declareStr(schema, "DaliSnippetScript",    "file_path");
+        declareStr(schema, "DaliSnippetScript",    "script");
+        declareProp(schema, "DaliSnippetScript",   "script_hash",  com.arcadedb.schema.Type.STRING);
+        declareProp(schema, "DaliSnippetScript",   "line_count",   com.arcadedb.schema.Type.INTEGER);
+        declareProp(schema, "DaliSnippetScript",   "char_count",   com.arcadedb.schema.Type.INTEGER);
 
         // ── UNIQUE_HASH indexes (canonical deduplication) ──
         idx(db, "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_geoid) UNIQUE_HASH NULL_STRATEGY SKIP");
@@ -230,7 +241,8 @@ public final class SchemaInitializer {
         ft(db, schema, "DaliParameter",    "param_name");
         ft(db, schema, "DaliVariable",     "var_name");
         ft(db, schema, "DaliOutputColumn", "name");
-        ft(db, schema, "DaliSnippet",      "snippet");   // full SQL text search
+        ft(db, schema, "DaliSnippet",         "snippet");        // per-statement SQL text search
+        ft(db, schema, "DaliSnippetScript",   "script");         // full file text search
 
         // ── Meta version ──
         if (!schema.existsType("DaliMeta")) schema.createDocumentType("DaliMeta");
@@ -302,10 +314,22 @@ public final class SchemaInitializer {
 
                 // Document types
                 "CREATE DOCUMENT TYPE DaliSnippet IF NOT EXISTS",
+                // v22: full raw file text per session
+                "CREATE DOCUMENT TYPE DaliSnippetScript IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliPerfStats IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliResolutionLog IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliSchemaLog IF NOT EXISTS",
                 "CREATE DOCUMENT TYPE DaliMeta IF NOT EXISTS",
+                // v22: DaliSnippet line range + DaliSnippetScript properties
+                "CREATE PROPERTY DaliSnippet.line_start IF NOT EXISTS INTEGER",
+                "CREATE PROPERTY DaliSnippet.line_end IF NOT EXISTS INTEGER",
+                "CREATE PROPERTY DaliSnippetScript.session_id IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSnippetScript.file_path IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSnippetScript.script IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSnippetScript.script_hash IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliSnippetScript.line_count IF NOT EXISTS INTEGER",
+                "CREATE PROPERTY DaliSnippetScript.char_count IF NOT EXISTS INTEGER",
+                "CREATE INDEX IF NOT EXISTS ON DaliSnippetScript (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
 
                 // Properties
                 "CREATE PROPERTY DaliApplication.app_geoid IF NOT EXISTS STRING",
@@ -410,6 +434,7 @@ public final class SchemaInitializer {
                 "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT" + FT_METADATA,
                 "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) FULL_TEXT" + FT_METADATA,
                 "CREATE INDEX IF NOT EXISTS ON DaliSnippet (snippet) FULL_TEXT" + FT_METADATA,
+                "CREATE INDEX IF NOT EXISTS ON DaliSnippetScript (script) FULL_TEXT" + FT_METADATA,
         };
     }
 
@@ -433,10 +458,15 @@ public final class SchemaInitializer {
     }
 
     private static void declareStr(Schema schema, String typeName, String propName) {
+        declareProp(schema, typeName, propName, com.arcadedb.schema.Type.STRING);
+    }
+
+    private static void declareProp(Schema schema, String typeName, String propName,
+                                    com.arcadedb.schema.Type type) {
         if (!schema.existsType(typeName)) return;
         var t = schema.getType(typeName);
         if (!t.existsProperty(propName))
-            t.createProperty(propName, com.arcadedb.schema.Type.STRING);
+            t.createProperty(propName, type);
     }
 
     private static void idx(Database db, String sql) {

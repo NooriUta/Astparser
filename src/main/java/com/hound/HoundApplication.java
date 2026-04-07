@@ -385,7 +385,7 @@ public class HoundApplication {
                 file.toString(),
                 config.language,
                 parseWalkResolveMs
-        );
+        ).withRawScript(sql);
 
         return new AnalysisResult(file, result, timer);
     }
@@ -420,7 +420,7 @@ public class HoundApplication {
                 file.toString(),
                 config.language,
                 parseWalkResolveMs
-        );
+        ).withRawScript(sql);
 
         if (writer != null) {
             // Ad-hoc mode: single file, no database namespace (pool=null, dbName=null)

@@ -23,9 +23,9 @@ import java.util.*;
 public class ArcadeDBSemanticWriter implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(ArcadeDBSemanticWriter.class);
-    // DaliSnippet full-text cap: prevents pathological cases (e.g. 500KB anonymous blocks).
-    // DaliStatement vertex no longer carries snippet inline — full text lives in DaliSnippet document.
-    private static final int SNIPPET_MAX = 4000;
+    // DaliSnippet: no truncation — full statement text stored as-is.
+    // DaliStatement vertex does not carry snippet inline; full text lives in DaliSnippet document.
+    private static final int SNIPPET_MAX = Integer.MAX_VALUE;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private Database embeddedDb;
@@ -672,6 +672,33 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                         .save();
                 stV.put(e.getKey(), v);
                 sessionV.newEdge("BELONGS_TO_SESSION", v, true);
+
+                // DaliSnippet — per-statement full SQL text + line range (v22: +line_start/line_end)
+                String snip = truncate(s.getSnippet(), SNIPPET_MAX);
+                if (snip != null) {
+                    embeddedDb.newDocument("DaliSnippet")
+                            .set("session_id",   sid)
+                            .set("stmt_geoid",   e.getKey())
+                            .set("snippet",      snip)
+                            .set("snippet_hash", md5(snip))
+                            .set("line_start",   s.getLineStart())
+                            .set("line_end",     s.getLineEnd())
+                            .save();
+                }
+            }
+
+            // DaliSnippetScript — full raw file text (v22), one record per session
+            String rawScript = result.getRawScript();
+            if (rawScript != null && !rawScript.isBlank()) {
+                int lineCount = (int) rawScript.lines().count();
+                embeddedDb.newDocument("DaliSnippetScript")
+                        .set("session_id",  sid)
+                        .set("file_path",   result.getFilePath())
+                        .set("script",      rawScript)
+                        .set("script_hash", md5(rawScript))
+                        .set("line_count",  lineCount)
+                        .set("char_count",  rawScript.length())
+                        .save();
             }
 
             // H1.5/H1.6: output-column lookup map, keyed by "stmtGeoid:col_order"
@@ -1040,6 +1067,15 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         rcmd("INSERT INTO DaliSession SET session_id=?, db_name=?, file_path=?, dialect=?, processing_time_ms=?, created_at=?",
                 sid, dbName, result.getFilePath(), result.getDialect(), result.getProcessingTimeMs(), System.currentTimeMillis());
 
+        // DaliSnippetScript — full raw file text, one record per session (v22)
+        String rawScriptRemote = result.getRawScript();
+        if (rawScriptRemote != null && !rawScriptRemote.isBlank()) {
+            int lineCountR = (int) rawScriptRemote.lines().count();
+            rcmd("INSERT INTO DaliSnippetScript SET session_id=?, file_path=?, script=?, script_hash=?, line_count=?, char_count=?",
+                    sid, result.getFilePath(), rawScriptRemote, md5(rawScriptRemote),
+                    lineCountR, rawScriptRemote.length());
+        }
+
         // ── DaliDatabase: skip per-session references in namespace mode ──
         // In namespace mode the canonical DaliDatabase was created by ensureCanonicalPool();
         // SQL-text DB references (str.getDatabases()) are omitted to avoid duplication.
@@ -1218,8 +1254,9 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
         for (var e : str.getStatements().entrySet()) {
             String raw = truncate(e.getValue().getSnippet(), SNIPPET_MAX);
             if (raw == null) continue;
-            rcmd("INSERT INTO DaliSnippet SET session_id=?, stmt_geoid=?, snippet=?, snippet_hash=?",
-                    sid, e.getKey(), raw, md5(raw));
+            rcmd("INSERT INTO DaliSnippet SET session_id=?, stmt_geoid=?, snippet=?, snippet_hash=?, line_start=?, line_end=?",
+                    sid, e.getKey(), raw, md5(raw),
+                    e.getValue().getLineStart(), e.getValue().getLineEnd());
         }
 
         for (var e : str.getStatements().entrySet()) {
@@ -2155,7 +2192,7 @@ public class ArcadeDBSemanticWriter implements AutoCloseable {
                 "DaliApplication"   // v8: root of namespace hierarchy
         };
         String[] docTypes = {
-                "DaliSnippet","DaliResolutionLog","DaliSchemaLog"
+                "DaliSnippet","DaliSnippetScript","DaliResolutionLog","DaliSchemaLog"
                 // DaliPerfStats intentionally excluded — preserved across cleanAll() for stats review
         };
 
