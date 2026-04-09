@@ -268,6 +268,25 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void enterSelect_statement(PlSqlParser.Select_statementContext ctx) {
+        // Python behavior: when a select_statement is the direct body of a parent scope
+        // (e.g. DINAMIC_CURSOR: FOR rec IN (SELECT ...) LOOP), isFirstSubq is set to
+        // this select's start position by the parent's enter handler (enterLoop_statement).
+        // In that case, do NOT push a new SELECT scope — atoms register to the parent.
+        Integer firstLine = base.getIsFirstSubq();
+        Integer firstCol  = base.getIsFirstSubqp();
+        int ctxLine = ctx.start.getLine();
+        int ctxCol  = ctx.start.getCharPositionInLine();
+        if (firstLine != null && firstLine == ctxLine && firstCol != null && firstCol == ctxCol) {
+            suppressedSelects.add(ctx);
+            // Advance isFirstSubq to the inner subquery so enterSubquery also skips.
+            if (ctx.select_only_statement() != null && ctx.select_only_statement().subquery() != null) {
+                var sq = ctx.select_only_statement().subquery();
+                base.setIsFirstSubq(sq.start.getLine());
+                base.setIsFirstSubqp(sq.start.getCharPositionInLine());
+            }
+            return;
+        }
+
         // STAB-13 Part B: if this SELECT is in a FROM position (inline subquery FROM (SELECT...) alias),
         // pass the alias so it gets registered on the parent scope for alias resolution.
         // Also handles MERGE USING (SELECT ...) alias — grammar: selected_tableview → '(' select_statement ')'
@@ -293,6 +312,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
 
     @Override
     public void exitSelect_statement(PlSqlParser.Select_statementContext ctx) {
+        if (suppressedSelects.remove(ctx)) return; // scope was suppressed — no pop needed
         base.onStatementExit();
     }
 
@@ -347,7 +367,7 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
      *
      * Registers the left-hand column(s) as UPDATE affected columns (with poliage_update),
      * then sets in_update_set_expr=true so atoms in the right-hand expression get
-     * parent_context="UPDATE_EXPR" and do NOT receive a duplicate poliage_update.
+     * parent_context="SET_EXPR" and do NOT receive a duplicate poliage_update.
      * The flag is cleared at exit.
      */
     @Override
@@ -562,6 +582,13 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     private Integer savedFirstSubqLine;
     private Integer savedFirstSubqCol;
 
+    /**
+     * select_statement contexts whose scope push was suppressed because they are
+     * the direct body of a parent scope (DINAMIC_CURSOR).
+     * exitSelect_statement checks this set and skips the corresponding pop.
+     */
+    private final Set<PlSqlParser.Select_statementContext> suppressedSelects = new HashSet<>();
+
     @Override
     public void enterWith_clause(PlSqlParser.With_clauseContext ctx) {
         savedFirstSubqLine = base.getIsFirstSubq();
@@ -589,9 +616,17 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         if (cteName == null || cteName.isBlank()) return;
         base.setSubqueryAlias(cteName.toUpperCase());
         base.onCTEEnter(extract(ctx), getStartLine(ctx), getEndLine(ctx));
-        // Clear first-subquery marker so the CTE body is processed (not skipped)
-        base.setIsFirstSubq(null);
-        base.setIsFirstSubqp(null);
+        // Python behavior: the first (only) subquery inside a CTE IS the CTE body —
+        // it must NOT push a separate SUBQUERY scope. Set isFirstSubq to the inner
+        // subquery's position so that enterSubquery recognises and skips the push.
+        // Grammar: subquery_factoring_clause → ... AS '(' subquery ... ')'
+        if (ctx.subquery() != null && ctx.subquery().start != null) {
+            base.setIsFirstSubq(ctx.subquery().start.getLine());
+            base.setIsFirstSubqp(ctx.subquery().start.getCharPositionInLine());
+        } else {
+            base.setIsFirstSubq(null);
+            base.setIsFirstSubqp(null);
+        }
     }
 
     @Override
@@ -636,6 +671,33 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
         String stmtType = base.currentStatementType();
         if ("SUBQUERY".equals(stmtType) || "USUBQUERY".equals(stmtType)) {
             base.onSubqueryExit();
+        }
+    }
+
+    // =========================================================================
+    // UNION / INTERSECT / MINUS branches
+    //
+    // Grammar: subquery = subquery_basic_elements subquery_operation_part*
+    //          subquery_operation_part = (UNION ALL? | INTERSECT | MINUS) subquery_basic_elements
+    //
+    // Python analogue: enterSubquery_operation_part → _init_statement('UIM_SUBQ')
+    //                  exitSubquery_operation_part  → _exit_statement()
+    //
+    // Each branch beyond the first gets its own USUBQUERY scope so that atoms,
+    // output columns and source tables are isolated per branch rather than
+    // collapsed into the parent SUBQUERY scope.
+    // =========================================================================
+
+    @Override
+    public void enterSubquery_operation_part(PlSqlParser.Subquery_operation_partContext ctx) {
+        if (ctx == null) return;
+        base.onStatementEnter("USUBQUERY", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitSubquery_operation_part(PlSqlParser.Subquery_operation_partContext ctx) {
+        if ("USUBQUERY".equals(base.currentStatementType())) {
+            base.onStatementExit();
         }
     }
 

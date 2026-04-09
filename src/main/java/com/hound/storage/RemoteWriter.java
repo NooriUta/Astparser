@@ -471,17 +471,27 @@ class RemoteWriter {
             for (var at : atoms.entrySet()) {
                 Map<String, Object> a = at.getValue();
                 String atomId = md5(stmtGeoid + ":" + at.getKey());
+                // Detect "Не связано" for column-reference atoms whose DaliColumn is absent from schema
+                String atomColForWarn = (String) a.get("column_name");
+                String atomTblForWarn = (String) a.get("table_geoid");
+                boolean isColRefRw = Boolean.TRUE.equals(a.get("is_column_reference"));
+                if (a.get("warning") == null && "Обработано".equals(a.get("status"))
+                        && isColRefRw && atomTblForWarn != null && atomColForWarn != null
+                        && !str.getColumns().containsKey(atomTblForWarn + "." + atomColForWarn.toUpperCase())) {
+                    a.put("warning", "Не связано");
+                }
+
                 rcmd("INSERT INTO DaliAtom SET session_id=?, statement_geoid=?, atom_id=?, atom_text=?, " +
                         "atom_context=?, parent_context=?, position=?, sposition=?, " +
                         "is_complex=?, is_column_reference=?, is_function_call=?, is_constant=?, " +
                         "is_routine_param=?, is_routine_var=?, table_name=?, column_name=?, " +
-                        "table_geoid=?, status=?, output_column_sequence=?, nested_atoms_count=?",
+                        "table_geoid=?, status=?, warning=?, output_column_sequence=?, nested_atoms_count=?",
                     sid, stmtGeoid, atomId, at.getKey(),
                     a.get("atom_context"), a.get("parent_context"), a.get("position"), a.get("sposition"),
                     a.get("is_complex"), a.get("is_column_reference"), a.get("is_function_call"),
                     a.get("is_constant"), a.get("is_routine_param"), a.get("is_routine_var"),
                     a.get("table_name"), a.get("column_name"),
-                    a.get("table_geoid"), a.get("status"),
+                    a.get("table_geoid"), a.get("status"), a.get("warning"),
                     a.get("output_column_sequence"), a.get("nested_atoms_count"));
             }
         }
@@ -594,13 +604,21 @@ class RemoteWriter {
         for (var e : str.getStatements().entrySet()) {
             String stmtRid = rid.statements.get(e.getKey());
             if (stmtRid == null) continue;
-            for (String tg : e.getValue().getSourceTables().keySet()) {
-                String toRid = rid.tables.get(tg);
-                if (toRid != null) edgeByRid("READS_FROM", stmtRid, toRid, sid);
+            for (var st : e.getValue().getSourceTables().entrySet()) {
+                String toRid = rid.tables.get(st.getKey());
+                if (toRid == null) continue;
+                @SuppressWarnings("unchecked")
+                List<String> stAliases = st.getValue().get("table_alias") instanceof List
+                        ? (List<String>) st.getValue().get("table_alias") : List.of();
+                edgeByRid("READS_FROM", stmtRid, toRid, sid, "aliases", new ArrayList<>(stAliases));
             }
-            for (String tg : e.getValue().getTargetTables().keySet()) {
-                String toRid = rid.tables.get(tg);
-                if (toRid != null) edgeByRid("WRITES_TO", stmtRid, toRid, sid);
+            for (var tt : e.getValue().getTargetTables().entrySet()) {
+                String toRid = rid.tables.get(tt.getKey());
+                if (toRid == null) continue;
+                @SuppressWarnings("unchecked")
+                List<String> ttAliases = tt.getValue().get("table_alias") instanceof List
+                        ? (List<String>) tt.getValue().get("table_alias") : List.of();
+                edgeByRid("WRITES_TO", stmtRid, toRid, sid, "aliases", new ArrayList<>(ttAliases));
             }
         }
 
@@ -688,6 +706,12 @@ class RemoteWriter {
                 if (outSeq != null && atomRid != null) {
                     String ocRid = rid.ocByOrder.get(stmtGeoid + ":" + outSeq);
                     if (ocRid != null) edgeByRid("ATOM_PRODUCES", atomRid, ocRid, sid);
+                }
+                // ATOM_PRODUCES for DML target (UPDATE SET / MERGE / INSERT)
+                String dmlTargetRefProd = (String) a.get("dml_target_ref");
+                if (dmlTargetRefProd != null && atomRid != null) {
+                    String acRidProd = rid.affCols.get(stmtGeoid + ":" + dmlTargetRefProd);
+                    if (acRidProd != null) edgeByRid("ATOM_PRODUCES", atomRid, acRidProd, sid);
                 }
                 if ("Обработано".equals(a.get("status")) && outSeq != null && tableGeoid != null && atomRid != null) {
                     String colName = (String) a.get("column_name");
@@ -958,6 +982,15 @@ class RemoteWriter {
         logger.debug("Batch payload: {} vertices, {} edges, {} bytes",
                 builder.vertexCount(), builder.edgeCount(), payload.length());
         client.send(payload, sid);
+
+        // Post-batch: DaliSnippet (document type — batch endpoint rejects @type "document")
+        for (var e : str.getStatements().entrySet()) {
+            String raw = truncate(e.getValue().getSnippet(), SNIPPET_MAX);
+            if (raw == null) continue;
+            rcmd("INSERT INTO DaliSnippet SET session_id=?, stmt_geoid=?, snippet=?, snippet_hash=?, line_start=?, line_end=?",
+                    sid, e.getKey(), raw, md5(raw),
+                    e.getValue().getLineStart(), e.getValue().getLineEnd());
+        }
 
         timer.stop("write.batch");
         logger.info("ArcadeDB REMOTE_BATCH: sid={} db={} V:{} E:{} raw:{}b [{}]",

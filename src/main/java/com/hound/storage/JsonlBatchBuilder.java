@@ -337,6 +337,17 @@ public class JsonlBatchBuilder {
                 Map<String, Object> a = at.getValue();
                 String atomId = md5(stmtGeoid + ":" + at.getKey());
                 atomIdMap.put(stmtGeoid + ":" + at.getKey(), atomId);
+                // Detect "Не связано" for column-reference atoms whose DaliColumn is absent from schema
+                String atomColForWarn1 = (String) a.get("column_name");
+                String atomTblForWarn1 = (String) a.get("table_geoid");
+                boolean isColRef1 = Boolean.TRUE.equals(a.get("is_column_reference"));
+                String atomWarning1 = (String) a.get("warning");
+                if (atomWarning1 == null && "Обработано".equals(a.get("status"))
+                        && isColRef1 && atomTblForWarn1 != null && atomColForWarn1 != null
+                        && !str.getColumns().containsKey(atomTblForWarn1 + "." + atomColForWarn1.toUpperCase())) {
+                    atomWarning1 = "Не связано";
+                }
+
                 b.appendVertex("DaliAtom", atomId, mapOf(
                         "session_id", sid,
                         "statement_geoid", stmtGeoid,
@@ -356,6 +367,7 @@ public class JsonlBatchBuilder {
                         "column_name", a.get("column_name"),
                         "table_geoid", a.get("table_geoid"),
                         "status", a.get("status"),
+                        "warning", atomWarning1,
                         "output_column_sequence", a.get("output_column_sequence"),
                         "nested_atoms_count", a.get("nested_atoms_count")
                 ));
@@ -541,10 +553,22 @@ public class JsonlBatchBuilder {
 
         // Usage: READS_FROM, WRITES_TO
         for (var e : str.getStatements().entrySet()) {
-            for (String tg : e.getValue().getSourceTables().keySet())
-                b.appendEdge("READS_FROM", e.getKey(), tg, sidProps);
-            for (String tg : e.getValue().getTargetTables().keySet())
-                b.appendEdge("WRITES_TO", e.getKey(), tg, sidProps);
+            for (var st : e.getValue().getSourceTables().entrySet()) {
+                @SuppressWarnings("unchecked")
+                List<String> stAl = st.getValue().get("table_alias") instanceof List
+                        ? (List<String>) st.getValue().get("table_alias") : List.of();
+                Map<String, Object> rfProps = new java.util.HashMap<>(sidProps);
+                rfProps.put("aliases", new ArrayList<>(stAl));
+                b.appendEdge("READS_FROM", e.getKey(), st.getKey(), rfProps);
+            }
+            for (var tt : e.getValue().getTargetTables().entrySet()) {
+                @SuppressWarnings("unchecked")
+                List<String> ttAl = tt.getValue().get("table_alias") instanceof List
+                        ? (List<String>) tt.getValue().get("table_alias") : List.of();
+                Map<String, Object> wtProps = new java.util.HashMap<>(sidProps);
+                wtProps.put("aliases", new ArrayList<>(ttAl));
+                b.appendEdge("WRITES_TO", e.getKey(), tt.getKey(), wtProps);
+            }
         }
 
         // Usage: USES_SUBQUERY
@@ -637,6 +661,13 @@ public class JsonlBatchBuilder {
                     String ocExtId = ocByOrder.get(stmtGeoid + ":" + outSeq);
                     if (ocExtId != null)
                         b.appendEdge("ATOM_PRODUCES", atomId, ocExtId, sidProps);
+                }
+                // ATOM_PRODUCES: atom → affected column (DML target)
+                String dmlTargetRefProd1 = (String) a.get("dml_target_ref");
+                if (dmlTargetRefProd1 != null) {
+                    String acExtId = affColByRef.get(stmtGeoid + ":" + dmlTargetRefProd1);
+                    if (acExtId != null)
+                        b.appendEdge("ATOM_PRODUCES", atomId, acExtId, sidProps);
                 }
 
                 // DATA_FLOW: column → output column (resolved atoms)
@@ -939,6 +970,17 @@ public class JsonlBatchBuilder {
                 Map<String, Object> a = at.getValue();
                 String atomId = md5(stmtGeoid + ":" + at.getKey());
                 atomIdMap.put(stmtGeoid + ":" + at.getKey(), atomId);
+                // Detect "Не связано" for column-reference atoms whose DaliColumn is absent from schema
+                String atomColForWarn2 = (String) a.get("column_name");
+                String atomTblForWarn2 = (String) a.get("table_geoid");
+                boolean isColRef2 = Boolean.TRUE.equals(a.get("is_column_reference"));
+                String atomWarning2 = (String) a.get("warning");
+                if (atomWarning2 == null && "Обработано".equals(a.get("status"))
+                        && isColRef2 && atomTblForWarn2 != null && atomColForWarn2 != null
+                        && !str.getColumns().containsKey(atomTblForWarn2 + "." + atomColForWarn2.toUpperCase())) {
+                    atomWarning2 = "Не связано";
+                }
+
                 b.appendVertex("DaliAtom", atomId, mapOf(
                         "session_id", sid,
                         "statement_geoid", stmtGeoid,
@@ -958,6 +1000,7 @@ public class JsonlBatchBuilder {
                         "column_name", a.get("column_name"),
                         "table_geoid", a.get("table_geoid"),
                         "status", a.get("status"),
+                        "warning", atomWarning2,
                         "output_column_sequence", a.get("output_column_sequence"),
                         "nested_atoms_count", a.get("nested_atoms_count")
                 ));
@@ -1126,10 +1169,22 @@ public class JsonlBatchBuilder {
 
         // READS_FROM, WRITES_TO
         for (var e : str.getStatements().entrySet()) {
-            for (String tg : e.getValue().getSourceTables().keySet())
-                b.appendEdge("READS_FROM", e.getKey(), tg, sidProps);
-            for (String tg : e.getValue().getTargetTables().keySet())
-                b.appendEdge("WRITES_TO", e.getKey(), tg, sidProps);
+            for (var st : e.getValue().getSourceTables().entrySet()) {
+                @SuppressWarnings("unchecked")
+                List<String> stAl = st.getValue().get("table_alias") instanceof List
+                        ? (List<String>) st.getValue().get("table_alias") : List.of();
+                Map<String, Object> rfProps = new java.util.HashMap<>(sidProps);
+                rfProps.put("aliases", new ArrayList<>(stAl));
+                b.appendEdge("READS_FROM", e.getKey(), st.getKey(), rfProps);
+            }
+            for (var tt : e.getValue().getTargetTables().entrySet()) {
+                @SuppressWarnings("unchecked")
+                List<String> ttAl = tt.getValue().get("table_alias") instanceof List
+                        ? (List<String>) tt.getValue().get("table_alias") : List.of();
+                Map<String, Object> wtProps = new java.util.HashMap<>(sidProps);
+                wtProps.put("aliases", new ArrayList<>(ttAl));
+                b.appendEdge("WRITES_TO", e.getKey(), tt.getKey(), wtProps);
+            }
         }
 
         // USES_SUBQUERY
@@ -1217,6 +1272,13 @@ public class JsonlBatchBuilder {
                     String ocExtId = ocByOrder.get(stmtGeoid + ":" + outSeq);
                     if (ocExtId != null)
                         b.appendEdge("ATOM_PRODUCES", atomId, ocExtId, sidProps);
+                }
+                // ATOM_PRODUCES: atom → affected column (DML target)
+                String dmlTargetRefProd2 = (String) a.get("dml_target_ref");
+                if (dmlTargetRefProd2 != null) {
+                    String acExtId2 = affColByRef.get(stmtGeoid + ":" + dmlTargetRefProd2);
+                    if (acExtId2 != null)
+                        b.appendEdge("ATOM_PRODUCES", atomId, acExtId2, sidProps);
                 }
 
                 if ("Обработано".equals(a.get("status")) && outSeq != null) {

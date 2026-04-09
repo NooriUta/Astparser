@@ -168,7 +168,7 @@ public class ScopeContext {
     public String getActiveClause() {
         if (isInValuesClause)   return "VALUES";
         if (isInJoinContext)    return "JOIN";
-        if (isInUpdateSetExpr)  return "UPDATE_EXPR";
+        if (isInUpdateSetExpr)  return "SET_EXPR";
         if (isMergeInsertPart)  return "MERGE_INSERT";
         if (isMergeUpdatePart)  return "MERGE_UPDATE";
         return statementType != null ? statementType : "UNKNOWN";

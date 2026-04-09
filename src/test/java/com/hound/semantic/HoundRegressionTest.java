@@ -256,6 +256,69 @@ class HoundRegressionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // T7 — output-column and atom-sequence assertions
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * T7.1: Every fixture file must produce at least one output column across
+     * all its SELECT statements.  A fixture with zero output columns indicates
+     * that the SELECT-list listener is not firing.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("testFiles")
+    void outputColumns_nonEmpty(Path file) throws IOException {
+        UniversalSemanticEngine engine = parseFile(file);
+        long totalOutputCols = engine.getBuilder().getStatements().values().stream()
+                .mapToLong(s -> s.getColumnsOutput().size())
+                .sum();
+        assertTrue(totalOutputCols > 0,
+                file.getFileName() + ": expected > 0 output columns across all statements, got 0");
+    }
+
+    /**
+     * T7.2: Resolved column-reference atoms that belong to a SELECT statement
+     * must carry output_column_sequence (i.e. they are wired to an output column).
+     * Atoms in CTEs / SUBQUERYs or non-SELECT statements are excluded.
+     *
+     * This is a soft check: we assert that at least one resolved atom in at least
+     * one SELECT has output_column_sequence set — not that ALL atoms have it,
+     * because WHERE/HAVING atoms are intentionally excluded from output columns.
+     *
+     * Note: atoms live in AtomProcessor.atomsByStatement, not in StatementInfo.atoms.
+     * Use engine.getAtomProcessor().getAtomsForStatement(geoid) to access them.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("testFiles")
+    void resolvedAtoms_selectHasAtLeastOneWithOutputColumnSequence(Path file) throws IOException {
+        UniversalSemanticEngine engine = parseFile(file);
+
+        boolean found = false;
+        for (var e : engine.getBuilder().getStatements().entrySet()) {
+            StatementInfo s = e.getValue();
+            if (!"SELECT".equals(s.getType())) continue;
+            for (var atom : engine.getAtomProcessor().getAtomsForStatement(s.getGeoid()).values()) {
+                if ("Обработано".equals(atom.get("status"))
+                        && atom.get("output_column_sequence") != null) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
+        }
+
+        // Only assert if the file contains at least one SELECT with output columns —
+        // pure DML files (only INSERT/UPDATE/DELETE) are exempt.
+        boolean hasSelectWithOutputCols = engine.getBuilder().getStatements().values().stream()
+                .anyMatch(s -> "SELECT".equals(s.getType()) && !s.getColumnsOutput().isEmpty());
+
+        if (hasSelectWithOutputCols) {
+            assertTrue(found,
+                    file.getFileName() + ": file has SELECT statements with output columns but no "
+                            + "resolved atom carries output_column_sequence — DATA_FLOW wiring broken");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // S2.Q — summary (informational, non-blocking)
     // ═══════════════════════════════════════════════════════════════
 

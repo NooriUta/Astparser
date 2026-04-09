@@ -93,9 +93,22 @@ public class UniversalSemanticEngine {
 
             // B2.OC1 — diagnostics
             if (si != null) {
+                int directAtoms = atomProcessor.getAtomsForStatement(stmt).size();
                 logger.info("DIAG EXIT [{}] type={} outputCols={} atoms={}",
-                        stmt, si.getType(), si.getColumnsOutput().size(),
-                        atomProcessor.getAtomsForStatement(stmt).size());
+                        stmt, si.getType(), si.getColumnsOutput().size(), directAtoms);
+
+                // CTE-specific: atoms always live in the child SUBQUERY scope,
+                // not in the CTE wrapper itself. Log this clearly so it's not mistaken
+                // for a bug.
+                if ("CTE".equals(si.getType()) && directAtoms == 0) {
+                    int childAtomTotal = si.getChildStatements().stream()
+                            .mapToInt(child -> atomProcessor.getAtomsForStatement(child).size())
+                            .sum();
+                    logger.info("CTE SCOPE [{}]: 0 direct atoms — expected. Child scopes: {} atoms in {} child(ren) {}. "
+                            + "Atoms register to the innermost active scope (SUBQUERY inside CTE), not the CTE wrapper.",
+                            stmt, childAtomTotal, si.getChildStatements().size(),
+                            si.getChildStatements());
+                }
             }
 
             // 1. Resolve star subquery columns
@@ -676,7 +689,7 @@ public class UniversalSemanticEngine {
         scopeManager.setInValuesClause(val);
     }
 
-    /** Propagates UPDATE SET expression context to ScopeContext so atoms get parent_context="UPDATE_EXPR". */
+    /** Propagates UPDATE SET expression context to ScopeContext so atoms get parent_context="SET_EXPR". */
     public void setUpdateSetExpr(boolean val) {
         scopeManager.setInUpdateSetExpr(val);
     }

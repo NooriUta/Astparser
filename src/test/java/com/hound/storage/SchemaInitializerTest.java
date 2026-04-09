@@ -160,14 +160,52 @@ class SchemaInitializerTest {
     }
 
     @Test
-    @DisplayName("Schema version is 25")
-    void schemaVersionIsTwentyFive() {
+    @DisplayName("Schema version is 26")
+    void schemaVersionIsTwentySix() {
         SchemaInitializer.ensureSchema(db);
 
         ResultSet rs = db.query("sql", "SELECT schema_version FROM DaliMeta LIMIT 1");
         assertTrue(rs.hasNext(), "DaliMeta should have a record");
         int version = ((Number) rs.next().toMap().get("schema_version")).intValue();
-        assertEquals(25, version, "Schema version should be 25");
+        assertEquals(26, version, "Schema version should be 26");
+    }
+
+    @Test
+    @DisplayName("v26: only DaliSnippet(snippet) has a FULL_TEXT index; name fields use NOTUNIQUE LSM_TREE")
+    void fullTextOnlyOnSnippet() {
+        SchemaInitializer.ensureSchema(db);
+
+        var indexes = db.getSchema().getIndexes();
+
+        // 1. Only DaliSnippet(snippet) must be FULL_TEXT
+        for (var idx : indexes) {
+            if ("FULL_TEXT".equals(idx.getType().name())) {
+                assertEquals("DaliSnippet", idx.getTypeName(),
+                        "FULL_TEXT index found on unexpected type: " + idx.getTypeName()
+                        + " property: " + idx.getPropertyNames());
+                assertEquals("snippet", idx.getPropertyNames().get(0),
+                        "FULL_TEXT index on DaliSnippet must be on 'snippet', not: "
+                        + idx.getPropertyNames());
+            }
+        }
+
+        // 2. DaliSchema(schema_name) must be NOTUNIQUE (LSM_TREE), not FULL_TEXT
+        boolean hasLsmSchemaName = Arrays.stream(indexes)
+                .anyMatch(idx -> "DaliSchema".equals(idx.getTypeName())
+                        && idx.getPropertyNames() != null
+                        && idx.getPropertyNames().contains("schema_name")
+                        && !"FULL_TEXT".equals(idx.getType().name()));
+        assertTrue(hasLsmSchemaName,
+                "DaliSchema(schema_name) must have a non-FULL_TEXT index (NOTUNIQUE LSM_TREE)");
+
+        // 3. DaliAtom(atom_text) must also be NOTUNIQUE, not FULL_TEXT
+        boolean hasLsmAtomText = Arrays.stream(indexes)
+                .anyMatch(idx -> "DaliAtom".equals(idx.getTypeName())
+                        && idx.getPropertyNames() != null
+                        && idx.getPropertyNames().contains("atom_text")
+                        && !"FULL_TEXT".equals(idx.getType().name()));
+        assertTrue(hasLsmAtomText,
+                "DaliAtom(atom_text) must have a non-FULL_TEXT index (NOTUNIQUE LSM_TREE)");
     }
 
     @Test

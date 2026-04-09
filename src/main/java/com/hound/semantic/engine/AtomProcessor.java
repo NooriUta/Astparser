@@ -82,6 +82,8 @@ public class AtomProcessor {
         classifyAtom(atomData);
 
         stmtAtoms.put(atomKey, atomData);
+        logger.debug("ATOM REGISTER '{}' → stmt={} ctx={} line={}",
+                text, statementGeoid, parentContext, line);
     }
 
     /**
@@ -315,14 +317,24 @@ public class AtomProcessor {
 
                 resolved++;
                 logger.debug("Atom resolved: {} → table={}, column={}", entry.getKey(), tableGeoid, columnName);
+
+                // Routine variables / parameters cannot produce DATA_FLOW edges (no DaliColumn source).
+                // Mark them so the UI can surface the gap rather than silently showing no lineage.
+                boolean isVar   = Boolean.TRUE.equals(atomData.get("is_routine_var"));
+                boolean isParam = Boolean.TRUE.equals(atomData.get("is_routine_param"));
+                if ((isVar || isParam) && atomData.get("dml_target_ref") != null) {
+                    atomData.put("warning", "Не связано");
+                }
             } else {
                 failed++;
                 String parentCtx = (String) atomData.get("parent_context");
                 if ("SELECT".equals(parentCtx) || "INSERT".equals(parentCtx)
-                        || "UPDATE".equals(parentCtx) || "MERGE".equals(parentCtx)) {
+                        || "UPDATE".equals(parentCtx) || "MERGE".equals(parentCtx)
+                        || "SET_EXPR".equals(parentCtx)) {
                     logger.warn("Could not resolve atom: {} in context {}", entry.getKey(), parentCtx);
                 }
                 atomData.put("status", "unresolved");
+                atomData.put("warning", "Не разобрано");
                 if (resolution != null) {
                     atomData.put("resolution", resolution);
                 }
