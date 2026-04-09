@@ -22,7 +22,7 @@
 | **Scope** | Контекст разбора: текущий statement, его тип, alias-таблица, активный clause. |
 | **ScopeContext** | Один фрейм стека: хранит geoid, тип, флаги clause, локальные алиасы. |
 | **ScopeManager** | Стек `ScopeContext`'ов. Хранит историю вложенности. |
-| **Snippet** | Фрагмент исходного SQL-текста, сохранённый в узле AST. |
+| **Snippet** | Фрагмент исходного SQL-текста. В AST-узле — до 500 символов. В `StatementInfo` → `DaliSnippet`: EMBEDDED/REMOTE — полный текст (`SNIPPET_MAX = Integer.MAX_VALUE`); REMOTE_BATCH (JsonlBatchBuilder) — до 4000 символов (`SNIPPET_MAX = 4000`). |
 | **Source table** | Таблица, из которой данные читаются (FROM, JOIN, USING). |
 | **Target table** | Таблица, в которую данные пишутся (INSERT INTO, UPDATE, MERGE INTO). |
 | **TERMINAL** | Листовой узел AST: один токен (identifier, literal, operator). |
@@ -34,12 +34,16 @@
 
 ## Типы RelationType в LineageEdge
 
-| Тип | Когда используется |
-|-----|--------------------|
-| `DIRECT` | Прямая передача данных: `source.col → target.col` |
-| `AGGREGATE` | Агрегация: `SUM(col)`, `COUNT(*)`, `GROUP BY` |
-| `TRANSFORM` | Трансформация через функцию: `NVL(col, 0)`, `UPPER(name)` |
-| `JOIN` | Связь через JOIN ON-условие |
+| Тип | Генерируется | Когда используется |
+|-----|:-----------:|--------------------|
+| `DIRECT` | ✓ | Прямая передача данных: `source.col → target.col` через DML |
+| `JOIN` | ✓ | Связь через JOIN ON-условие (Column → Column) |
+| `AGGREGATE` | ✓ DATA_FLOW only | Агрегация в DATA_FLOW рёбрах (Column→OutputColumn) |
+| `TRANSFORM` | ✓ DataFlowProcessor only | Трансформация ф-цией в DATA_FLOW (только Arrow/Remote путь) |
+
+> `AGGREGATE` и `TRANSFORM` появляются только как `flow_type` рёбер **DATA_FLOW**
+> (Column→OutputColumn/AffectedColumn), а не в LineageEdge (Column→Column).
+> В LineageEdge генерируются только `DIRECT` и `JOIN`.
 
 ---
 
@@ -74,6 +78,32 @@
 | `CTE` | Common Table Expression |
 | `TEMP` | Временная таблица |
 | `TABLE_FUNCTION` | Табличная функция |
+
+---
+
+## Значения DaliAtom.status
+
+| Значение | Устанавливается | Семантика |
+|---------|----------------|-----------|
+| `null` | начальное | атом зарегистрирован, ещё не обработан |
+| `"constant"` | AtomProcessor | литерал: `42`, `'text'`, `NULL`, `TRUE` |
+| `"function_call"` | AtomProcessor | вызов функции: `SUM(...)`, `NVL(...)`, `TRUNC(...)` |
+| `"Обработано"` | resolvePendingColumns | column reference успешно разрешён к таблице |
+| `"unresolved"` | resolvePendingColumns | все 8 стратегий резолюции провалились |
+
+Подсчёт quality score: `("Обработано" + "constant" + "function_call") / total`.
+Только `"Обработано"` создаёт DATA_FLOW и lineage рёбра.
+
+## Значения DATA_FLOW.flow_type
+
+| flow_type | Путь генерации | Условие |
+|-----------|:--------------:|---------|
+| `DIRECT` | Embedded + DataFlowProcessor | SELECT без агрегации, или DELETE |
+| `AGGREGATE` | Embedded + DataFlowProcessor | `hasAggregation AND parent_context="GROUP BY"` |
+| `INSERT` | Embedded only | DML statement type = INSERT |
+| `UPDATE` | Embedded only | DML statement type = UPDATE |
+| `MERGE` | Embedded only | DML statement type = MERGE |
+| `TRANSFORM` | DataFlowProcessor only | `is_function_call = true` (только Arrow/Remote путь) |
 
 ---
 

@@ -165,7 +165,7 @@ LineageEdge
   targetGeoid    — geoid цели (column или table)
   relationType   — см. таблицу ниже
   statementGeoid — в каком statement создано ребро
-  usageContext   — "SELECT" / "INSERT" / "MERGE_UPDATE" / ...
+  usageContext   — "SELECT" / "INSERT" / "UPDATE" / "MERGE" / ...
 ```
 
 Рёбра добавляются в двух ситуациях:

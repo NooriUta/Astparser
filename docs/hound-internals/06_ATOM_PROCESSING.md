@@ -64,7 +64,15 @@
   "text"              — исходный текст: "u.balance", "SUM(amount)"
   "line"              — строка в исходном SQL
   "col" (column)      — позиция символа
-  "context"           — clause: SELECT, FROM, WHERE, JOIN, SET_EXPR...
+  "context"           — результат ScopeContext.getActiveClause() в момент регистрации:
+                          SELECT / INSERT / UPDATE / DELETE / MERGE — тип statement'а
+                          VALUES          — внутри INSERT VALUES (...)
+                          JOIN            — внутри ON-условия JOIN
+                          SET_EXPR        — правая часть SET col = <expr> (UPDATE/MERGE)
+                          MERGE_INSERT    — WHEN NOT MATCHED INSERT (не VALUES)
+                          MERGE_UPDATE    — WHEN MATCHED UPDATE SET (левая часть)
+                          MERGE_INSERT_VALUES — WHEN NOT MATCHED INSERT VALUES (...)
+                          UNKNOWN         — если statementType не задан
   "parent_context"    — уточнение: GROUP BY, HAVING, ON...
   "statement_geoid"   — к какому statement принадлежит
 

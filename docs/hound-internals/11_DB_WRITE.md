@@ -229,7 +229,7 @@ RECONSTRUCTED — таблица встречена только в DML (INSERT/
 | Поле | Тип | Источник |
 |------|-----|---------|
 | `stmt_geoid` | String | Иерархический geoid |
-| `type` | String | SELECT / INSERT / UPDATE / MERGE / CTE / ... |
+| `type` | String | SELECT / INSERT / UPDATE / DELETE / MERGE / CTE / SUBQUERY / USUBQUERY / MSUBQUERY / CURSOR / CURSOR_LOOP / CREATE_TABLE / ALTER_TABLE / CREATE_VIEW / DROP_TABLE / GRANT / COMMIT / ROLLBACK / ... |
 | `subtype` | String | BULK COLLECT / RETURNING / FORALL / ... |
 | `line_start`, `line_end` | Integer | Строки в исходном файле |
 | `parent_statement` | String | Geoid родителя (для subquery) |
@@ -279,9 +279,18 @@ RECONSTRUCTED — таблица встречена только в DML (INSERT/
 | `expression` | String | Полное SQL-выражение |
 | `alias` | String | AS alias |
 | `col_order` | Integer | Порядок в SELECT list |
-| `source_type` | String | TABLE / SUBQUERY / LITERAL / FUNCTION |
+| `source_type` | String | `"expression"` / `"star"` / `"table_star"` / `"subquery_star"` |
 | `table_ref` | String | Geoid источника (если известен) |
 | `session_id` | String | ID сессии |
+
+**Значения `source_type` для DaliOutputColumn:**
+
+| Значение | Когда устанавливается |
+|---------|----------------------|
+| `"expression"` | Обычная колонка / выражение: `col1`, `t.col + 1`, `NVL(a, b)` |
+| `"star"` | `SELECT *` — звезда без квалификатора |
+| `"table_star"` | `SELECT t.*` — звезда с алиасом таблицы |
+| `"subquery_star"` | Расширение `*` при star-expansion из подзапроса |
 
 ---
 
@@ -305,10 +314,11 @@ RECONSTRUCTED — таблица встречена только в DML (INSERT/
 - `source_type` — тип DML-операции: `INSERT` / `UPDATE` / `MERGE`
   (передаётся через `StatementInfo.addAffectedColumn`, не TABLE/SUBQUERY)
 - `type_affect` — нормализованный тип из `StatementInfo.toTypeAffect()`:
-  `"INSERT"`, `"MERGE_INSERT_TARGET"` → `"INSERT"`;
-  `"UPDATE"`, `"MERGE_UPDATE_TARGET"` → `"UPDATE"`;
+  `"INSERT"` → `"INSERT"`;
+  `"UPDATE"` → `"UPDATE"`;
   `"MERGE"` → `"MERGE"`.
-  Значения `MERGE_UPDATE` и `MERGE_INSERT` — устаревшие (до T10), не используются.
+  Fallback-ветки `"MERGE_INSERT_TARGET"` и `"MERGE_UPDATE_TARGET"` в switch — мёртвый код
+  (реликты pre-T10 API). После T10 `source_type` для MERGE всегда равен `"MERGE"`.
 - `order_affect` — позиционный порядок из INSERT column list
 
 ---
@@ -352,7 +362,7 @@ RECONSTRUCTED — таблица встречена только в DML (INSERT/
 | `atom_id` | String | MD5(statementGeoid + ":" + atomText) |
 | `statement_geoid` | String | Родительский statement |
 | `atom_text` | String | Текст атома: `t.balance`, `SUM(amount)` |
-| `atom_context` | String | Clause: SELECT / FROM / WHERE / SET_EXPR ... |
+| `atom_context` | String | `getActiveClause()`: SELECT / INSERT / UPDATE / MERGE / VALUES / JOIN / SET_EXPR / MERGE_INSERT / MERGE_UPDATE / MERGE_INSERT_VALUES |
 | `parent_context` | String | Уточнение: GROUP BY / HAVING / ON / ... |
 | `position` | String | `line:col` позиция в исходном тексте |
 | `sposition` | String | Строковое представление позиции |
@@ -816,6 +826,7 @@ DaliApplication
 
 Documents (без рёбер):
   DaliSnippet         — SQL-текст каждого statement
+                        (EMBEDDED/REMOTE: без ограничений; REMOTE_BATCH: ≤4000 символов)
   DaliSnippetScript   — полный текст исходного файла
   DaliResolutionLog   — попытки resolution (только --diag)
   DaliSchemaLog       — suspicious schema registrations
@@ -823,13 +834,41 @@ Documents (без рёбер):
 
 ---
 
+## Декларированные, но не создаваемые типы рёбер
+
+В `SchemaInitializer` и `RemoteSchemaCommands` объявлены типы рёбер, которые
+**никогда не создаются** ни одним writer'ом в текущей реализации:
+
+| Тип ребра | Объявлен | Создаётся |
+|-----------|---------|-----------|
+| `UNION_FLOW` | SchemaInitializer | ❌ нигде |
+| `JOIN_FLOW` | SchemaInitializer | ❌ нигде |
+| `ROUTINE_USES_TABLE` | ArcadeDBSemanticWriter Javadoc | ❌ нигде |
+
+Эти типы **зарезервированы** для будущих механизмов lineage, но в текущем коде
+не имеют создающего кода. При запросе к БД они всегда вернут пустой результат.
+
+---
+
 ## CanonicalPool: переиспользование вершин между сессиями
 
-Без пула каждая сессия создаёт **новые** вершины DaliTable и DaliColumn.
-Это приводит к дублированию одних и тех же объектов схемы.
+### Pool-mode vs Non-pool mode
 
-`CanonicalPool` решает это: он хранит уже созданные вершины в памяти
-и переиспользует их при записи новых сессий.
+```
+Non-pool (по умолчанию, один файл):
+  Каждая сессия создаёт свои DaliTable / DaliColumn.
+  Объекты схемы дублируются между сессиями.
+  DaliTable помечается session_id.
+  Использование: одиночный запуск, тестирование.
+
+Pool-mode (multi-file проект):
+  CanonicalPool хранит общий реестр вершин в памяти.
+  DaliTable / DaliColumn помечаются db_name (не session_id).
+  Одна и та же таблица из разных файлов → одна вершина в БД.
+  Использование: обработка всего проекта (пакетный режим).
+```
+
+### Алгоритм дедупликации
 
 ```
 Логика при записи DaliTable (pool режим):
@@ -838,12 +877,67 @@ Documents (без рёбер):
        ДА → использовать существующую
        НЕТ → SELECT FROM DaliTable WHERE db_name=? AND table_geoid=?
               найдено в БД → загрузить в pool
-              не найдено → CREATE новую вершину → поместить в pool
-  3. Если таблица из DDL (isMasterTable=true) и текущая data_source=RECONSTRUCTED
-     → upgrade: установить data_source=MASTER
+              не найдено   → CREATE новую вершину → поместить в pool
+  3. Upgrade: если таблица из DDL (isMasterTable=true)
+     и в БД data_source=RECONSTRUCTED → обновить до MASTER
 
-Для DaliColumn — аналогичная логика с canonicalCol(tableGeoid, columnName)
+Для DaliColumn — аналогичная логика: canonicalCol(tableGeoid, columnName)
 ```
+
+### Почему порядок файлов важен
+
+```
+Сценарий А: DDL до DML  (правильный)
+  Файл 1: CREATE TABLE accounts (id, balance) → MASTER
+  Файл 2: INSERT INTO accounts VALUES ...    → finds MASTER → ok
+
+Сценарий Б: DML до DDL  (неправильный)
+  Файл 1: INSERT INTO accounts VALUES ...    → RECONSTRUCTED
+  Файл 2: CREATE TABLE accounts (id, balance) → upgrade → MASTER ✓
+  Проблема: между файлами 1 и 2 ordinal_position колонок = 1,2... из
+  порядка встречи в DML, не из DDL-порядка. После upgrade порядок не
+  пересчитывается — остаётся DML-порядок.
+
+Рекомендация: в pipeline всегда обрабатывать DDL-файлы первыми.
+```
+
+### Cross-session upgrade RECONSTRUCTED → MASTER
+
+Upgrade происходит в момент записи, когда DDL-файл обрабатывается ПОСЛЕ DML:
+
+```
+EmbeddedWriter при CREATE TABLE:
+  isMasterTable(tableGeoid) = true
+  pool.getTableVtx(geoid) → нашли существующую RECONSTRUCTED вершину
+  → UPDATE DaliTable SET data_source='MASTER' WHERE table_geoid=?
+  → обновить pool entry
+  → аналогично для каждой DaliColumn этой таблицы
+```
+
+---
+
+## Geoid коллизии
+
+Geoid включает номер строки (`LINE`) — что происходит при коллизии?
+
+```
+Сценарий: два SELECT на одной строке (или сгенерированный SQL)
+  SELECT a FROM t1; SELECT b FROM t2;   ← обе на строке 1
+
+  Оба получают geoid = "SELECT:1"
+  Второй statement при регистрации в Builder:
+    computeIfAbsent("SELECT:1", ...) → возвращает ПЕРВЫЙ statement
+    → atoms второго statement записываются в первый StatementInfo
+    → lineage смешивается
+
+Поведение: не определено явно, нет защиты от коллизии.
+Проявляется как: атомы с неверным statementGeoid в БД.
+```
+
+> **Обходное решение:** генератор SQL обеспечивает уникальность позиций.
+> В реальных PL/SQL файлах каждый statement на своей строке — коллизии редки.
+> При обнаружении коллизии используй `--diag` и смотри SchemaRegistrationLog
+> или ResolutionLog на дублирующиеся geoid'ы.
 
 ---
 

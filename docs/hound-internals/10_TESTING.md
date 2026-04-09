@@ -38,6 +38,7 @@ src/test/java/com/hound/
 |------|----------------|
 | `MergeSetSourceAliasResolvedTest` | Regression для баг S2.BUG-1: alias USING-подзапроса должен быть виден в ON и UPDATE SET. Тестирует `registerAliasOnParent`. |
 | `MergeUsingCollectionTest` | MERGE USING collection / inline SELECT. INSERT VALUES binding. |
+| `MergeUnionUsingTest` | MERGE + UNION ALL в USING-части. Fixture: `pkg_merge_union_using.pck` |
 
 ### JOIN и структурные тесты
 
@@ -47,6 +48,8 @@ src/test/java/com/hound/
 | `CreateViewTest` | CREATE OR REPLACE VIEW — DDL lineage, VIEW тип в реестре таблиц. |
 | `SchemaObjectAndInlineSubqueryTest` | Схемные объекты (SCHEMA.TABLE), inline subqueries. |
 | `ContainsRoutineHierarchyTest` | Вложенные procedures/functions. Package → Procedure → Function. |
+| `UnionCaseTest` | UNION ALL через USUBQUERY. Fixture: `pkg_union_case.pck` |
+| `AdvancedSelectTest` | Сложные SELECT: оконные функции, scalar subqueries, CASE. Fixture: `pkg_advanced_select.pck` |
 
 ### Атомы и токены
 

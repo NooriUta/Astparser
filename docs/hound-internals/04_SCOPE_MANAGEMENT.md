@@ -73,6 +73,35 @@ SQL-код имеет вложенную структуру: процедуры 
 └──────────────────────────────────────────────────────────────┘
 ```
 
+### `getActiveClause()` — справочник возвращаемых значений
+
+Метод вычисляет строку-контекст для регистрации атома. Значение сохраняется
+в поле `context` каждого `DaliAtom`.
+
+```
+Приоритет проверок (первое совпадение побеждает):
+
+  isMergeInsertPart && isInValuesClause  → "MERGE_INSERT_VALUES"
+  isInValuesClause                       → "VALUES"
+  isInJoinContext                        → "JOIN"
+  isInUpdateSetExpr                      → "SET_EXPR"
+  isMergeInsertPart                      → "MERGE_INSERT"
+  isMergeUpdatePart                      → "MERGE_UPDATE"
+  statementType != null                  → statementType   (SELECT / INSERT / UPDATE / etc.)
+  иначе                                  → "UNKNOWN"
+```
+
+| Значение | Когда появляется |
+|---------|-----------------|
+| `MERGE_INSERT_VALUES` | `WHEN NOT MATCHED THEN INSERT VALUES (...)` — VALUES-выражения |
+| `VALUES` | `INSERT INTO t VALUES (...)` — обычный VALUES |
+| `JOIN` | Условие ON-clause JOIN |
+| `SET_EXPR` | Правая часть `SET col = <expr>` (UPDATE и MERGE UPDATE) |
+| `MERGE_INSERT` | Список колонок `INSERT (col1, col2)` в MERGE |
+| `MERGE_UPDATE` | Имена колонок в `UPDATE SET col = ...` (левая сторона) |
+| `SELECT` / `INSERT` / `UPDATE` / `MERGE` / `DELETE` | Тип statement'а — дефолт |
+| `UNKNOWN` | statementType не задан (редко) |
+
 ---
 
 ## Формула Geoid: как вычисляется идентификатор statement'а
