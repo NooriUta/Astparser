@@ -151,6 +151,7 @@ final class RemoteSchemaCommands {
                 "CREATE PROPERTY DaliAtom.parent_context IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliAtom.status IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliAtom.warning IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.merge_clause IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliAtom.session_id IF NOT EXISTS STRING",
                 // DaliOutputColumn
                 "CREATE PROPERTY DaliOutputColumn.name IF NOT EXISTS STRING",

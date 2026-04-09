@@ -776,6 +776,40 @@ public class AtomProcessor {
         }
     }
 
+    /**
+     * G3-MERGE: Positionally binds atoms in the given source range to the N-th column
+     * from the MERGE INSERT column list (StatementInfo.mergeInsertColumnOrder).
+     * Sets dml_target_ref and merge_clause="INSERT" on matching atoms.
+     * Called from BaseSemanticListener.onValuesExpressionExit when Merge_insert_part=true.
+     */
+    public void bindAtomsToMergeInsertTarget(String stmtGeoid,
+            int startLine, int startCol, int endLine, int endCol, int position) {
+        StatementInfo si = builder == null ? null : builder.getStatements().get(stmtGeoid);
+        if (si == null) return;
+        List<String> insertCols = si.getMergeInsertColumnOrder();
+        if (position < 1 || position > insertCols.size()) return;
+        String columnRef = insertCols.get(position - 1);
+        if (columnRef == null) return;
+
+        Map<String, Map<String, Object>> stmtAtoms = atomsByStatement.get(stmtGeoid);
+        if (stmtAtoms == null) return;
+        for (var entry : stmtAtoms.entrySet()) {
+            Map<String, Object> atom = entry.getValue();
+            String pos = (String) atom.get("position");
+            if (pos == null) continue;
+            String[] parts = pos.split(":");
+            if (parts.length < 2) continue;
+            try {
+                int al = Integer.parseInt(parts[0]);
+                int ac = Integer.parseInt(parts[1]);
+                if (isPositionInRange(al, ac, startLine, startCol, endLine, endCol)) {
+                    atom.putIfAbsent("dml_target_ref", columnRef);
+                    atom.put("merge_clause", "INSERT");
+                }
+            } catch (NumberFormatException ignored) { /* skip */ }
+        }
+    }
+
     private boolean isPositionInRange(int line, int col,
                                        int startLine, int startCol,
                                        int endLine, int endCol) {

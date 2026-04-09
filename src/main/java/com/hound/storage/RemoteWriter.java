@@ -485,13 +485,13 @@ class RemoteWriter {
                         "atom_context=?, parent_context=?, position=?, sposition=?, " +
                         "is_complex=?, is_column_reference=?, is_function_call=?, is_constant=?, " +
                         "is_routine_param=?, is_routine_var=?, table_name=?, column_name=?, " +
-                        "table_geoid=?, status=?, warning=?, output_column_sequence=?, nested_atoms_count=?",
+                        "table_geoid=?, status=?, warning=?, merge_clause=?, output_column_sequence=?, nested_atoms_count=?",
                     sid, stmtGeoid, atomId, at.getKey(),
                     a.get("atom_context"), a.get("parent_context"), a.get("position"), a.get("sposition"),
                     a.get("is_complex"), a.get("is_column_reference"), a.get("is_function_call"),
                     a.get("is_constant"), a.get("is_routine_param"), a.get("is_routine_var"),
                     a.get("table_name"), a.get("column_name"),
-                    a.get("table_geoid"), a.get("status"), a.get("warning"),
+                    a.get("table_geoid"), a.get("status"), a.get("warning"), a.get("merge_clause"),
                     a.get("output_column_sequence"), a.get("nested_atoms_count"));
             }
         }
@@ -711,7 +711,13 @@ class RemoteWriter {
                 String dmlTargetRefProd = (String) a.get("dml_target_ref");
                 if (dmlTargetRefProd != null && atomRid != null) {
                     String acRidProd = rid.affCols.get(stmtGeoid + ":" + dmlTargetRefProd);
-                    if (acRidProd != null) edgeByRid("ATOM_PRODUCES", atomRid, acRidProd, sid);
+                    String mergeClause = (String) a.get("merge_clause");
+                    if (acRidProd != null) {
+                        if (mergeClause != null)
+                            edgeByRid("ATOM_PRODUCES", atomRid, acRidProd, sid, "merge_clause", mergeClause);
+                        else
+                            edgeByRid("ATOM_PRODUCES", atomRid, acRidProd, sid);
+                    }
                 }
                 if ("Обработано".equals(a.get("status")) && outSeq != null && tableGeoid != null && atomRid != null) {
                     String colName = (String) a.get("column_name");

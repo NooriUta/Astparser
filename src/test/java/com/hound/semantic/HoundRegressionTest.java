@@ -208,14 +208,14 @@ class HoundRegressionTest {
 
     /**
      * G4: DaliAffectedColumn must contain ONLY target table columns.
-     * source_type must be one of: INSERT, UPDATE, MERGE_INSERT_TARGET, MERGE_UPDATE_TARGET.
+     * source_type must be one of: INSERT, UPDATE, MERGE.
      * SELECT, WHERE, JOIN, ORDER, HAVING, DELETE, VALUES, etc. must not appear.
      */
     @ParameterizedTest(name = "{0}")
     @MethodSource("testFiles")
     void affectedColumns_onlyTargetColumns(Path file) throws IOException {
         UniversalSemanticEngine engine = parseFile(file);
-        Set<String> allowed = Set.of("INSERT", "UPDATE", "MERGE_INSERT_TARGET", "MERGE_UPDATE_TARGET");
+        Set<String> allowed = Set.of("INSERT", "UPDATE", "MERGE");
         List<String> violations = new ArrayList<>();
         for (var e : engine.getBuilder().getStatements().entrySet()) {
             for (Map<String, Object> ac : e.getValue().getAffectedColumns()) {
@@ -230,8 +230,8 @@ class HoundRegressionTest {
     }
 
     /**
-     * G3 / MERGE: Files with MERGE statements must have both
-     * MERGE_UPDATE_TARGET and MERGE_INSERT_TARGET affected columns.
+     * G3 / MERGE: Files with MERGE statements must have MERGE affected columns (source_type="MERGE").
+     * Columns appear once (deduplicated); merge_clause on ATOM_PRODUCES edges distinguishes UPDATE/INSERT.
      * Regression guard for MERGE column-binding (enterMerge_element / paren_column_list).
      */
     @ParameterizedTest(name = "{0}")
@@ -242,17 +242,11 @@ class HoundRegressionTest {
                 .anyMatch(s -> "MERGE".equals(s.getType()));
         if (!hasMerge) return;   // skip non-MERGE fixtures
 
-        Set<String> sourceTypes = new HashSet<>();
-        for (StatementInfo s : engine.getBuilder().getStatements().values()) {
-            for (Map<String, Object> ac : s.getAffectedColumns()) {
-                Object st = ac.get("source_type");
-                if (st != null) sourceTypes.add(st.toString());
-            }
-        }
-        assertTrue(sourceTypes.contains("MERGE_UPDATE_TARGET"),
-                file.getFileName() + ": MERGE statement missing MERGE_UPDATE_TARGET in affected columns");
-        assertTrue(sourceTypes.contains("MERGE_INSERT_TARGET"),
-                file.getFileName() + ": MERGE statement missing MERGE_INSERT_TARGET in affected columns");
+        boolean hasMergeAffected = engine.getBuilder().getStatements().values().stream()
+                .flatMap(s -> s.getAffectedColumns().stream())
+                .anyMatch(ac -> "MERGE".equals(ac.get("source_type")));
+        assertTrue(hasMergeAffected,
+                file.getFileName() + ": MERGE statement missing any MERGE affected columns");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -350,7 +344,7 @@ class HoundRegressionTest {
                 String.format("%.2f", Math.max(0, min - 0.10)));
 
         // ── G1/G2/G4 aggregate summary ──
-        long totalAC = 0, totalInsert = 0, totalUpdate = 0, totalMergeU = 0, totalMergeI = 0;
+        long totalAC = 0, totalInsert = 0, totalUpdate = 0, totalMergeU = 0;
         Map<String, Long> bySourceType = new LinkedHashMap<>();
         for (Path file : (Iterable<Path>) testFiles()::iterator) {
             UniversalSemanticEngine engine = parseFile(file);
@@ -366,8 +360,7 @@ class HoundRegressionTest {
                         if ("INSERT".equals(ta)) totalInsert++;
                         else if ("UPDATE".equals(ta)) totalUpdate++;
                     }
-                    if ("MERGE_UPDATE_TARGET".equals(src)) totalMergeU++;
-                    if ("MERGE_INSERT_TARGET".equals(src)) totalMergeI++;
+                    if ("MERGE".equals(src)) totalMergeU++; // unified MERGE source_type (deduped)
                 }
             }
         }
@@ -377,7 +370,7 @@ class HoundRegressionTest {
                 .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
                 .forEach(e -> LOG.info("    {:<28} {}", e.getKey(), e.getValue()));
         LOG.info("  type_affect — INSERT:{} UPDATE:{}", totalInsert, totalUpdate);
-        LOG.info("  MERGE targets — UPDATE_TARGET:{} INSERT_TARGET:{}", totalMergeU, totalMergeI);
+        LOG.info("  MERGE targets (deduped): {}", totalMergeU);
 
         // Non-blocking structural assertion
         assertTrue(avg > 0,

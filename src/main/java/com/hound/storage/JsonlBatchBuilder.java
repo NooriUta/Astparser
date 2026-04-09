@@ -368,6 +368,7 @@ public class JsonlBatchBuilder {
                         "table_geoid", a.get("table_geoid"),
                         "status", a.get("status"),
                         "warning", atomWarning1,
+                        "merge_clause", a.get("merge_clause"),
                         "output_column_sequence", a.get("output_column_sequence"),
                         "nested_atoms_count", a.get("nested_atoms_count")
                 ));
@@ -666,8 +667,12 @@ public class JsonlBatchBuilder {
                 String dmlTargetRefProd1 = (String) a.get("dml_target_ref");
                 if (dmlTargetRefProd1 != null) {
                     String acExtId = affColByRef.get(stmtGeoid + ":" + dmlTargetRefProd1);
-                    if (acExtId != null)
-                        b.appendEdge("ATOM_PRODUCES", atomId, acExtId, sidProps);
+                    if (acExtId != null) {
+                        String mergeClause1 = (String) a.get("merge_clause");
+                        Map<String, Object> apProps1 = mergeClause1 != null
+                                ? mapOf("session_id", sid, "merge_clause", mergeClause1) : sidProps;
+                        b.appendEdge("ATOM_PRODUCES", atomId, acExtId, apProps1);
+                    }
                 }
 
                 // DATA_FLOW: column → output column (resolved atoms)
@@ -1001,6 +1006,7 @@ public class JsonlBatchBuilder {
                         "table_geoid", a.get("table_geoid"),
                         "status", a.get("status"),
                         "warning", atomWarning2,
+                        "merge_clause", a.get("merge_clause"),
                         "output_column_sequence", a.get("output_column_sequence"),
                         "nested_atoms_count", a.get("nested_atoms_count")
                 ));
@@ -1277,8 +1283,12 @@ public class JsonlBatchBuilder {
                 String dmlTargetRefProd2 = (String) a.get("dml_target_ref");
                 if (dmlTargetRefProd2 != null) {
                     String acExtId2 = affColByRef.get(stmtGeoid + ":" + dmlTargetRefProd2);
-                    if (acExtId2 != null)
-                        b.appendEdge("ATOM_PRODUCES", atomId, acExtId2, sidProps);
+                    if (acExtId2 != null) {
+                        String mergeClause2 = (String) a.get("merge_clause");
+                        Map<String, Object> apProps2 = mergeClause2 != null
+                                ? mapOf("session_id", sid, "merge_clause", mergeClause2) : sidProps;
+                        b.appendEdge("ATOM_PRODUCES", atomId, acExtId2, apProps2);
+                    }
                 }
 
                 if ("Обработано".equals(a.get("status")) && outSeq != null) {

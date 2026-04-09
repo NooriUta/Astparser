@@ -874,13 +874,13 @@ public class UniversalSemanticEngine {
      */
     public void onMergeElementEnter(String targetColumnName) {
         atomProcessor.setMergeTargetColumn(targetColumnName);
-        // Eagerly register the target column in the current statement's affected_columns
+        // Eagerly register the target column in the current statement's affected_columns.
+        // source_type="MERGE" — unified type for both UPDATE and INSERT paths; dedup is in StatementInfo.
         String stmtGeoid = scopeManager.currentStatement();
         if (stmtGeoid != null && targetColumnName != null) {
-            // Resolve target table geoid from current statement's target tables
             String targetTableGeoid = resolveTargetTableGeoid(stmtGeoid);
             atomProcessor.addMergeTargetColumn(stmtGeoid, targetColumnName,
-                    targetTableGeoid, "MERGE_UPDATE_TARGET");
+                    targetTableGeoid, "MERGE");
         }
     }
 
@@ -891,7 +891,8 @@ public class UniversalSemanticEngine {
 
     /**
      * Called from enterMerge_insert_clause when column list is present.
-     * Registers each column in (col1, col2, ...) as a MERGE_INSERT_TARGET affected column.
+     * Registers each column as a MERGE affected column (dedup in StatementInfo) and records
+     * the ordered column ref list for VALUES positional binding.
      *
      * @param columnNames ordered list of target column names
      */
@@ -899,10 +900,17 @@ public class UniversalSemanticEngine {
         String stmtGeoid = scopeManager.currentStatement();
         if (stmtGeoid == null || columnNames == null) return;
         String targetTableGeoid = resolveTargetTableGeoid(stmtGeoid);
+        var si = builder.getStatements().get(stmtGeoid);
         for (String col : columnNames) {
             if (col != null && !col.isBlank()) {
-                atomProcessor.addMergeTargetColumn(stmtGeoid, col,
-                        targetTableGeoid, "MERGE_INSERT_TARGET");
+                atomProcessor.addMergeTargetColumn(stmtGeoid, col, targetTableGeoid, "MERGE");
+                // Record ordered column ref for VALUES positional binding in AtomProcessor
+                if (si != null) {
+                    String colRef = targetTableGeoid != null
+                            ? targetTableGeoid + "." + col.toUpperCase()
+                            : col.toUpperCase();
+                    si.addMergeInsertColumnRef(colRef);
+                }
             }
         }
     }

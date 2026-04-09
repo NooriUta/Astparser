@@ -44,6 +44,9 @@ public class StatementInfo {
     // G5: ordered column list from INSERT INTO t (col1, col2, col3)
     private final List<String> insertTargetColumns = new ArrayList<>();
 
+    // G3-MERGE: ordered column refs from WHEN NOT MATCHED INSERT (col1, col2, ...) — for VALUES positional binding
+    private final List<String> mergeInsertColumnOrder = new ArrayList<>();
+
     // H1.4 — statement-level semantic flags
     private boolean hasAggregation = false;   // GROUP BY present
     private boolean hasWindow      = false;   // OVER() / analytic function present
@@ -238,6 +241,15 @@ public class StatementInfo {
         entry.put("source_type",       sourceType);
         entry.put("resolution_status", resolutionStatus);
 
+        // G3-MERGE dedup: одна запись на MERGE-целевую колонку (UPDATE + INSERT пути объединены)
+        if ("MERGE".equals(sourceType)) {
+            String colRefStr = columnRef != null ? columnRef : columnName;
+            boolean alreadyExists = affectedColumns.stream()
+                    .anyMatch(e -> colRefStr.equals(e.get("column_ref"))
+                               && "MERGE".equals(e.get("source_type")));
+            if (alreadyExists) return;
+        }
+
         // G2: poliage_update — only for explicit DML target columns
         String typeAffect = toTypeAffect(sourceType);
         if (typeAffect != null) {
@@ -262,6 +274,7 @@ public class StatementInfo {
         return switch (sourceType) {
             case "INSERT", "MERGE_INSERT_TARGET" -> "INSERT";
             case "UPDATE", "MERGE_UPDATE_TARGET" -> "UPDATE";
+            case "MERGE"                         -> "MERGE";
             default                              -> null;
         };
     }
@@ -275,6 +288,21 @@ public class StatementInfo {
     /** Appends one column name (from INSERT INTO t (col1, col2, ...)) in declaration order. */
     public void addInsertTargetColumn(String colName) {
         if (colName != null) insertTargetColumns.add(colName.toUpperCase());
+    }
+
+    // ═══════ G3-MERGE: INSERT VALUES positional binding order ═══════
+
+    /**
+     * Records a column_ref from MERGE INSERT column list in declaration order.
+     * Used by AtomProcessor.bindAtomsToMergeInsertTarget for VALUES positional binding.
+     * Added regardless of dedup — the INSERT clause defines the positional order for VALUES.
+     */
+    public void addMergeInsertColumnRef(String columnRef) {
+        if (columnRef != null) mergeInsertColumnOrder.add(columnRef);
+    }
+
+    public List<String> getMergeInsertColumnOrder() {
+        return Collections.unmodifiableList(mergeInsertColumnOrder);
     }
 
     /** Ordered list of explicit INSERT target columns; empty if none declared. */

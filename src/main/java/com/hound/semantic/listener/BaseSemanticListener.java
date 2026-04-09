@@ -535,7 +535,13 @@ public abstract class BaseSemanticListener {
                 if (currentStmt != null) {
                     Map<String, Object> processorAtom = engine.getAtomProcessor()
                             .getAtomsForStatement(currentStmt).get(atomKeyUpper);
-                    if (processorAtom != null) processorAtom.put("dml_target_ref", ref2);
+                    if (processorAtom != null) {
+                        processorAtom.put("dml_target_ref", ref2);
+                        // G3-MERGE: MERGE UPDATE SET atoms get merge_clause="UPDATE"
+                        if (Boolean.TRUE.equals(current.get("Merge_update_part"))) {
+                            processorAtom.put("merge_clause", "UPDATE");
+                        }
+                    }
                 }
             }
         }
@@ -808,6 +814,12 @@ public abstract class BaseSemanticListener {
 
         engine.getAtomProcessor().bindAtomsToOutputColumn(
                 stmt, startLine, startCol, endLine, endCol, cnt);
+        // G3-MERGE: if inside MERGE INSERT VALUES, bind atoms to the N-th MERGE INSERT target
+        // column and set merge_clause="INSERT" (bindAtomsToMergeInsertTarget does both)
+        if (Boolean.TRUE.equals(current.get("Merge_insert_part"))) {
+            engine.getAtomProcessor().bindAtomsToMergeInsertTarget(
+                    stmt, startLine, startCol, endLine, endCol, cnt);
+        }
         logger.debug("VALUES expr #{}: lines {}-{} bound in stmt '{}'",
                 cnt, startLine, endLine, stmt);
     }

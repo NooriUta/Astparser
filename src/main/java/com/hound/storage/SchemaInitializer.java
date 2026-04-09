@@ -197,6 +197,7 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliAtom",        "parent_context");
         declareStr(schema, "DaliAtom",        "status");
         declareStr(schema, "DaliAtom",        "warning");
+        declareStr(schema, "DaliAtom",        "merge_clause"); // "UPDATE" | "INSERT" for MERGE target atoms
         declareStr(schema, "DaliAtom",        "session_id");
         // Output column
         declareStr(schema, "DaliOutputColumn", "name");

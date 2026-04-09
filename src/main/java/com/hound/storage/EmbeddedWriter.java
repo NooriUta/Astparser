@@ -600,6 +600,7 @@ class EmbeddedWriter {
                             .set("table_geoid",           a.get("table_geoid"))
                             .set("status",                a.get("status"))
                             .set("warning",               a.get("warning"))
+                            .set("merge_clause",          a.get("merge_clause"))
                             .set("output_column_sequence",a.get("output_column_sequence"))
                             .set("nested_atoms_count",    a.get("nested_atoms_count"))
                             .save();
@@ -639,8 +640,13 @@ class EmbeddedWriter {
                     String dmlTargetRefProd = (String) a.get("dml_target_ref");
                     if (dmlTargetRefProd != null) {
                         MutableVertex acV2 = affColByRef.get(stmtGeoid + ":" + dmlTargetRefProd);
-                        if (acV2 != null) aV.newEdge("ATOM_PRODUCES", acV2, true)
-                                .set("session_id", sid).save();
+                        if (acV2 != null) {
+                            String mergeClause = (String) a.get("merge_clause");
+                            var prodEdge = aV.newEdge("ATOM_PRODUCES", acV2, true)
+                                    .set("session_id", sid);
+                            if (mergeClause != null) prodEdge.set("merge_clause", mergeClause);
+                            prodEdge.save();
+                        }
                     }
                     if ("Обработано".equals(a.get("status")) && outSeq != null) {
                         String atomColName2 = (String) a.get("column_name");
