@@ -93,9 +93,22 @@ public class UniversalSemanticEngine {
 
             // B2.OC1 — diagnostics
             if (si != null) {
+                int directAtoms = atomProcessor.getAtomsForStatement(stmt).size();
                 logger.info("DIAG EXIT [{}] type={} outputCols={} atoms={}",
-                        stmt, si.getType(), si.getColumnsOutput().size(),
-                        atomProcessor.getAtomsForStatement(stmt).size());
+                        stmt, si.getType(), si.getColumnsOutput().size(), directAtoms);
+
+                // CTE-specific: atoms always live in the child SUBQUERY scope,
+                // not in the CTE wrapper itself. Log this clearly so it's not mistaken
+                // for a bug.
+                if ("CTE".equals(si.getType()) && directAtoms == 0) {
+                    int childAtomTotal = si.getChildStatements().stream()
+                            .mapToInt(child -> atomProcessor.getAtomsForStatement(child).size())
+                            .sum();
+                    logger.info("CTE SCOPE [{}]: 0 direct atoms — expected. Child scopes: {} atoms in {} child(ren) {}. "
+                            + "Atoms register to the innermost active scope (SUBQUERY inside CTE), not the CTE wrapper.",
+                            stmt, childAtomTotal, si.getChildStatements().size(),
+                            si.getChildStatements());
+                }
             }
 
             // 1. Resolve star subquery columns
@@ -676,7 +689,7 @@ public class UniversalSemanticEngine {
         scopeManager.setInValuesClause(val);
     }
 
-    /** Propagates UPDATE SET expression context to ScopeContext so atoms get parent_context="UPDATE_EXPR". */
+    /** Propagates UPDATE SET expression context to ScopeContext so atoms get parent_context="SET_EXPR". */
     public void setUpdateSetExpr(boolean val) {
         scopeManager.setInUpdateSetExpr(val);
     }
@@ -861,13 +874,13 @@ public class UniversalSemanticEngine {
      */
     public void onMergeElementEnter(String targetColumnName) {
         atomProcessor.setMergeTargetColumn(targetColumnName);
-        // Eagerly register the target column in the current statement's affected_columns
+        // Eagerly register the target column in the current statement's affected_columns.
+        // source_type="MERGE" — unified type for both UPDATE and INSERT paths; dedup is in StatementInfo.
         String stmtGeoid = scopeManager.currentStatement();
         if (stmtGeoid != null && targetColumnName != null) {
-            // Resolve target table geoid from current statement's target tables
             String targetTableGeoid = resolveTargetTableGeoid(stmtGeoid);
             atomProcessor.addMergeTargetColumn(stmtGeoid, targetColumnName,
-                    targetTableGeoid, "MERGE_UPDATE_TARGET");
+                    targetTableGeoid, "MERGE");
         }
     }
 
@@ -878,7 +891,8 @@ public class UniversalSemanticEngine {
 
     /**
      * Called from enterMerge_insert_clause when column list is present.
-     * Registers each column in (col1, col2, ...) as a MERGE_INSERT_TARGET affected column.
+     * Registers each column as a MERGE affected column (dedup in StatementInfo) and records
+     * the ordered column ref list for VALUES positional binding.
      *
      * @param columnNames ordered list of target column names
      */
@@ -886,10 +900,17 @@ public class UniversalSemanticEngine {
         String stmtGeoid = scopeManager.currentStatement();
         if (stmtGeoid == null || columnNames == null) return;
         String targetTableGeoid = resolveTargetTableGeoid(stmtGeoid);
+        var si = builder.getStatements().get(stmtGeoid);
         for (String col : columnNames) {
             if (col != null && !col.isBlank()) {
-                atomProcessor.addMergeTargetColumn(stmtGeoid, col,
-                        targetTableGeoid, "MERGE_INSERT_TARGET");
+                atomProcessor.addMergeTargetColumn(stmtGeoid, col, targetTableGeoid, "MERGE");
+                // Record ordered column ref for VALUES positional binding in AtomProcessor
+                if (si != null) {
+                    String colRef = targetTableGeoid != null
+                            ? targetTableGeoid + "." + col.toUpperCase()
+                            : col.toUpperCase();
+                    si.addMergeInsertColumnRef(colRef);
+                }
             }
         }
     }

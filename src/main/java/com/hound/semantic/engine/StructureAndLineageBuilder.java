@@ -124,8 +124,27 @@ public class StructureAndLineageBuilder {
         String geoid = tableGeoid + "." + upperCol;
         columns.computeIfAbsent(geoid, k -> {
             TableInfo t = tables.get(tableGeoid);
+            int ordinal = 0;
+            if (t != null) {
+                t.incrementColumnCount();
+                ordinal = t.columnCount(); // 1-based: count after increment
+            }
+            return new ColumnInfo(geoid, tableGeoid, upperCol, expression, alias, false, 0, ordinal);
+        });
+    }
+
+    /**
+     * T14: Registers a column with an explicit ordinal position (e.g., from CREATE TABLE DDL).
+     * If the column already exists, it is not overwritten — DDL registration wins first time only.
+     */
+    public void addColumnWithOrdinal(String tableGeoid, String columnName,
+                                     String expression, String alias, int ordinalPosition) {
+        String upperCol = columnName.toUpperCase();
+        String geoid = tableGeoid + "." + upperCol;
+        columns.computeIfAbsent(geoid, k -> {
+            TableInfo t = tables.get(tableGeoid);
             if (t != null) t.incrementColumnCount();
-            return new ColumnInfo(geoid, tableGeoid, upperCol, expression, alias, false, 0);
+            return new ColumnInfo(geoid, tableGeoid, upperCol, expression, alias, false, 0, ordinalPosition);
         });
     }
 

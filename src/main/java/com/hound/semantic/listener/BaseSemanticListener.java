@@ -152,7 +152,7 @@ public abstract class BaseSemanticListener {
         // must NOT inherit the statement's DML type (that would give them poliage_update).
         // These flags are set by onValuesClauseEnter / onUpdateSetColumn / onMergeElementEnter.
         if (isValuesClause())                      return "INSERT_VALUES";
-        if (Boolean.TRUE.equals(current.get("in_update_set_expr"))) return "UPDATE_EXPR";
+        if (Boolean.TRUE.equals(current.get("in_update_set_expr"))) return "SET_EXPR";
         if (isMergeInsert())                       return "INSERT";
         if (isMergeUpdate())                       return "UPDATE";
         if (currentStatement() != null)            return currentStatementType();
@@ -520,6 +520,31 @@ public abstract class BaseSemanticListener {
         current.put("atom_context", atomContext);
         engine.onAtom(text, line, col, endLine, endCol, parentCtx != null ? parentCtx : "UNKNOWN",
                       isComplex, tokens, tokenDetails, nestedAtomCount);
+
+        // Inject dml_target_ref into AtomProcessor's atom data.
+        // AtomProcessor registers atoms independently (atomsByStatement), so without this
+        // injection the writers would never find dml_target_ref and DATA_FLOW edges to
+        // DaliAffectedColumn would never be created for UPDATE/MERGE SET expressions.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> colAffected2 = (Map<String, Object>) current.get("column_affected");
+        if (colAffected2 != null) {
+            String ref2 = (String) colAffected2.get("column_ref");
+            if (ref2 != null) {
+                String atomKeyUpper = text.toUpperCase() + "~" + line + ":" + col;
+                String currentStmt = currentStatement();
+                if (currentStmt != null) {
+                    Map<String, Object> processorAtom = engine.getAtomProcessor()
+                            .getAtomsForStatement(currentStmt).get(atomKeyUpper);
+                    if (processorAtom != null) {
+                        processorAtom.put("dml_target_ref", ref2);
+                        // G3-MERGE: MERGE UPDATE SET atoms get merge_clause="UPDATE"
+                        if (Boolean.TRUE.equals(current.get("Merge_update_part"))) {
+                            processorAtom.put("merge_clause", "UPDATE");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // =========================================================================
@@ -745,13 +770,35 @@ public abstract class BaseSemanticListener {
             }
         }
         current.put("in_update_set_expr", true);
+        // Propagate to ScopeContext so ScopeManager.getActiveClause() returns "SET_EXPR"
+        // for atoms inside this element's expression (same as regular UPDATE SET does).
+        engine.setUpdateSetExpr(true);
     }
 
-    /** G3: Called at exitMerge_element — clear target column context. */
-    public void onMergeElementExit() {
+    /**
+     * G3: Called at exitMerge_element — clear target column context and post-bind atoms.
+     * Receives the position range of the RHS expression so that bindAtomsToMergeUpdateTarget
+     * can reliably find all atoms in the expression and stamp merge_clause="UPDATE" on them.
+     */
+    public void onMergeElementExit(int exprStartLine, int exprStartCol,
+                                   int exprEndLine,   int exprEndCol) {
         current.put("in_update_set_expr", false);
+        engine.setUpdateSetExpr(false);  // mirror of onMergeElementEnter
+        // Read column_ref BEFORE clearing column_affected
+        @SuppressWarnings("unchecked")
+        Map<String, Object> colAff = (Map<String, Object>) current.get("column_affected");
         current.put("column_affected", null);
         engine.onMergeElementExit();
+        // Post-processing: stamp merge_clause="UPDATE" + dml_target_ref on atoms in expression.
+        // This is analogous to bindAtomsToMergeInsertTarget for the INSERT path.
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt != null && colAff != null) {
+            String colRef = (String) colAff.get("column_ref");
+            if (colRef != null) {
+                engine.getAtomProcessor().bindAtomsToMergeUpdateTarget(
+                        stmt, colRef, exprStartLine, exprStartCol, exprEndLine, exprEndCol);
+            }
+        }
     }
 
     /**
@@ -789,6 +836,12 @@ public abstract class BaseSemanticListener {
 
         engine.getAtomProcessor().bindAtomsToOutputColumn(
                 stmt, startLine, startCol, endLine, endCol, cnt);
+        // G3-MERGE: if inside MERGE INSERT VALUES, bind atoms to the N-th MERGE INSERT target
+        // column and set merge_clause="INSERT" (bindAtomsToMergeInsertTarget does both)
+        if (Boolean.TRUE.equals(current.get("Merge_insert_part"))) {
+            engine.getAtomProcessor().bindAtomsToMergeInsertTarget(
+                    stmt, startLine, startCol, endLine, endCol, cnt);
+        }
         logger.debug("VALUES expr #{}: lines {}-{} bound in stmt '{}'",
                 cnt, startLine, endLine, stmt);
     }
@@ -802,7 +855,7 @@ public abstract class BaseSemanticListener {
      * Called from enterColumn_based_update_set_clause for each single-column assignment.
      * Registers the column as a DML target (UPDATE affected column with poliage_update),
      * then sets in_update_set_expr=true so that subsequent atoms in the expression
-     * get parent_context="UPDATE_EXPR" instead of "UPDATE" — preventing them from
+     * get parent_context="SET_EXPR" instead of "UPDATE" — preventing them from
      * also receiving a poliage_update entry (fixing Python Bug B4 analog).
      *
      * For multi-column assignments (paren_column_list = subquery) each column
@@ -826,7 +879,7 @@ public abstract class BaseSemanticListener {
 
         // Switch context: atoms in the expression must NOT get poliage_update.
         // Both current (BaseSemanticListener) and ScopeContext flags are set so that
-        // ScopeContext.getActiveClause() returns "UPDATE_EXPR" for subsequent atoms.
+        // ScopeContext.getActiveClause() returns "SET_EXPR" for subsequent atoms.
         current.put("in_update_set_expr", true);
         engine.setUpdateSetExpr(true);
         logger.debug("UPDATE SET target: {} table={}", colName, targetGeoid);
@@ -906,6 +959,63 @@ public abstract class BaseSemanticListener {
         engine.onViewColumnAliases(columns);
     }
 
+    // ═══ T14: CREATE TABLE / ALTER TABLE — DDL column registration ═══
+
+    /**
+     * T14: Called at enterCreate_table — registers the table, sets DDL column context.
+     * Subsequent enterColumn_definition events will assign ordinal positions in DDL order.
+     */
+    public void onCreateTableEnter(String schemaName, String tableName, String snippet,
+                                   int lineStart, int lineEnd) {
+        String schema = (schemaName != null && !schemaName.isBlank()) ? schemaName : currentSchema();
+        String geoid = initTable(tableName, null, schema, "TABLE");
+        current.put("ddl_table_geoid", geoid);
+        current.put("ddl_col_ordinal", 0);  // explicit ordinal tracking for CREATE TABLE
+        onStatementEnter("CREATE_TABLE", snippet, lineStart, lineEnd);
+    }
+
+    /** T14: Called at exitCreate_table — clears DDL column context. */
+    public void onCreateTableExit() {
+        current.put("ddl_table_geoid", null);
+        current.put("ddl_col_ordinal", null);
+        onStatementExit();
+    }
+
+    /**
+     * T14: Called at enterAlter_table — sets DDL context for ALTER TABLE ADD column handling.
+     * Does not track explicit ordinals (uses auto-increment to append after existing columns).
+     */
+    public void onAlterTableEnter(String tableRef) {
+        String geoid = initTable(tableRef, null, currentSchema(), "TABLE");
+        current.put("ddl_table_geoid", geoid);
+        // No ddl_col_ordinal — ALTER TABLE uses addColumn auto-increment
+    }
+
+    /** T14: Called at exitAlter_table — clears DDL column context. */
+    public void onAlterTableExit() {
+        current.put("ddl_table_geoid", null);
+    }
+
+    /**
+     * T14: Called at enterColumn_definition when inside CREATE TABLE or ALTER TABLE ADD context.
+     * For CREATE TABLE: registers column with explicit ordinal_position from DDL declaration order.
+     * For ALTER TABLE ADD: registers column with auto-increment ordinal_position.
+     */
+    public void onDdlColumnDefinition(String columnName) {
+        String tableGeoid = (String) current.get("ddl_table_geoid");
+        if (tableGeoid == null || columnName == null || columnName.isBlank()) return;
+        Object ordinalObj = current.get("ddl_col_ordinal");
+        if (ordinalObj != null) {
+            // CREATE TABLE: explicit ordinal from DDL declaration order
+            int ordinal = (Integer) ordinalObj + 1;
+            current.put("ddl_col_ordinal", ordinal);
+            engine.getBuilder().addColumnWithOrdinal(tableGeoid, columnName, null, null, ordinal);
+        } else {
+            // ALTER TABLE ADD: auto-increment ordinal (appended after existing columns)
+            engine.getBuilder().addColumn(tableGeoid, columnName, null, null);
+        }
+    }
+
     public void onColumnAlias(String alias) {
         current.put("column_alias", alias != null ? cleanIdentifier(alias) : null);
     }
@@ -941,9 +1051,12 @@ public abstract class BaseSemanticListener {
         if (stmtInfo == null) return;
 
         int order = stmtInfo.getColumnsOutput().size() + 1;
-        // G13: generate synthetic name when alias and expression are both absent
+        // G13: generate synthetic name when alias and expression are both absent.
+        // For unaliased simple column references (e.g. "t1.col"), strip the table
+        // alias prefix so the name stores just the bare column name ("col").
         String colName = (alias != null && !alias.isBlank()) ? alias
-                       : (expressionText != null && !expressionText.isBlank()) ? expressionText
+                       : (expressionText != null && !expressionText.isBlank())
+                               ? bareColumnName(expressionText, order)
                        : ("EXPR_" + order);
         Map<String, Object> columnInfo = new LinkedHashMap<>();
         columnInfo.put("order", order);
@@ -1002,6 +1115,30 @@ public abstract class BaseSemanticListener {
     // =========================================================================
     // РАЗДЕЛ 8: РЕЗУЛЬТАТ
     // =========================================================================
+
+    /**
+     * Extracts the bare column name from a SELECT list expression when no alias is present.
+     *
+     * For simple column references like "t1.col1" → returns "col1".
+     * For complex expressions (containing spaces, parens, operators) → returns the expression as-is
+     * so that a synthetic EXPR_{order} name is not generated unnecessarily.
+     *
+     * Collision note: if two unaliased columns resolve to the same bare name (e.g. "t1.id" and
+     * "t2.id" both become "id"), the second column overwrites the first in columnsOutput.
+     * Users should use explicit aliases to disambiguate such cases.
+     */
+    private static String bareColumnName(String expr, int order) {
+        if (expr == null || expr.isBlank()) return "EXPR_" + order;
+        // Complex expression — keep as-is to avoid misleading names
+        if (expr.contains(" ") || expr.contains("(") || expr.contains(")")
+                || expr.contains("'") || expr.contains("+") || expr.contains("-")
+                || expr.contains("*") || expr.contains("/") || expr.contains("||")) {
+            return expr;
+        }
+        // Simple qualified reference: strip schema/table prefix, keep last component
+        int dot = expr.lastIndexOf('.');
+        return dot >= 0 ? expr.substring(dot + 1) : expr;
+    }
 
     public Map<String, Map<String, Object>> getStatements() { return Collections.unmodifiableMap(statements); }
     public Map<String, Map<String, Object>> getRoutines()   { return Collections.unmodifiableMap(routines); }

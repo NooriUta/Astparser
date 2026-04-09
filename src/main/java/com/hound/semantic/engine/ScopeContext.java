@@ -166,9 +166,10 @@ public class ScopeContext {
     public Map<String, String> getAliases() { return aliases; }
 
     public String getActiveClause() {
+        if (isMergeInsertPart && isInValuesClause) return "MERGE_INSERT_VALUES";
         if (isInValuesClause)   return "VALUES";
         if (isInJoinContext)    return "JOIN";
-        if (isInUpdateSetExpr)  return "UPDATE_EXPR";
+        if (isInUpdateSetExpr)  return "SET_EXPR";
         if (isMergeInsertPart)  return "MERGE_INSERT";
         if (isMergeUpdatePart)  return "MERGE_UPDATE";
         return statementType != null ? statementType : "UNKNOWN";

@@ -124,6 +124,7 @@ final class RemoteSchemaCommands {
                 "CREATE PROPERTY DaliColumn.alias IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.session_id IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.data_source IF NOT EXISTS STRING",  // v24
+                "CREATE PROPERTY DaliColumn.ordinal_position IF NOT EXISTS INTEGER", // T13
                 // DaliRoutine (v23: +return_type, +line_start; v24: +data_source)
                 "CREATE PROPERTY DaliRoutine.routine_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.routine_name IF NOT EXISTS STRING",
@@ -150,6 +151,8 @@ final class RemoteSchemaCommands {
                 "CREATE PROPERTY DaliAtom.atom_context IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliAtom.parent_context IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliAtom.status IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.warning IF NOT EXISTS STRING",
+                "CREATE PROPERTY DaliAtom.merge_clause IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliAtom.session_id IF NOT EXISTS STRING",
                 // DaliOutputColumn
                 "CREATE PROPERTY DaliOutputColumn.name IF NOT EXISTS STRING",
@@ -222,20 +225,36 @@ final class RemoteSchemaCommands {
                 "CREATE INDEX IF NOT EXISTS ON DaliStatement (short_name) NOTUNIQUE NULL_STRATEGY SKIP",
                 "CREATE INDEX IF NOT EXISTS ON DaliSnippetScript (session_id) NOTUNIQUE NULL_STRATEGY SKIP",
 
-                // FULLTEXT — KeywordAnalyzer (no underscore splitting)
-                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSchema (schema_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliTable (table_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliColumn (column_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (routine_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliSession (file_path) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliStatement (stmt_geoid) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliAtom (atom_text) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) FULL_TEXT" + FT_METADATA,
-                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) FULL_TEXT" + FT_METADATA,
+                // v26 migration: drop old FULL_TEXT indexes so IF NOT EXISTS creates the new LSM_TREE ones.
+                // Safe to remove in v27 once all remote DBs have been upgraded.
+                "DROP INDEX IF EXISTS `DaliApplication[app_name]`",
+                "DROP INDEX IF EXISTS `DaliDatabase[db_name]`",
+                "DROP INDEX IF EXISTS `DaliSchema[schema_name]`",
+                "DROP INDEX IF EXISTS `DaliTable[table_name]`",
+                "DROP INDEX IF EXISTS `DaliColumn[column_name]`",
+                "DROP INDEX IF EXISTS `DaliRoutine[routine_name]`",
+                "DROP INDEX IF EXISTS `DaliPackage[package_name]`",
+                "DROP INDEX IF EXISTS `DaliSession[file_path]`",
+                "DROP INDEX IF EXISTS `DaliStatement[stmt_geoid]`",
+                "DROP INDEX IF EXISTS `DaliAtom[atom_text]`",
+                "DROP INDEX IF EXISTS `DaliParameter[param_name]`",
+                "DROP INDEX IF EXISTS `DaliVariable[var_name]`",
+                "DROP INDEX IF EXISTS `DaliOutputColumn[name]`",
+                // NOTUNIQUE LSM_TREE on name fields (v26: equality lookup support)
+                "CREATE INDEX IF NOT EXISTS ON DaliApplication (app_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliDatabase (db_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliSchema (schema_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliTable (table_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliColumn (column_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliRoutine (routine_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliPackage (package_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliSession (file_path) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliStatement (stmt_geoid) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliAtom (atom_text) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliParameter (param_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliVariable (var_name) NOTUNIQUE NULL_STRATEGY SKIP",
+                "CREATE INDEX IF NOT EXISTS ON DaliOutputColumn (name) NOTUNIQUE NULL_STRATEGY SKIP",
+                // FULLTEXT — per-statement SQL text search (kept intentionally)
                 "CREATE INDEX IF NOT EXISTS ON DaliSnippet (snippet) FULL_TEXT" + FT_METADATA,
                 // DaliSnippetScript.script is intentionally NOT indexed — whole-file field
                 // (up to hundreds of KB) exceeds ArcadeDB's 255 KB page limit for FULL_TEXT

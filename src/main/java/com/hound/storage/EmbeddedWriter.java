@@ -275,6 +275,7 @@ class EmbeddedWriter {
                                     .set("alias",          c.getAlias())
                                     .set("is_output",      c.isOutput())
                                     .set("col_order",      c.getOrder())
+                                    .set("ordinal_position", c.getOrdinalPosition())
                                     .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
                                     .set("data_source",    colMaster ? MASTER : RECONSTRUCTED)
                                     .save();
@@ -293,6 +294,7 @@ class EmbeddedWriter {
                             .set("alias",        c.getAlias())
                             .set("is_output",    c.isOutput())
                             .set("col_order",    c.getOrder())
+                            .set("ordinal_position", c.getOrdinalPosition())
                             .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
                             .set("data_source",  colMaster ? MASTER : RECONSTRUCTED)
                             .save();
@@ -449,8 +451,8 @@ class EmbeddedWriter {
                     MutableVertex tv = tblV.get(st.getKey());
                     if (tv != null) {
                         @SuppressWarnings("unchecked")
-                        List<String> aliases = st.getValue().get("aliases") instanceof List
-                                ? (List<String>) st.getValue().get("aliases") : List.of();
+                        List<String> aliases = st.getValue().get("table_alias") instanceof List
+                                ? (List<String>) st.getValue().get("table_alias") : List.of();
                         sv.newEdge("READS_FROM", tv, true)
                                 .set("aliases", new ArrayList<>(aliases))
                                 .set("session_id", sid).save();
@@ -460,8 +462,8 @@ class EmbeddedWriter {
                     MutableVertex tv = tblV.get(tt.getKey());
                     if (tv != null) {
                         @SuppressWarnings("unchecked")
-                        List<String> aliases = tt.getValue().get("aliases") instanceof List
-                                ? (List<String>) tt.getValue().get("aliases") : List.of();
+                        List<String> aliases = tt.getValue().get("table_alias") instanceof List
+                                ? (List<String>) tt.getValue().get("table_alias") : List.of();
                         sv.newEdge("WRITES_TO", tv, true)
                                 .set("aliases", new ArrayList<>(aliases))
                                 .set("session_id", sid).save();
@@ -570,6 +572,16 @@ class EmbeddedWriter {
                 for (var at : atoms.entrySet()) {
                     Map<String, Object> a = at.getValue();
                     String atomId = md5(stmtGeoid + ":" + at.getKey());
+                    // Detect "Не связано" for column-reference atoms whose DaliColumn is absent from schema
+                    String atomColForWarn = (String) a.get("column_name");
+                    String atomTblForWarn = (String) a.get("table_geoid");
+                    boolean isColRef = Boolean.TRUE.equals(a.get("is_column_reference"));
+                    if (a.get("warning") == null && "Обработано".equals(a.get("status"))
+                            && isColRef && atomTblForWarn != null && atomColForWarn != null
+                            && colV.get(atomTblForWarn + "." + atomColForWarn.toUpperCase()) == null) {
+                        a.put("warning", "Не связано");
+                    }
+
                     MutableVertex aV = db.newVertex("DaliAtom")
                             .set("session_id",            sid)
                             .set("statement_geoid",       stmtGeoid)
@@ -589,6 +601,8 @@ class EmbeddedWriter {
                             .set("column_name",           a.get("column_name"))
                             .set("table_geoid",           a.get("table_geoid"))
                             .set("status",                a.get("status"))
+                            .set("warning",               a.get("warning"))
+                            .set("merge_clause",          a.get("merge_clause"))
                             .set("output_column_sequence",a.get("output_column_sequence"))
                             .set("nested_atoms_count",    a.get("nested_atoms_count"))
                             .save();
@@ -623,6 +637,18 @@ class EmbeddedWriter {
                         MutableVertex ocV2 = ocByKey.get(stmtGeoid + ":" + outSeq);
                         if (ocV2 != null) aV.newEdge("ATOM_PRODUCES", ocV2, true)
                                 .set("session_id", sid).save();
+                    }
+                    // ATOM_PRODUCES for DML target (UPDATE SET / MERGE / INSERT)
+                    String dmlTargetRefProd = (String) a.get("dml_target_ref");
+                    if (dmlTargetRefProd != null) {
+                        MutableVertex acV2 = affColByRef.get(stmtGeoid + ":" + dmlTargetRefProd);
+                        if (acV2 != null) {
+                            String mergeClause = (String) a.get("merge_clause");
+                            var prodEdge = aV.newEdge("ATOM_PRODUCES", acV2, true)
+                                    .set("session_id", sid);
+                            if (mergeClause != null) prodEdge.set("merge_clause", mergeClause);
+                            prodEdge.save();
+                        }
                     }
                     if ("Обработано".equals(a.get("status")) && outSeq != null) {
                         String atomColName2 = (String) a.get("column_name");

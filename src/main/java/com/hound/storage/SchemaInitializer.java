@@ -40,15 +40,16 @@ import org.slf4j.LoggerFactory;
  *   UNIQUE_HASH:   DaliApplication(app_geoid), DaliDatabase(db_geoid),
  *                  DaliSchema(db_name, schema_geoid), DaliTable(db_name, table_geoid),
  *                  DaliColumn(db_name, column_geoid)
- *   NOTUNIQUE LSM: session_id on all vertex types that carry it; DaliStatement(short_name)
- *   FULLTEXT:      table_name, column_name, routine_name, package_name, schema_name,
- *                  db_name, atom_text, param_name, var_name, app_name, output col name,
- *                  session file_path, stmt_geoid, DaliSnippet(snippet)
+ *   NOTUNIQUE LSM: session_id on all vertex types that carry it; DaliStatement(short_name);
+ *                  app_name, db_name, schema_name, table_name, column_name, routine_name,
+ *                  package_name, file_path, stmt_geoid, atom_text, param_name, var_name,
+ *                  output col name (v26: converted from FULLTEXT — equality lookup support)
+ *   FULLTEXT:      DaliSnippet(snippet) only — per-statement SQL text search
  */
 public final class SchemaInitializer {
 
     private static final Logger logger = LoggerFactory.getLogger(SchemaInitializer.class);
-    static final int SCHEMA_VERSION = 25;
+    static final int SCHEMA_VERSION = 26;
 
     // FT_METADATA lives in RemoteSchemaCommands — reuse from there.
     private static final String FT_METADATA = RemoteSchemaCommands.FT_METADATA;
@@ -73,6 +74,23 @@ public final class SchemaInitializer {
                     if (v < 25) {
                         logger.info("v24→v25 migration: dropping broken FULL_TEXT index on DaliSnippetScript(script)");
                         tryDropIndex(db, "DaliSnippetScript[script]");
+                    }
+                    if (v < 26) {
+                        // v25→v26: FULL_TEXT indexes don't support equality lookup ({prop: $val}).
+                        // Convert 13 name-field indexes from FULL_TEXT to NOTUNIQUE LSM_TREE.
+                        // DaliSnippet(snippet) stays FULL_TEXT for SQL text search.
+                        logger.info("v25→v26 migration: converting 13 FULL_TEXT indexes to NOTUNIQUE LSM_TREE");
+                        for (String idx : new String[]{
+                                "DaliApplication[app_name]",  "DaliDatabase[db_name]",
+                                "DaliSchema[schema_name]",    "DaliTable[table_name]",
+                                "DaliColumn[column_name]",    "DaliRoutine[routine_name]",
+                                "DaliPackage[package_name]",  "DaliSession[file_path]",
+                                "DaliStatement[stmt_geoid]",  "DaliAtom[atom_text]",
+                                "DaliParameter[param_name]",  "DaliVariable[var_name]",
+                                "DaliOutputColumn[name]"
+                        }) {
+                            tryDropIndex(db, idx);
+                        }
                     }
                     logger.info("ArcadeDB schema upgrade v{} → v{}", v, SCHEMA_VERSION);
                 }
@@ -153,6 +171,7 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliColumn",      "alias");
         declareStr(schema, "DaliColumn",      "session_id");
         declareStr(schema, "DaliColumn",      "data_source");   // v24: "master"|"reconstructed"
+        declareProp(schema, "DaliColumn",     "ordinal_position", com.arcadedb.schema.Type.INTEGER); // T13
         // Routine
         declareStr(schema, "DaliRoutine",     "routine_geoid");
         declareStr(schema, "DaliRoutine",     "routine_name");
@@ -178,6 +197,8 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliAtom",        "atom_context");
         declareStr(schema, "DaliAtom",        "parent_context");
         declareStr(schema, "DaliAtom",        "status");
+        declareStr(schema, "DaliAtom",        "warning");
+        declareStr(schema, "DaliAtom",        "merge_clause"); // "UPDATE" | "INSERT" for MERGE target atoms
         declareStr(schema, "DaliAtom",        "session_id");
         // Output column
         declareStr(schema, "DaliOutputColumn", "name");
@@ -237,21 +258,27 @@ public final class SchemaInitializer {
         // DaliStatement(short_name) — LSM_TREE to avoid HASH bucket corruption on timeout
         idx(db, "CREATE INDEX IF NOT EXISTS ON DaliStatement (short_name) NOTUNIQUE NULL_STRATEGY SKIP");
 
-        // ── FULLTEXT indexes (KeywordAnalyzer — no underscore splitting) ──
-        ft(db, schema, "DaliApplication",  "app_name");
-        ft(db, schema, "DaliDatabase",     "db_name");
-        ft(db, schema, "DaliSchema",       "schema_name");
-        ft(db, schema, "DaliTable",        "table_name");
-        ft(db, schema, "DaliColumn",       "column_name");
-        ft(db, schema, "DaliRoutine",      "routine_name");
-        ft(db, schema, "DaliPackage",      "package_name");
-        ft(db, schema, "DaliSession",      "file_path");
-        ft(db, schema, "DaliStatement",    "stmt_geoid");
-        ft(db, schema, "DaliAtom",         "atom_text");
-        ft(db, schema, "DaliParameter",    "param_name");
-        ft(db, schema, "DaliVariable",     "var_name");
-        ft(db, schema, "DaliOutputColumn", "name");
-        ft(db, schema, "DaliSnippet",         "snippet");        // per-statement SQL text search
+        // ── NOTUNIQUE LSM_TREE indexes on name fields (v26: converted from FULL_TEXT) ──
+        // FULL_TEXT indexes don't support equality lookup ({prop: $val}) — only CONTAINSTEXT().
+        for (String[] p : new String[][]{
+                {"DaliApplication",  "app_name"},
+                {"DaliDatabase",     "db_name"},
+                {"DaliSchema",       "schema_name"},
+                {"DaliTable",        "table_name"},
+                {"DaliColumn",       "column_name"},
+                {"DaliRoutine",      "routine_name"},
+                {"DaliPackage",      "package_name"},
+                {"DaliSession",      "file_path"},
+                {"DaliStatement",    "stmt_geoid"},
+                {"DaliAtom",         "atom_text"},
+                {"DaliParameter",    "param_name"},
+                {"DaliVariable",     "var_name"},
+                {"DaliOutputColumn", "name"},
+        }) {
+            idx(db, "CREATE INDEX IF NOT EXISTS ON " + p[0] + " (" + p[1] + ") NOTUNIQUE NULL_STRATEGY SKIP");
+        }
+        // ── FULLTEXT index — per-statement SQL text search (kept intentionally) ──
+        ft(db, schema, "DaliSnippet", "snippet");
         // NOTE: DaliSnippetScript.script is intentionally NOT indexed — it stores the full raw
         // file text (up to hundreds of KB) which exceeds ArcadeDB's 255 KB page limit for
         // FULL_TEXT indexes, causing index corruption and multi-GB on-disk bloat (v25 fix).

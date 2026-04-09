@@ -63,9 +63,23 @@ public final class PlSqlTokenMapper {
             Map.entry("NUMERIC_LITERAL",    CanonicalTokenType.NUMERIC_LITERAL),
             Map.entry("APPROXIMATE_NUM_LIT", CanonicalTokenType.APPROX_NUM_LITERAL),
 
-            // Date/Time
+            // Date/Time — literals
             Map.entry("DATE_LITERAL",      CanonicalTokenType.DATE_LITERAL),
             Map.entry("TIMESTAMP_LITERAL", CanonicalTokenType.TIMESTAMP_LITERAL),
+
+            // Date/Time — type keywords (CAST(x AS TIMESTAMP), variable declarations,
+            // INTERVAL '1' DAY, DAY TO SECOND, TIMESTAMP WITH TIME ZONE, etc.)
+            Map.entry("TIMESTAMP", CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("INTERVAL",  CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("DAY",       CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("HOUR",      CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("MINUTE",    CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("SECOND",    CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("YEAR",      CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("MONTH",     CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("ZONE",      CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("LOCAL",     CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
+            Map.entry("TIME",      CanonicalTokenType.KEYWORD_AS_IDENTIFIER),
 
             // Keywords-as-values
             Map.entry("NULL",         CanonicalTokenType.NULL),
