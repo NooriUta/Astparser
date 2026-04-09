@@ -1097,7 +1097,14 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     }
     @Override
     public void exitMerge_element(PlSqlParser.Merge_elementContext ctx) {
-        base.onMergeElementExit();
+        // Pass the RHS expression position range so BSL can post-bind atoms to the MERGE UPDATE target.
+        // Using the expression (not the whole element) excludes the LHS column_name from binding.
+        PlSqlParser.ExpressionContext exprCtx = ctx.expression();
+        base.onMergeElementExit(
+                getStartLine(exprCtx != null ? exprCtx : ctx),
+                getStartCol(exprCtx != null ? exprCtx : ctx),
+                getEndLine(exprCtx != null ? exprCtx : ctx),
+                getEndCol(exprCtx != null ? exprCtx : ctx));
     }
 
     // =========================================================================

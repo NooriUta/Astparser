@@ -810,6 +810,34 @@ public class AtomProcessor {
         }
     }
 
+    /**
+     * G3-MERGE: Binds atoms in the RHS expression range of a MERGE UPDATE SET element
+     * to the corresponding target affected column.
+     * Sets dml_target_ref and merge_clause="UPDATE" on matching atoms.
+     * Called from BaseSemanticListener.onMergeElementExit with the expression's position range.
+     */
+    public void bindAtomsToMergeUpdateTarget(String stmtGeoid,
+            String columnRef, int startLine, int startCol, int endLine, int endCol) {
+        if (stmtGeoid == null || columnRef == null) return;
+        Map<String, Map<String, Object>> stmtAtoms = atomsByStatement.get(stmtGeoid);
+        if (stmtAtoms == null) return;
+        for (var entry : stmtAtoms.entrySet()) {
+            Map<String, Object> atom = entry.getValue();
+            String pos = (String) atom.get("position");
+            if (pos == null) continue;
+            String[] parts = pos.split(":");
+            if (parts.length < 2) continue;
+            try {
+                int al = Integer.parseInt(parts[0]);
+                int ac = Integer.parseInt(parts[1]);
+                if (isPositionInRange(al, ac, startLine, startCol, endLine, endCol)) {
+                    atom.putIfAbsent("dml_target_ref", columnRef);
+                    atom.put("merge_clause", "UPDATE");
+                }
+            } catch (NumberFormatException ignored) { /* skip */ }
+        }
+    }
+
     private boolean isPositionInRange(int line, int col,
                                        int startLine, int startCol,
                                        int endLine, int endCol) {

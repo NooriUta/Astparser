@@ -770,13 +770,35 @@ public abstract class BaseSemanticListener {
             }
         }
         current.put("in_update_set_expr", true);
+        // Propagate to ScopeContext so ScopeManager.getActiveClause() returns "SET_EXPR"
+        // for atoms inside this element's expression (same as regular UPDATE SET does).
+        engine.setUpdateSetExpr(true);
     }
 
-    /** G3: Called at exitMerge_element — clear target column context. */
-    public void onMergeElementExit() {
+    /**
+     * G3: Called at exitMerge_element — clear target column context and post-bind atoms.
+     * Receives the position range of the RHS expression so that bindAtomsToMergeUpdateTarget
+     * can reliably find all atoms in the expression and stamp merge_clause="UPDATE" on them.
+     */
+    public void onMergeElementExit(int exprStartLine, int exprStartCol,
+                                   int exprEndLine,   int exprEndCol) {
         current.put("in_update_set_expr", false);
+        engine.setUpdateSetExpr(false);  // mirror of onMergeElementEnter
+        // Read column_ref BEFORE clearing column_affected
+        @SuppressWarnings("unchecked")
+        Map<String, Object> colAff = (Map<String, Object>) current.get("column_affected");
         current.put("column_affected", null);
         engine.onMergeElementExit();
+        // Post-processing: stamp merge_clause="UPDATE" + dml_target_ref on atoms in expression.
+        // This is analogous to bindAtomsToMergeInsertTarget for the INSERT path.
+        String stmt = engine.getScopeManager().currentStatement();
+        if (stmt != null && colAff != null) {
+            String colRef = (String) colAff.get("column_ref");
+            if (colRef != null) {
+                engine.getAtomProcessor().bindAtomsToMergeUpdateTarget(
+                        stmt, colRef, exprStartLine, exprStartCol, exprEndLine, exprEndCol);
+            }
+        }
     }
 
     /**
