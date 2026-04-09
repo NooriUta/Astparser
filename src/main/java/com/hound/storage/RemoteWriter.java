@@ -751,7 +751,10 @@ class RemoteWriter {
                     String colName = (String) a.get("column_name");
                     if (colName != null) {
                         String colRid = rid.columns.get(tableGeoid + "." + colName.toUpperCase());
-                        if (colRid != null) edgeByRid("FILTER_FLOW", colRid, stmtRid, sid, "filter_type", parentCtx);
+                        if (colRid != null) edgeByRid("FILTER_FLOW", colRid, stmtRid, sid,
+                                "filter_type",     parentCtx,
+                                "statement_geoid", stmtGeoid,
+                                "via_atom",        at.getKey());
                     }
                 }
             }
@@ -770,9 +773,12 @@ class RemoteWriter {
         for (var e : str.getStatements().entrySet()) {
             String fromRid = rid.statements.get(e.getKey());
             if (fromRid == null) continue;
-            for (String sqGeoid : e.getValue().getSourceSubqueries().keySet()) {
-                String toRid = rid.statements.get(sqGeoid);
-                if (toRid != null) edgeByRid("USES_SUBQUERY", fromRid, toRid, sid);
+            for (var sq : e.getValue().getSourceSubqueries().entrySet()) {
+                String toRid = rid.statements.get(sq.getKey());
+                if (toRid == null) continue;
+                edgeByRid("USES_SUBQUERY", fromRid, toRid, sid,
+                        "aliases",       new ArrayList<>(sq.getValue().subqueryAliases()),
+                        "subquery_type", sq.getValue().subqueryType());
             }
         }
 
@@ -1137,6 +1143,18 @@ class RemoteWriter {
                     "CREATE EDGE " + edgeType + " FROM " + fromRid + " TO " + toRid
                     + " SET session_id = :sid, " + extraField + " = :ev",
                     Map.of("sid", sid, "ev", extraVal));
+        } catch (Exception e) {
+            logger.debug("edgeByRid {} failed: {}", edgeType, e.getMessage());
+        }
+    }
+
+    private void edgeByRid(String edgeType, String fromRid, String toRid, String sid,
+                            String f1, Object v1, String f2, Object v2) {
+        try {
+            db.command("sql",
+                    "CREATE EDGE " + edgeType + " FROM " + fromRid + " TO " + toRid
+                    + " SET session_id = :sid, " + f1 + " = :v1, " + f2 + " = :v2",
+                    Map.of("sid", sid, "v1", v1 != null ? v1 : List.of(), "v2", v2 != null ? v2 : ""));
         } catch (Exception e) {
             logger.debug("edgeByRid {} failed: {}", edgeType, e.getMessage());
         }

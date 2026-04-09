@@ -475,6 +475,7 @@ class EmbeddedWriter {
                         sv.newEdge("USES_SUBQUERY", sqV, true)
                                 .set("aliases",       new ArrayList<>(sq.getValue().subqueryAliases()))
                                 .set("subquery_type", sq.getValue().subqueryType())
+                                .set("session_id",    sid)
                                 .save();
                     }
                 }
@@ -492,7 +493,10 @@ class EmbeddedWriter {
                             .set("source_type",     col.get("source_type"))
                             .set("table_ref",       col.get("table_ref"))
                             .save();
-                    sv.newEdge("HAS_OUTPUT_COL", ocV, true);
+                    sv.newEdge("HAS_OUTPUT_COL", ocV, true)
+                            .set("session_id",      sid)
+                            .set("statement_geoid", e.getKey())
+                            .save();
                     Object order = col.get("order");
                     if (order != null) ocByKey.put(e.getKey() + ":" + order, ocV);
                     String ocName = (String) col.get("name");
@@ -513,14 +517,19 @@ class EmbeddedWriter {
                             .set("conditions",         j.conditions())
                             .set("line_start",         j.lineStart())
                             .save();
-                    sv.newEdge("HAS_JOIN", jV, true);
+                    sv.newEdge("HAS_JOIN", jV, true)
+                            .set("session_id",      sid)
+                            .set("statement_geoid", e.getKey())
+                            .save();
                     if (j.sourceTableGeoid() != null) {
                         MutableVertex srcTbl = tblV.get(j.sourceTableGeoid());
-                        if (srcTbl != null) jV.newEdge("JOIN_SOURCE_TABLE", srcTbl, true);
+                        if (srcTbl != null) jV.newEdge("JOIN_SOURCE_TABLE", srcTbl, true)
+                                .set("session_id", sid).save();
                     }
                     if (j.targetTableGeoid() != null) {
                         MutableVertex tgtTbl = tblV.get(j.targetTableGeoid());
-                        if (tgtTbl != null) jV.newEdge("JOIN_TARGET_TABLE", tgtTbl, true);
+                        if (tgtTbl != null) jV.newEdge("JOIN_TARGET_TABLE", tgtTbl, true)
+                                .set("session_id", sid).save();
                     }
                 }
 

@@ -523,7 +523,8 @@ public class JsonlBatchBuilder {
             int joinIdx = 0;
             for (JoinInfo j : e.getValue().getJoins()) {
                 String joinExtId = e.getKey() + ":JOIN:" + j.lineStart() + ":" + joinIdx;
-                b.appendEdge("HAS_JOIN", e.getKey(), joinExtId, sidProps);
+                b.appendEdge("HAS_JOIN", e.getKey(), joinExtId,
+                        mapOf("session_id", sid, "statement_geoid", e.getKey()));
                 if (j.sourceTableGeoid() != null)
                     b.appendEdge("JOIN_SOURCE_TABLE", joinExtId, j.sourceTableGeoid(), sidProps);
                 if (j.targetTableGeoid() != null)
@@ -575,8 +576,12 @@ public class JsonlBatchBuilder {
 
         // Usage: USES_SUBQUERY
         for (var e : str.getStatements().entrySet()) {
-            for (String sqGeoid : e.getValue().getSourceSubqueries().keySet())
-                b.appendEdge("USES_SUBQUERY", e.getKey(), sqGeoid, sidProps);
+            for (var sq : e.getValue().getSourceSubqueries().entrySet()) {
+                Map<String, Object> sqProps = new java.util.HashMap<>(sidProps);
+                sqProps.put("aliases",       new ArrayList<>(sq.getValue().subqueryAliases()));
+                sqProps.put("subquery_type", sq.getValue().subqueryType());
+                b.appendEdge("USES_SUBQUERY", e.getKey(), sq.getKey(), sqProps);
+            }
         }
 
         // Atoms: HAS_ATOM, ATOM_REF_TABLE, ATOM_REF_COLUMN, ATOM_REF_STMT, ATOM_REF_OUTPUT_COL
@@ -1144,7 +1149,8 @@ public class JsonlBatchBuilder {
             int joinIdx = 0;
             for (JoinInfo j : e.getValue().getJoins()) {
                 String joinExtId = e.getKey() + ":JOIN:" + j.lineStart() + ":" + joinIdx;
-                b.appendEdge("HAS_JOIN", e.getKey(), joinExtId, sidProps);
+                b.appendEdge("HAS_JOIN", e.getKey(), joinExtId,
+                        mapOf("session_id", sid, "statement_geoid", e.getKey()));
                 if (j.sourceTableGeoid() != null)
                     b.appendEdge("JOIN_SOURCE_TABLE", joinExtId, j.sourceTableGeoid(), sidProps);
                 if (j.targetTableGeoid() != null)
@@ -1196,8 +1202,12 @@ public class JsonlBatchBuilder {
 
         // USES_SUBQUERY
         for (var e : str.getStatements().entrySet()) {
-            for (String sqGeoid : e.getValue().getSourceSubqueries().keySet())
-                b.appendEdge("USES_SUBQUERY", e.getKey(), sqGeoid, sidProps);
+            for (var sq : e.getValue().getSourceSubqueries().entrySet()) {
+                Map<String, Object> sqProps = new java.util.HashMap<>(sidProps);
+                sqProps.put("aliases",       new ArrayList<>(sq.getValue().subqueryAliases()));
+                sqProps.put("subquery_type", sq.getValue().subqueryType());
+                b.appendEdge("USES_SUBQUERY", e.getKey(), sq.getKey(), sqProps);
+            }
         }
 
         // Atom edges: HAS_ATOM, ATOM_REF_TABLE, ATOM_REF_COLUMN, ATOM_REF_STMT,
