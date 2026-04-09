@@ -171,6 +171,7 @@ public final class SchemaInitializer {
         declareStr(schema, "DaliColumn",      "alias");
         declareStr(schema, "DaliColumn",      "session_id");
         declareStr(schema, "DaliColumn",      "data_source");   // v24: "master"|"reconstructed"
+        declareProp(schema, "DaliColumn",     "ordinal_position", com.arcadedb.schema.Type.INTEGER); // T13
         // Routine
         declareStr(schema, "DaliRoutine",     "routine_geoid");
         declareStr(schema, "DaliRoutine",     "routine_name");

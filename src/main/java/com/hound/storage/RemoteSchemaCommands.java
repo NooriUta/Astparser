@@ -124,6 +124,7 @@ final class RemoteSchemaCommands {
                 "CREATE PROPERTY DaliColumn.alias IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.session_id IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliColumn.data_source IF NOT EXISTS STRING",  // v24
+                "CREATE PROPERTY DaliColumn.ordinal_position IF NOT EXISTS INTEGER", // T13
                 // DaliRoutine (v23: +return_type, +line_start; v24: +data_source)
                 "CREATE PROPERTY DaliRoutine.routine_geoid IF NOT EXISTS STRING",
                 "CREATE PROPERTY DaliRoutine.routine_name IF NOT EXISTS STRING",

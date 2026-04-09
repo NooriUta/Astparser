@@ -347,9 +347,10 @@ class RemoteWriter {
             if (pool != null) {
                 String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
                 if (!pool.hasColumnRid(cg)) {
-                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?, data_source=?",
+                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, ordinal_position=?, used_in_statements=?, data_source=?",
                             dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
                             c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder(),
+                            c.getOrdinalPosition(),
                             toJson(new ArrayList<>(c.getUsedInStatements())),
                             colMaster ? MASTER : RECONSTRUCTED);
                     pool.putColumnRid(cg, cg);
@@ -359,9 +360,10 @@ class RemoteWriter {
                             MASTER, dbName, e.getKey(), MASTER);
                 }
             } else {
-                rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?, data_source=?",
+                rcmd("INSERT INTO DaliColumn SET session_id=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, ordinal_position=?, used_in_statements=?, data_source=?",
                         sid, e.getKey(), c.getTableGeoid(), c.getColumnName(), c.getExpression(), c.getAlias(),
-                        c.isOutput(), c.getOrder(), toJson(new ArrayList<>(c.getUsedInStatements())),
+                        c.isOutput(), c.getOrder(), c.getOrdinalPosition(),
+                        toJson(new ArrayList<>(c.getUsedInStatements())),
                         colMaster ? MASTER : RECONSTRUCTED);
             }
         }
@@ -939,9 +941,10 @@ class RemoteWriter {
                 ColumnInfo c = e.getValue();
                 String cg = pool.canonicalCol(c.getTableGeoid(), c.getColumnName());
                 if (!pool.hasColumnRid(cg)) {
-                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, used_in_statements=?",
+                    rcmd("INSERT INTO DaliColumn SET db_name=?, column_geoid=?, table_geoid=?, column_name=?, expression=?, alias=?, is_output=?, col_order=?, ordinal_position=?, used_in_statements=?",
                             dbName, e.getKey(), c.getTableGeoid(), c.getColumnName(),
                             c.getExpression(), c.getAlias(), c.isOutput(), c.getOrder(),
+                            c.getOrdinalPosition(),
                             toJson(new ArrayList<>(c.getUsedInStatements())));
                     pool.putColumnRid(cg, cg);
                     newColumnGeoids.add(e.getKey());

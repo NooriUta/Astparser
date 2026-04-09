@@ -959,6 +959,63 @@ public abstract class BaseSemanticListener {
         engine.onViewColumnAliases(columns);
     }
 
+    // ═══ T14: CREATE TABLE / ALTER TABLE — DDL column registration ═══
+
+    /**
+     * T14: Called at enterCreate_table — registers the table, sets DDL column context.
+     * Subsequent enterColumn_definition events will assign ordinal positions in DDL order.
+     */
+    public void onCreateTableEnter(String schemaName, String tableName, String snippet,
+                                   int lineStart, int lineEnd) {
+        String schema = (schemaName != null && !schemaName.isBlank()) ? schemaName : currentSchema();
+        String geoid = initTable(tableName, null, schema, "TABLE");
+        current.put("ddl_table_geoid", geoid);
+        current.put("ddl_col_ordinal", 0);  // explicit ordinal tracking for CREATE TABLE
+        onStatementEnter("CREATE_TABLE", snippet, lineStart, lineEnd);
+    }
+
+    /** T14: Called at exitCreate_table — clears DDL column context. */
+    public void onCreateTableExit() {
+        current.put("ddl_table_geoid", null);
+        current.put("ddl_col_ordinal", null);
+        onStatementExit();
+    }
+
+    /**
+     * T14: Called at enterAlter_table — sets DDL context for ALTER TABLE ADD column handling.
+     * Does not track explicit ordinals (uses auto-increment to append after existing columns).
+     */
+    public void onAlterTableEnter(String tableRef) {
+        String geoid = initTable(tableRef, null, currentSchema(), "TABLE");
+        current.put("ddl_table_geoid", geoid);
+        // No ddl_col_ordinal — ALTER TABLE uses addColumn auto-increment
+    }
+
+    /** T14: Called at exitAlter_table — clears DDL column context. */
+    public void onAlterTableExit() {
+        current.put("ddl_table_geoid", null);
+    }
+
+    /**
+     * T14: Called at enterColumn_definition when inside CREATE TABLE or ALTER TABLE ADD context.
+     * For CREATE TABLE: registers column with explicit ordinal_position from DDL declaration order.
+     * For ALTER TABLE ADD: registers column with auto-increment ordinal_position.
+     */
+    public void onDdlColumnDefinition(String columnName) {
+        String tableGeoid = (String) current.get("ddl_table_geoid");
+        if (tableGeoid == null || columnName == null || columnName.isBlank()) return;
+        Object ordinalObj = current.get("ddl_col_ordinal");
+        if (ordinalObj != null) {
+            // CREATE TABLE: explicit ordinal from DDL declaration order
+            int ordinal = (Integer) ordinalObj + 1;
+            current.put("ddl_col_ordinal", ordinal);
+            engine.getBuilder().addColumnWithOrdinal(tableGeoid, columnName, null, null, ordinal);
+        } else {
+            // ALTER TABLE ADD: auto-increment ordinal (appended after existing columns)
+            engine.getBuilder().addColumn(tableGeoid, columnName, null, null);
+        }
+    }
+
     public void onColumnAlias(String alias) {
         current.put("column_alias", alias != null ? cleanIdentifier(alias) : null);
     }

@@ -196,7 +196,8 @@ public class JsonlBatchBuilder {
                     "expression", c.getExpression(),
                     "alias", c.getAlias(),
                     "is_output", c.isOutput(),
-                    "col_order", c.getOrder()
+                    "col_order", c.getOrder(),
+                    "ordinal_position", c.getOrdinalPosition()
             ));
         }
 

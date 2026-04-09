@@ -1333,6 +1333,59 @@ public class PlSqlSemanticListener extends PlSqlParserBaseListener {
     }
 
     // =========================================================================
+    // T14: CREATE TABLE / ALTER TABLE — DDL column registration with ordinal_position
+    // =========================================================================
+
+    @Override
+    public void enterCreate_table(PlSqlParser.Create_tableContext ctx) {
+        if (ctx == null) return;
+        // Extract optional schema name
+        String schemaName = null;
+        if (ctx.schema_name() != null) {
+            schemaName = BaseSemanticListener.cleanIdentifier(ctx.schema_name().getText());
+        }
+        // Extract table name
+        String tableName = ctx.table_name() != null
+                ? BaseSemanticListener.cleanIdentifier(ctx.table_name().getText())
+                : null;
+        if (tableName == null || tableName.isBlank()) return;
+        base.onCreateTableEnter(schemaName, tableName, extract(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitCreate_table(PlSqlParser.Create_tableContext ctx) {
+        base.onCreateTableExit();
+    }
+
+    @Override
+    public void enterAlter_table(PlSqlParser.Alter_tableContext ctx) {
+        if (ctx == null || ctx.tableview_name() == null) return;
+        String fullName = BaseSemanticListener.cleanIdentifier(ctx.tableview_name().getText());
+        if (fullName == null || fullName.isBlank()) return;
+        base.onAlterTableEnter(fullName);
+        base.onStatementEnter("ALTER_TABLE", extract(ctx), getStartLine(ctx), getEndLine(ctx));
+    }
+
+    @Override
+    public void exitAlter_table(PlSqlParser.Alter_tableContext ctx) {
+        base.onAlterTableExit();
+        base.onStatementExit();
+    }
+
+    /**
+     * T14: Fires for every column_definition in the parse tree.
+     * Only acts when inside a DDL context (enterCreate_table or enterAlter_table set ddl_table_geoid).
+     */
+    @Override
+    public void enterColumn_definition(PlSqlParser.Column_definitionContext ctx) {
+        if (ctx == null || ctx.column_name() == null) return;
+        String colName = BaseSemanticListener.cleanColumnName(ctx.column_name().getText());
+        if (colName != null && !colName.isBlank()) {
+            base.onDdlColumnDefinition(colName);
+        }
+    }
+
+    // =========================================================================
     // HELPERS
     // =========================================================================
 

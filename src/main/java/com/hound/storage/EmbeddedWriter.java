@@ -275,6 +275,7 @@ class EmbeddedWriter {
                                     .set("alias",          c.getAlias())
                                     .set("is_output",      c.isOutput())
                                     .set("col_order",      c.getOrder())
+                                    .set("ordinal_position", c.getOrdinalPosition())
                                     .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
                                     .set("data_source",    colMaster ? MASTER : RECONSTRUCTED)
                                     .save();
@@ -293,6 +294,7 @@ class EmbeddedWriter {
                             .set("alias",        c.getAlias())
                             .set("is_output",    c.isOutput())
                             .set("col_order",    c.getOrder())
+                            .set("ordinal_position", c.getOrdinalPosition())
                             .set("used_in_statements", new ArrayList<>(c.getUsedInStatements()))
                             .set("data_source",  colMaster ? MASTER : RECONSTRUCTED)
                             .save();
